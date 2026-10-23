@@ -41,6 +41,8 @@
   const stateMark = state => h('span', { class: `st ${STATE[state][0]}` }, STATE[state][1]);
   const typeMark = type => h('span', { class: 'ty' }, TYPE[type] ?? type);
   const newTag = () => h('span', { class: 'newtag' }, '刚改');
+  // Stable IDs are what agents use in tool calls; showing them lets the human name a node.
+  const idTag = id => h('code', { class: 'tid', title: id }, id);
 
   const route = /^\/maps\/([^/]+)$/.exec(location.pathname);
   let mapId = null;
@@ -136,7 +138,7 @@
     if (!view) return;
     document.title = `${view.title} · Wayfinder`;
     $('title').textContent = view.title;
-    $('rev').replaceChildren(h('b', null, `修订 ${view.revision}`), ` · ${fmt(view.occurredAt)} · ${view.clientId} 写入`);
+    $('rev').replaceChildren(idTag(view.mapId), ' ', h('b', null, `修订 ${view.revision}`), ` · ${fmt(view.occurredAt)} · ${view.clientId} 写入`);
     // A new drawing must not move the reader: keep the map's and the page's scroll position.
     const oldGraph = $('main').querySelector('.graph');
     const kept = oldGraph ? { left: oldGraph.scrollLeft, top: oldGraph.scrollTop } : null;
@@ -156,7 +158,7 @@
   function summary(latest) {
     const counts = new Map(), parts = [];
     const count = key => counts.set(key, (counts.get(key) ?? 0) + 1);
-    const named = (verb, change) => parts.push(`${verb}「${change.label ?? change.subjectId}」`);
+    const named = (verb, change) => parts.push(change.label ? `${verb} ${change.subjectId}「${change.label}」` : `${verb} ${change.subjectId}`);
     for (const change of latest) {
       switch (change.kind) {
         case 'map.create': parts.push('建了这张地图，定下目的地'); break;
@@ -281,7 +283,8 @@
       const box = pos.get(ticket.id), isNew = changed.has(ticket.id);
       return h('button', { type: 'button', class: `tk ${STATE[ticket.state][0]}${isNew ? ` new${previous ? ' pulse' : ''}` : ''}${selected === `ticket:${ticket.id}` ? ' sel' : ''}`,
         dataset: { id: `ticket:${ticket.id}` }, style: { left: px(box.x), top: px(box.y), width: px(box.w), height: px(box.h) } },
-      h('span', { class: 'm' }, stateMark(ticket.state), typeMark(ticket.type), isNew ? newTag() : null),
+      // The orange outline marks a just-changed card; its meta row keeps state, type and ID on one line.
+      h('span', { class: 'm' }, stateMark(ticket.state), typeMark(ticket.type), idTag(ticket.id)),
       h('span', { class: 't' }, ticket.title), h('span', { class: 's' }, line ?? ''));
     });
 
@@ -300,7 +303,7 @@
         blobs(zx, zy + i * CH - 10, DW, CH + 20, 4, 11 + i)))) : null;
     const fogTexts = fogs.map((item, i) => h('button', { type: 'button', class: `fogtxt${item.out ? ' fog-out' : added.has(item.id) ? ' fog-in' : ''}${selected === `fog:${item.id}` ? ' sel' : ''}`,
       dataset: { id: `fog:${item.id}` }, style: { left: px(zx), top: px(zy + i * CH), width: px(DW), height: px(CH - 6) } },
-    h('b', null, '迷雾', changedFog.has(item.id) ? newTag() : null), h('span', { class: 'x' }, item.text)));
+    h('b', null, '迷雾', changedFog.has(item.id) ? newTag() : null, idTag(item.id)), h('span', { class: 'x' }, item.text)));
 
     return h('div', { class: 'graph' }, h('div', { class: 'gcanvas', style: { width: px(width), height: px(height) } },
       lines, heads, blank, cards, destination, fogLayer, fogTexts));
@@ -309,7 +312,7 @@
   function outside() {
     const changed = new Set(view.latest.filter(change => change.kind.startsWith('scope.')).map(change => change.subjectId));
     return h('section', { class: 'outside' }, h('h2', null, '地图之外 · 明确不做的'), view.scopeExclusions.length
-      ? h('ul', null, view.scopeExclusions.map(item => h('li', null, item.text, changed.has(item.id) ? [' ', newTag()] : null)))
+      ? h('ul', null, view.scopeExclusions.map(item => h('li', null, idTag(item.id), ' ', item.text, changed.has(item.id) ? [' ', newTag()] : null)))
       : h('span', null, '没有'));
   }
 
@@ -355,7 +358,7 @@
   function fogDetail(fogId) {
     const item = view.fog.find(candidate => candidate.id === fogId);
     if (!item) return [h('h2', null, '迷雾'), h('p', { class: 'hint' }, '这片迷雾已经散了。')];
-    return [h('h2', null, '迷雾'), h('p', null, item.text), referenceList('来源', item.references),
+    return [h('div', { class: 'm' }, idTag(item.id)), h('h2', null, '迷雾'), h('p', null, item.text), referenceList('来源', item.references),
       lazy(`fog:${fogId}`, data => [h('h3', null, '出现于'), h('p', null, data.appearedAt ? stamp(data.appearedAt) : '—')]),
       h('p', { class: 'hint' }, '在范围内，但还提不成问题。前面的问题定下后，它会变成新问题，或者直接散去。')];
   }
@@ -364,8 +367,8 @@
     const byId = new Map(view.tickets.map(ticket => [ticket.id, ticket]));
     const ticket = byId.get(ticketId);
     if (!ticket) return null;
-    const link = id => h('li', null, h('button', { type: 'button', class: 'lnk', dataset: { id: `ticket:${id}` } }, byId.get(id)?.title ?? id), ' ', byId.has(id) ? stateMark(byId.get(id).state) : null);
-    const out = [h('div', { class: 'm' }, stateMark(ticket.state), typeMark(ticket.type)), h('h2', null, ticket.title), h('h3', null, '问题'), h('p', null, ticket.question)];
+    const link = id => h('li', null, idTag(id), ' ', h('button', { type: 'button', class: 'lnk', dataset: { id: `ticket:${id}` } }, byId.get(id)?.title ?? id), ' ', byId.has(id) ? stateMark(byId.get(id).state) : null);
+    const out = [h('div', { class: 'm' }, stateMark(ticket.state), typeMark(ticket.type), idTag(ticket.id)), h('h2', null, ticket.title), h('h3', null, '问题'), h('p', null, ticket.question)];
     if (ticket.state === 'inProgress') out.push(h('h3', null, '谁在处理'), h('p', null, ticket.claimantId));
     if (ticket.prerequisites.length) out.push(h('h3', null, '前置'), h('ul', null, ticket.prerequisites.map(link)));
     if (ticket.dependents.length) out.push(h('h3', null, '它定下后才能开始'), h('ul', null, ticket.dependents.map(link)));

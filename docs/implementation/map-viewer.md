@@ -61,6 +61,7 @@ The live user tried the viewer against the acceptance copy with an interactive C
 
 - Clicking a Ticket, the Destination or Fog rebuilt the drawing, which reset the Map's horizontal scroll to the start. Selection now only restyles the drawing and the details panel. A new Revision still redraws, but keeps the Map's and the page's scroll position. A selected element is scrolled into view only when it is not fully visible.
 - On windows about 1,000 px wide the fixed details panel covered the right side of the Map, where Fog and the Destination sit. While the panel is open the page now gives up that width.
+- The user asked to see node IDs. Ticket cards, Fog, Scope Exclusions, details, the change summary and the header now show the stable IDs that agents use in tool calls, so the human can name a node in conversation. A long ID is shortened on its card and shown in full on hover and in details. To fit the ID, Ticket cards drop the 「刚改」 text; the orange outline still marks them.
 
 Both were checked in headless Chromium at 1,000 px: four selections, a details-panel link and a new Revision left the scroll position where the reader put it, and every element stayed clickable.
 
