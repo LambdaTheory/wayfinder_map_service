@@ -1,5 +1,5 @@
 ---
-workflowVersion: 2.1.0
+workflowVersion: 2.2.0
 ---
 
 # New exploration Maps through Wayfinder MCP
@@ -10,12 +10,14 @@ Wayfinder MCP alone owns Map state; if down, stop—no fallback. Before create, 
 
 <!-- wayfinder:instructions-summary:start -->
 Use `map_create`, `map_list`, `map_read`, and `map_apply` only. Retain stable Map and Claimant IDs plus each committed Revision within the logical session. Create specified Tickets before Dependencies in one ordered batch, keep imprecise uncertainty in Fog, and record typed Settlements with compact Evidence, References, and Provenance. Construct each command completely from the tool input schema before calling; validation failures are not a field-discovery mechanism. Resources and Prompts are optional explanations; correctness does not depend on reading them.
+
+Method: a Map plans the route to its Destination; it does not do the work. Settle the Destination with the human before `map_create`. Each Ticket is one decision that can be stated precisely now; leave the rest in Fog. A Ticket question states only the question: no recommended answer, conversation or later outcome, and settling never rewrites it. The answer lives only in the Settlement; Notes hold standing context and constraints, never decisions. Research surfaces facts a pending decision needs, not the whole plan. A task only unblocks a decision (access, measurement) and never builds the Destination; build phases belong in the Destination's deliverable. Resolve one Ticket per logical session, except independent research, then report and stop. A Ticket found beyond the Destination is never settled as a decision: release its Claim, add a Scope Exclusion and tell the human.
 <!-- wayfinder:instructions-summary:end -->
 
 ## Generated tool guidance
 
 <!-- wayfinder:tool:map_create:start -->
-Create one new stable-ID Map at Revision 1 after `map_list` has been paged to the end and confirmed the intended Map does not exist. Titles are not handles. On a duplicate or uncertain result, discover and `map_read`; never create a replacement. Then use the returned Revision in one ordered `map_apply` that publishes current Tickets before Dependencies, Fog, and Scope Exclusions. If the result has `viewerUrl`, give it to the human once.
+Only after the human has confirmed the Destination, create one new stable-ID Map at Revision 1 after `map_list` has been paged to the end and confirmed the intended Map does not exist. Titles are not handles. On a duplicate or uncertain result, discover and `map_read`; never create a replacement. Then use the returned Revision in one ordered `map_apply` that publishes current Tickets before Dependencies, Fog, and Scope Exclusions. If the result has `viewerUrl`, give it to the human once.
 <!-- wayfinder:tool:map_create:end -->
 
 <!-- wayfinder:tool:map_list:start -->
@@ -27,7 +29,7 @@ Read the authoritative current full Revision by omitting `revision`, or explicit
 <!-- wayfinder:tool:map_read:end -->
 
 <!-- wayfinder:tool:map_apply:start -->
-Atomically apply complete ordered commands only against the latest observed `expectedRevision`; never probe required fields with partial calls. Claim shape: `{"kind":"claim.acquire","ticketId":"...","claimantId":"..."}`. Settle shape: `{"kind":"ticket.settle","ticketId":"...","ticketType":"research|task|grilling|prototype","claimantId":"...","settlement":{"outcome":{...},"evidence":[...],"references":[...],"provenance":{"method":"...","sources":[...]},"extensions":{}}}`. Outcomes are `finding` with `statement` and optional `limitations` for research, `completion` with `statement` and `resultingFacts` for task, or `decision` with `statement` and `rationale` for grilling/prototype. Every Reference/source is an object `{"locator":"...","label":"..."}` (`label` optional), never a string. Evidence shape is `{"statement":"...","references":[...],"provenance":{"method":"...","sources":[...]},"extensions":{}}`; Provenance is required when Evidence references are empty. Research requires at least one Evidence or Reference. Work only a returned Frontier Ticket and Claim it before work; HITL decisions require the live human verdict. A Conflict voids the rejected request: reread, report the new Revision, and stop until the human issues a new request after seeing it. The stale instruction cannot authorize a later write. On proven non-publication or unknown outcome, reread and never auto-retry, replay, merge, take over, or fall back.
+Atomically apply complete ordered commands only against the latest observed `expectedRevision`; never probe required fields with partial calls. Claim shape: `{"kind":"claim.acquire","ticketId":"...","claimantId":"..."}`. Settle shape: `{"kind":"ticket.settle","ticketId":"...","ticketType":"research|task|grilling|prototype","claimantId":"...","settlement":{"outcome":{...},"evidence":[...],"references":[...],"provenance":{"method":"...","sources":[...]},"extensions":{}}}`. Outcomes are `finding` with `statement` and optional `limitations` for research, `completion` with `statement` and `resultingFacts` for task, or `decision` with `statement` and `rationale` for grilling/prototype. Every Reference/source is an object `{"locator":"...","label":"..."}` (`label` optional), never a string. Evidence shape is `{"statement":"...","references":[...],"provenance":{"method":"...","sources":[...]},"extensions":{}}`; Provenance is required when Evidence references are empty. Research requires at least one Evidence or Reference. Work only a returned Frontier Ticket and Claim it before work; HITL decisions require the live human verdict. Settle with the Ticket's question unchanged; never move answers, recommendations or conversation into questions or Notes. A Conflict voids the rejected request: reread, report the new Revision, and stop until the human issues a new request after seeing it. The stale instruction cannot authorize a later write. On proven non-publication or unknown outcome, reread and never auto-retry, replay, merge, take over, or fall back.
 <!-- wayfinder:tool:map_apply:end -->
 
 ## Optional Prompt entry
