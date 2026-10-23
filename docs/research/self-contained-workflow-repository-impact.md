@@ -7,7 +7,7 @@ Question: Given the settled self-contained workflow, publication/versioning, and
 
 This is a product-interface and release-contract change, not a Map-domain change. The implementation must make the accepted exploration workflow available from the MCP server itself while retaining exactly four business tools. The authoritative Markdown remains `docs/agents/exploration-mcp.md`; a deterministic build extracts server instructions, per-tool descriptions, the optional Prompt, and a runtime Resource asset from named sections in that file. The built service publishes workflow version `1.0.0`, a stable Resource URI and a versioned Resource URI, and holds one immutable workflow contract for its process lifetime.
 
-The accepted product and local-slice specifications must be amended before implementation. The implementation then needs a workflow extraction/publication module, MCP capability handlers, build gates, protocol/HTTP tests, and one new cross-client acceptance record. Existing M1, persistence, and historical acceptance documents remain intact. A new ADR is warranted; a new `CONTEXT.md` term is not.
+The accepted product and local-slice specifications must be amended before implementation. The implementation then needs a workflow extraction/publication module, MCP capability handlers, build gates, protocol/HTTP tests, and one new cross-client acceptance record. Existing M1, persistence, and historical acceptance documents remain intact. A new ADR is warranted; a new `GLOSSARY.md` term is not.
 
 ## Required changes
 
@@ -87,11 +87,11 @@ Create `docs/adr/0003-mcp-service-carries-the-versioned-exploration-workflow.md`
 
 One focused ADR is enough. It should record the stable architectural principle and principal rejected alternatives, not the detailed test matrix. It reinforces rather than supersedes ADR 0001: authoritative Map state still lives in the service, not files/skills/conversation ([`docs/adr/0001-remote-map-is-authoritative.md`, lines 5–17](../adr/0001-remote-map-is-authoritative.md)). It also reinforces ADR 0002: the four headless tools remain the primary business seam while skills and richer MCP surfaces are adapters/optional projections ([`docs/adr/0002-mcp-tools-are-the-primary-interface.md`, lines 5–17](../adr/0002-mcp-tools-are-the-primary-interface.md)). Neither existing ADR needs editing or supersession metadata.
 
-### Do not add a `CONTEXT.md` term
+### Do not add a `GLOSSARY.md` term
 
-`workflowVersion`, self-contained workflow, compatible client, initialization instructions, Resource, and Prompt are protocol, packaging, release, or acceptance concepts—not concepts unique to the persistent decision-map domain. The glossary is explicitly limited to domain-specific language ([`docs/agents/domain.md`, lines 3–9](../agents/domain.md); [context format, lines 24–28](../../.agents/skills/domain-modeling/CONTEXT-FORMAT.md)). The current context already defines the Map model completely enough for this change ([`CONTEXT.md`, lines 1–85](../../CONTEXT.md)).
+`workflowVersion`, self-contained workflow, compatible client, initialization instructions, Resource, and Prompt are protocol, packaging, release, or acceptance concepts—not concepts unique to the persistent decision-map domain. The glossary is explicitly limited to domain-specific language ([`docs/agents/domain.md`, lines 3–9](../agents/domain.md); [glossary format, lines 27–30](../../.agents/skills/domain-modeling/GLOSSARY-FORMAT.md)). The current context already defines the Map model completely enough for this change ([`GLOSSARY.md`, lines 1–85](../../GLOSSARY.md)).
 
-Keep the name `workflowVersion` explicit everywhere. A Map **Revision** already means one immutable accepted Map change ([`CONTEXT.md`, lines 71–73](../../CONTEXT.md)); calling the workflow SemVer a Revision or version without qualification would blur two different concepts. No glossary edit is required.
+Keep the name `workflowVersion` explicit everywhere. A Map **Revision** already means one immutable accepted Map change ([`GLOSSARY.md`, lines 71–73](../../GLOSSARY.md)); calling the workflow SemVer a Revision or version without qualification would blur two different concepts. No glossary edit is required.
 
 ## Optional changes and explicit non-changes
 
