@@ -137,10 +137,17 @@
     document.title = `${view.title} · Wayfinder`;
     $('title').textContent = view.title;
     $('rev').replaceChildren(h('b', null, `修订 ${view.revision}`), ` · ${fmt(view.occurredAt)} · ${view.clientId} 写入`);
+    // A new drawing must not move the reader: keep the map's and the page's scroll position.
+    const oldGraph = $('main').querySelector('.graph');
+    const kept = oldGraph ? { left: oldGraph.scrollLeft, top: oldGraph.scrollTop } : null;
+    const pageY = scrollY;
     $('main').replaceChildren(
       h('div', { class: 'change' }, h('span', { class: 'k' }, `修订 ${view.revision} 改了`), h('span', null, summary(view.latest))),
       h('div', { class: 'mapbox card-box' }, graph(previous)),
       h('div', { class: 'below' }, outside(), legend()));
+    const newGraph = $('main').querySelector('.graph');
+    if (kept && newGraph) { newGraph.scrollLeft = kept.left; newGraph.scrollTop = kept.top; }
+    if (scrollY !== pageY) scrollTo(scrollX, pageY);
     renderDetail();
     clearTimeout(pulseTimer);
     if (previous) pulseTimer = setTimeout(() => renderMap(null), 1800);
@@ -250,14 +257,17 @@
     for (const ticket of tickets) {
       for (const prerequisite of ticket.prerequisites) {
         if (pos.has(prerequisite)) edges.push({ d: edgePath(pos.get(prerequisite), layerOf.get(prerequisite), pos.get(ticket.id), layerOf.get(ticket.id)),
-          on: selected === `ticket:${prerequisite}` || selected === `ticket:${ticket.id}`, cls: '' });
+          ends: [`ticket:${prerequisite}`, `ticket:${ticket.id}`], cls: '' });
       }
       // The route ends at the Destination: Tickets nothing else depends on lead there.
-      if (ticket.dependents.length === 0) edges.push({ d: edgePath(pos.get(ticket.id), layerOf.get(ticket.id), dest, cols.length), on: selected === `ticket:${ticket.id}` || selected === 'dest',
+      if (ticket.dependents.length === 0) edges.push({ d: edgePath(pos.get(ticket.id), layerOf.get(ticket.id), dest, cols.length), ends: [`ticket:${ticket.id}`, 'dest'],
         cls: ` todest${ticket.state === 'settled' && view.fog.length === 0 ? ' clear' : ''}` });
     }
     const lines = svg('svg', { width, height, 'aria-hidden': 'true' }, svg('defs', null, marker('arr', false), marker('arrOn', true)),
-      edges.map(edge => svg('path', { class: `edge${edge.cls}${edge.on ? ' on' : ''}`, d: edge.d, 'marker-end': `url(#${edge.on ? 'arrOn' : 'arr'})` })));
+      edges.map(edge => {
+        const on = edge.ends.includes(selected);
+        return svg('path', { class: `edge${edge.cls}${on ? ' on' : ''}`, d: edge.d, 'data-ends': edge.ends.join(' '), 'marker-end': `url(#${on ? 'arrOn' : 'arr'})` });
+      }));
 
     const heads = narrow || !cols.length ? [] : [...cols.map((_, x) => h('span', { class: 'colh', style: { left: px(x * (W + GX)) } }, x === 0 ? '不依赖别的' : `第 ${x + 1} 层`)),
       h('span', { class: 'colh', style: { left: px(zx) } }, view.fog.length ? '迷雾和目的地' : '目的地')];
@@ -315,6 +325,7 @@
         : selected.startsWith('ticket:') ? ticketDetail(selected.slice('ticket:'.length)) : null;
     if (!content) selected = null;
     $('side').hidden = !content;
+    document.body.classList.toggle('drawer-open', !!content);
     fill($('detail'), content);
   }
 
@@ -386,14 +397,25 @@
   }
   const joined = items => items.flatMap((item, i) => i ? ['、', item] : [item]);
 
+  // Selecting only restyles the drawing; rebuilding it would reset scrolling and running animations.
+  function select(key) {
+    selected = key;
+    for (const element of $('main').querySelectorAll('.tk, .dest, .fogtxt')) element.classList.toggle('sel', element.dataset.id === selected);
+    for (const edge of $('main').querySelectorAll('path.edge')) {
+      const on = edge.dataset.ends.split(' ').includes(selected);
+      edge.classList.toggle('on', on);
+      edge.setAttribute('marker-end', `url(#${on ? 'arrOn' : 'arr'})`);
+    }
+    renderDetail();
+    // Scroll only if the selected element is not fully visible.
+    if (selected) $('main').querySelector(`[data-id="${CSS.escape(selected)}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
   document.addEventListener('click', event => {
     const target = event.target.closest('[data-id]');
-    if (!target || !view) return;
-    selected = target.dataset.id;
-    renderMap(null);
+    if (target && view) select(target.dataset.id);
   });
-  $('close').addEventListener('click', () => { selected = null; renderMap(null); });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape' && selected) { selected = null; renderMap(null); } });
+  $('close').addEventListener('click', () => select(null));
+  document.addEventListener('keydown', event => { if (event.key === 'Escape' && selected) select(null); });
   let resizeTimer = 0;
   addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => renderMap(null), 150); });
   poll();

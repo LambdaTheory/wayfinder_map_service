@@ -55,6 +55,15 @@ Setup: a consistent SQLite backup of the live user's local database was copied r
 | **Revision 5, Fog clearing** | **Service stopped** |
 | ![Fog fading after removal](map-viewer/4-fog-fading.png) | ![Stale page keeps Revision 5](map-viewer/5-stale.png) |
 
+## Live user trial
+
+The live user tried the viewer against the acceptance copy with an interactive Codex session.
+
+- Clicking a Ticket, the Destination or Fog rebuilt the drawing, which reset the Map's horizontal scroll to the start. Selection now only restyles the drawing and the details panel. A new Revision still redraws, but keeps the Map's and the page's scroll position. A selected element is scrolled into view only when it is not fully visible.
+- On windows about 1,000 px wide the fixed details panel covered the right side of the Map, where Fog and the Destination sit. While the panel is open the page now gives up that width.
+
+Both were checked in headless Chromium at 1,000 px: four selections, a details-panel link and a new Revision left the scroll position where the reader put it, and every element stayed clickable.
+
 ## Review
 
 An independent read-only review of the diff found no way for a non-`/mcp` request to reach MCP handling, and no cross-origin read of Map data. It reported and the implementation then fixed: whole-history reads holding the event loop, page selection keys that a Ticket ID such as `dest` could collide with, a failed render that could leave an old Revision labelled current, two `map.update` commands in one Revision both reported as Destination changes, the missing-Map message echoing arbitrary address text, and the shared `map_apply` output schema allowing `viewerUrl`.
