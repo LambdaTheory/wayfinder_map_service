@@ -6,7 +6,7 @@ Date: 2026-09-18. Planning Destination: a minimal client-neutral SQLite-backed M
 
 ## 1. Authority and provenance
 
-Use [CONTEXT.md](../../CONTEXT.md) for domain language, [M1](m1.md) for unchanged domain behavior and the [v1 contract](v1.md) for the wider product. This document consolidates the human-confirmed local slice, not completion of v1 or M2–M6.
+Use [GLOSSARY.md](../../GLOSSARY.md) for domain language, [M1](m1.md) for unchanged domain behavior and the [v1 contract](v1.md) for the wider product. This document consolidates the human-confirmed local slice, not completion of v1 or M2–M6.
 
 | Source | Role |
 | --- | --- |

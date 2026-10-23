@@ -35,7 +35,7 @@ The self-contained workflow follow-on is accepted at `workflowVersion: 2.0.0`. A
 
 ## Project documents
 
-- [Domain language](CONTEXT.md)
+- [Domain language](GLOSSARY.md)
 - [v1 executable specification](docs/spec/v1.md)
 - [Accepted M1 implementation specification](docs/spec/m1.md)
 - [Accepted local MCP/SQLite implementation specification](docs/spec/mcp-sqlite.md)

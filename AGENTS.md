@@ -1,10 +1,10 @@
 # Wayfinder Map Service agent instructions
 
-Start by reading `README.md`, `CONTEXT.md`, and `docs/spec/v1.md`. Read relevant files under `docs/adr/` before changing architecture or product semantics.
+Start by reading `README.md`, `GLOSSARY.md`, and `docs/spec/v1.md`. Read relevant files under `docs/adr/` before changing architecture or product semantics.
 
 M1 and the local MCP/SQLite service are accepted. `docs/agents/exploration-mcp.md` is the authored source for maintainers changing the product workflow; a compatible connected client operates from the MCP server's versioned initialization instructions and tool metadata without reading that repository file. Rollback and deletion remain separate post-M1 iterations on their existing GitHub planning Maps; read `docs/planning/README.md` before resuming either effort. Keep deployment, OAuth, PostgreSQL, rendering, and plugin packaging outside the accepted local slice unless the user changes the scope.
 
-Use the domain language in `CONTEXT.md`. Record a newly settled domain term there. Add an ADR only for a hard-to-reverse, surprising trade-off with meaningful alternatives.
+Use the domain language in `GLOSSARY.md`. Record a newly settled domain term there. Add an ADR only for a hard-to-reverse, surprising trade-off with meaningful alternatives.
 
 ## Agent skills
 
@@ -18,7 +18,7 @@ The five canonical triage roles use GitHub labels; see `docs/agents/triage-label
 
 ### Domain docs
 
-Single context: `CONTEXT.md` and `docs/adr/`; see `docs/agents/domain.md`.
+Single context: `GLOSSARY.md` and `docs/adr/`; see `docs/agents/domain.md`.
 
 ### Matt Pocock workflows
 
