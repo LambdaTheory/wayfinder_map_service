@@ -105,7 +105,7 @@ test('P01/P02: SDK discovers exactly four complete schemas, once-only compact/de
   }
 });
 
-test('W01/W02: initialization, generated tool guidance, Resources and side-effect-free Prompt expose workflow 2.0.0', async () => {
+test('W01/W02: initialization, generated tool guidance, Resources and side-effect-free Prompt expose workflow 2.1.0', async () => {
   const f = await fixture();
   expect(f.client.getInstructions()).toBe(workflowContract.instructions);
   expect(f.client.getInstructions()!.startsWith(workflowContract.safetyCore)).toBe(true);
@@ -118,27 +118,27 @@ test('W01/W02: initialization, generated tool guidance, Resources and side-effec
 
   const listed = await f.client.listResources();
   expect(listed.resources.map(resource => resource.uri)).toEqual([
-    'wayfinder://workflow/exploration', 'wayfinder://workflow/exploration/2.0.0',
+    'wayfinder://workflow/exploration', 'wayfinder://workflow/exploration/2.1.0',
   ]);
   for (const resource of listed.resources) {
-    expect(resource).toMatchObject({ mimeType: 'text/markdown', _meta: { 'wayfinder/workflowVersion': '2.0.0' } });
+    expect(resource).toMatchObject({ mimeType: 'text/markdown', _meta: { 'wayfinder/workflowVersion': '2.1.0' } });
     expect(await f.client.readResource({ uri: resource.uri })).toEqual({ contents: [{ uri: resource.uri,
       mimeType: 'text/markdown', text: readFileSync('docs/agents/exploration-mcp.md', 'utf8'),
-      _meta: { 'wayfinder/workflowVersion': '2.0.0' } }] });
+      _meta: { 'wayfinder/workflowVersion': '2.1.0' } }] });
   }
 
   expect(await f.client.listPrompts()).toEqual({ prompts: [{ name: 'start_wayfinder_exploration',
-    description: 'Start or resume Wayfinder workflow 2.0.0', arguments: [
+    description: 'Start or resume Wayfinder workflow 2.1.0', arguments: [
       { name: 'mode', description: 'create or resume', required: true },
       { name: 'mapId', description: 'Optional stable Map ID', required: false },
-    ], _meta: { 'wayfinder/workflowVersion': '2.0.0' } }] });
+    ], _meta: { 'wayfinder/workflowVersion': '2.1.0' } }] });
   const before = await f.storage.listMaps({});
   for (const arguments_ of [{ mode: 'create' }, { mode: 'resume', mapId: 'Stable.Map' }]) {
     const result = await f.client.getPrompt({ name: 'start_wayfinder_exploration', arguments: arguments_ });
     expect(result.messages).toHaveLength(1);
     expect(result.messages[0]).toMatchObject({ role: 'user', content: { type: 'text' } });
     expect((result.messages[0]!.content as { text: string }).text).toContain(`Mode: ${arguments_.mode}`);
-    expect((result.messages[0]!.content as { text: string }).text).toContain('workflowVersion: 2.0.0');
+    expect((result.messages[0]!.content as { text: string }).text).toContain('workflowVersion: 2.1.0');
   }
   expect(await f.storage.listMaps({})).toEqual(before);
   await expect(f.client.getPrompt({ name: 'start_wayfinder_exploration', arguments: { mode: 'invalid' } })).rejects.toThrow();
@@ -455,5 +455,38 @@ test('P01: author configuration rejected before serving, captured against later 
     await client.callTool({ name: 'map_create', arguments: { mapId: 'Captured', title: 'T', destination: 'D' } });
     const read = await client.request({ method: 'tools/call', params: { name: 'map_read', arguments: { mapId: 'Captured' } } }, CallToolResultSchema);
     expect(snapshot(read).author).toMatchObject(configuration);
+  } finally { await client.close(); await server.close(); }
+});
+
+test('V10: a configured local viewer origin adds viewerUrl to map_create and map_read only; other origins are refused', async () => {
+  const f = await fixture();
+  for (const viewerOrigin of ['http://localhost:8768', 'https://127.0.0.1:8768', 'http://127.0.0.1:8768/', 'http://127.0.0.1', 'http://127.0.0.1:0', 7]) {
+    expect(() => createMapMcpServer(f.storage, { ...configuration, viewerOrigin } as never)).toThrow('Invalid MCP author configuration');
+  }
+  const server = createMapMcpServer(f.storage, { ...configuration, viewerOrigin: 'http://127.0.0.1:8768' });
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'viewer-link-test', version: '0.1.0' });
+  await server.connect(st); await client.connect(ct);
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const result = await client.callTool({ name, arguments: args }) as CallToolResult;
+    expect(schemas.get(name)!.output(result.structuredContent), JSON.stringify(schemas.get(name)!.output.errors)).toBe(true);
+    return result.structuredContent!;
+  };
+  try {
+    const link = 'http://127.0.0.1:8768/maps/Acceptance.Alpha';
+    expect(await call('map_create', { mapId: 'Acceptance.Alpha', title: 'T', destination: 'D' })).toEqual({ kind: 'committed', mapId: 'Acceptance.Alpha',
+      revision: 1, changes: [{ commandIndex: 0, command: 'map.create', subjectId: 'Acceptance.Alpha' }], viewerUrl: link });
+    expect(await call('map_create', { mapId: 'Acceptance.Other', title: 'T', destination: 'D', includeSnapshot: true }))
+      .toMatchObject({ kind: 'committed', viewerUrl: 'http://127.0.0.1:8768/maps/Acceptance.Other' });
+    expect(await call('map_read', { mapId: 'Acceptance.Alpha' })).toMatchObject({ kind: 'found', viewerUrl: link });
+    for (const includeSnapshot of [false, true]) {
+      const current = await call('map_read', { mapId: 'Acceptance.Alpha' }) as { revision: Revision };
+      expect(await call('map_apply', { mapId: 'Acceptance.Alpha', expectedRevision: current.revision.revision, includeSnapshot,
+        commands: [{ kind: 'map.update', patch: { notes: `Step ${includeSnapshot}` } }] })).not.toHaveProperty('viewerUrl');
+    }
+    expect(await call('map_read', { mapId: 'Missing' })).not.toHaveProperty('viewerUrl');
+    const compact = { kind: 'committed', mapId: 'Acceptance.Alpha', revision: 2, changes: [{ commandIndex: 0, command: 'map.update', subjectId: 'Acceptance.Alpha' }] };
+    expect(schemas.get('map_create')!.output({ ...compact, viewerUrl: link })).toBe(true);
+    expect(schemas.get('map_apply')!.output({ ...compact, viewerUrl: link })).toBe(false);
   } finally { await client.close(); await server.close(); }
 });

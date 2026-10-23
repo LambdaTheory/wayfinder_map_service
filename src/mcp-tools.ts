@@ -9,10 +9,12 @@ import { SQLiteFailure } from './sqlite-storage.js';
 import { invalid, isPlainObject, validateAuthor, validateId, validateObject } from './values.js';
 import { mapTools } from './mcp-schemas.js';
 import { workflowContract } from './workflow.generated.js';
+import { viewerUrl } from './viewer-http.js';
 
 export { mapTools } from './mcp-schemas.js';
 export { workflowContract } from './workflow.generated.js';
-export interface ToolAuthorConfiguration { readonly actorId: string; readonly clientId: string }
+// viewerOrigin is set by the local HTTP host, which also serves the read-only viewer.
+export interface ToolAuthorConfiguration { readonly actorId: string; readonly clientId: string; readonly viewerOrigin?: string }
 // The HTTP host owns admission/draining, including work whose response is lost.
 export type ToolCallControl = (call: () => Promise<CallToolResult>) => Promise<CallToolResult>;
 
@@ -20,10 +22,14 @@ export type ToolCallControl = (call: () => Promise<CallToolResult>) => Promise<C
 // instead of the high-level SDK's generic text errors/duplicate-text convenience.
 // Transport, admission, authentication and storage lifecycle belong to the host.
 export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAuthorConfiguration, control?: ToolCallControl): Server {
-  if (validateObject(configuration, [], ['actorId', 'clientId']) || validateAuthor({ ...configuration, occurredAt: new Date().toISOString() })) {
+  if (validateObject(configuration, [], ['actorId', 'clientId', 'viewerOrigin'])
+    || validateAuthor({ actorId: configuration.actorId, clientId: configuration.clientId, occurredAt: new Date().toISOString() })
+    || (configuration.viewerOrigin !== undefined && !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/.test(configuration.viewerOrigin))) {
     throw new Error('Invalid MCP author configuration');
   }
   const identity = { actorId: configuration.actorId, clientId: configuration.clientId };
+  const { viewerOrigin } = configuration;
+  const viewerLink = (mapId: string) => viewerOrigin === undefined ? {} : { viewerUrl: viewerUrl(viewerOrigin, mapId) };
   const author = (): MutationAuthor => ({ ...identity, occurredAt: new Date().toISOString() } as MutationAuthor);
   const server = new Server({ name: 'wayfinder-map', version: '0.1.0' }, {
     capabilities: { tools: {}, resources: {}, prompts: {} }, instructions: workflowContract.instructions,
@@ -109,7 +115,8 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
           revision = current.value.currentRevision;
         }
         const read = await storage.adapter.readRevision(mapId, revision);
-        return read.kind === 'found' ? envelope({ kind: 'found', revision: read.value, frontier: calculateFrontier(read.value.state) }) : envelope(read);
+        return read.kind === 'found' ? envelope({ kind: 'found', revision: read.value, frontier: calculateFrontier(read.value.state),
+          ...viewerLink(mapId) }) : envelope(read);
       }
       let prepared;
       if (create?.kind === 'ok') prepared = create.value;
@@ -121,8 +128,11 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
         prepared = result.change;
       } else throw new Error('Unreachable tool preparation');
       const commit = await storage.adapter.commit(prepared);
-      if (commit.kind !== 'committed' || raw.includeSnapshot === true) return envelope(commit);
-      return envelope({ kind: 'committed', mapId: commit.revision.mapId, revision: commit.revision.revision, changes: commit.revision.changes });
+      if (commit.kind !== 'committed') return envelope(commit);
+      // The link accompanies creation and reads, not every advance.
+      const link = create ? viewerLink(commit.revision.mapId) : {};
+      if (raw.includeSnapshot === true) return envelope({ ...commit, ...link });
+      return envelope({ kind: 'committed', mapId: commit.revision.mapId, revision: commit.revision.revision, changes: commit.revision.changes, ...link });
     } catch (error) {
       // Never expose exception text/cause/stack, SQL, paths or submitted bodies.
       // An unclassified failure cannot establish publication or connection health.

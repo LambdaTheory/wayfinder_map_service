@@ -8,6 +8,7 @@ import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { createMapMcpServer } from './mcp-tools.js';
 import type { SQLiteStorage } from './sqlite-storage.js';
 import { validateAuthor, validateObject } from './values.js';
+import { handleViewer, requestTarget } from './viewer-http.js';
 
 export const MAX_REQUEST_BYTES = 1_048_576;
 export interface LocalServiceConfiguration {
@@ -99,6 +100,8 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
   async function handle(request: IncomingMessage, response: ServerResponse) {
     if (stopping) { httpFailure(response, 503, 'Service stopping'); return; }
     if (request.headers.host !== host) { httpFailure(response, 403, 'Host forbidden'); return; }
+    // The read-only viewer needs no token; routing by pathname keeps /mcp?query on the 404 below.
+    if (requestTarget(request.url, host)?.pathname !== '/mcp') { await handleViewer(request, response, storage, host); return; }
     if (!timingSafeEqual(tokenHash, digest(request.headers.authorization ?? ''))) {
       httpFailure(response, 401, 'Local token required'); return;
     }
@@ -140,7 +143,7 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
       const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: randomUUID, enableJsonResponse: true,
         onsessioninitialized(id) { sessions.set(id, created); },
       });
-      const server = createMapMcpServer(storage, configAuthor(config), control);
+      const server = createMapMcpServer(storage, { ...configAuthor(config), viewerOrigin: `http://${host}` }, control);
       const created: Session = { server, transport, pending: new Set(), closing: false };
       await server.connect(transport);
       session = created;

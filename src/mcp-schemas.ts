@@ -80,21 +80,23 @@ const errors: Schema[] = [
 ];
 const defs = { json: { anyOf: [{ type: ['null', 'boolean', 'number', 'string'] }, array(json), jsonObject] } };
 const root = (schema: Schema): Tool['inputSchema'] => ({ type: 'object', ...schema, $defs: defs });
-const writeOutput = [object({ kind: literal('committed'), mapId: id, revision, changes }),
-  object({ kind: literal('committed'), revision: fullRevision, frontier: array(id) })];
+const viewerUrl: Schema = { type: 'string', pattern: '^http://127\\.0\\.0\\.1:[0-9]+/maps/' };
+// Only map_create carries the viewer link; map_apply results keep their shape.
+const writeOutput = (link: Record<string, Schema>) => [object({ kind: literal('committed'), mapId: id, revision, changes, ...link }, ['kind', 'mapId', 'revision', 'changes']),
+  object({ kind: literal('committed'), revision: fullRevision, frontier: array(id), ...link }, ['kind', 'revision', 'frontier'])];
 const definitions: Tool[] = [
   { name: 'map_create', description: workflowContract.toolDescriptions.map_create,
     inputSchema: root(object({ mapId: id, title: text, destination: text, notes: string, extensions, includeSnapshot: { type: 'boolean', default: false } }, ['mapId', 'title', 'destination'])),
-    outputSchema: root({ oneOf: [...writeOutput, ...errors] }) },
+    outputSchema: root({ oneOf: [...writeOutput({ viewerUrl }), ...errors] }) },
   { name: 'map_list', description: workflowContract.toolDescriptions.map_list,
     inputSchema: root(object({ limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 }, afterMapId: id }, [])),
     outputSchema: root({ oneOf: [object({ kind: literal('listed'), maps: array(object({ mapId: id, title: text, destination: text, currentRevision: revision })),
       nextAfterMapId: { anyOf: [id, literal(null)] } }), ...errors] }) },
   { name: 'map_read', description: workflowContract.toolDescriptions.map_read,
     inputSchema: root(object({ mapId: id, revision }, ['mapId'])),
-    outputSchema: root({ oneOf: [object({ kind: literal('found'), revision: fullRevision, frontier: array(id) }), ...errors] }) },
+    outputSchema: root({ oneOf: [object({ kind: literal('found'), revision: fullRevision, frontier: array(id), viewerUrl }, ['kind', 'revision', 'frontier']), ...errors] }) },
   { name: 'map_apply', description: workflowContract.toolDescriptions.map_apply,
     inputSchema: root(object({ mapId: id, expectedRevision: revision, commands: array({ oneOf: commands }, { minItems: 1, maxItems: 100 }), includeSnapshot: { type: 'boolean', default: false } }, ['mapId', 'expectedRevision', 'commands'])),
-    outputSchema: root({ oneOf: [...writeOutput, ...errors] }) },
+    outputSchema: root({ oneOf: [...writeOutput({}), ...errors] }) },
 ];
 export const mapTools: readonly Tool[] = immutableClone(definitions);

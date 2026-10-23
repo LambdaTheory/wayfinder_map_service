@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wayfinder 地图</title>
+<link rel="stylesheet" href="/viewer/viewer.css">
+<script src="/viewer/viewer.js" defer></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="/">Wayfinder</a>
+    <h1 id="title"></h1>
+    <span class="rev" id="rev"></span>
+    <span class="conn" id="conn"><i></i><span id="connText">正在连接</span></span>
+  </header>
+  <div class="stale" id="stale" hidden></div>
+  <main id="main"></main>
+</div>
+<aside class="drawer card-box" id="side" hidden>
+  <button class="close" id="close" type="button" aria-label="关闭">×</button>
+  <div id="detail"></div>
+</aside>
+<noscript>这一页要开 JavaScript 才能画地图。</noscript>
+</body>
+</html>

@@ -1,5 +1,5 @@
 ---
-workflowVersion: 2.0.0
+workflowVersion: 2.1.0
 ---
 
 # New exploration Maps through Wayfinder MCP
@@ -15,7 +15,7 @@ Use `map_create`, `map_list`, `map_read`, and `map_apply` only. Retain stable Ma
 ## Generated tool guidance
 
 <!-- wayfinder:tool:map_create:start -->
-Create one new stable-ID Map at Revision 1 after `map_list` has been paged to the end and confirmed the intended Map does not exist. Titles are not handles. On a duplicate or uncertain result, discover and `map_read`; never create a replacement. Then use the returned Revision in one ordered `map_apply` that publishes current Tickets before Dependencies, Fog, and Scope Exclusions.
+Create one new stable-ID Map at Revision 1 after `map_list` has been paged to the end and confirmed the intended Map does not exist. Titles are not handles. On a duplicate or uncertain result, discover and `map_read`; never create a replacement. Then use the returned Revision in one ordered `map_apply` that publishes current Tickets before Dependencies, Fog, and Scope Exclusions. If the result has `viewerUrl`, give it to the human once.
 <!-- wayfinder:tool:map_create:end -->
 
 <!-- wayfinder:tool:map_list:start -->
@@ -23,7 +23,7 @@ Discover Maps in ASCII stable-ID order. Before any create decision, follow `next
 <!-- wayfinder:tool:map_list:end -->
 
 <!-- wayfinder:tool:map_read:start -->
-Read the authoritative current full Revision by omitting `revision`, or explicitly inspect immutable history. Default-read after resumption, conflict, an uncertain write/lost receipt, or rediscovery. Retain the returned Revision and Frontier; do not treat conversation, files, GitHub, an older response, or a catalog entry as current Map state.
+Read the authoritative current full Revision by omitting `revision`, or explicitly inspect immutable history. Default-read after resumption, conflict, an uncertain write/lost receipt, or rediscovery. Retain the returned Revision and Frontier; do not treat conversation, files, GitHub, an older response, or a catalog entry as current Map state. When you resume a Map and the result has `viewerUrl`, give it to the human once.
 <!-- wayfinder:tool:map_read:end -->
 
 <!-- wayfinder:tool:map_apply:start -->
