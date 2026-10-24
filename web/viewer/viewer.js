@@ -410,6 +410,7 @@
       edge.setAttribute('marker-end', `url(#${on ? 'arrOn' : 'arr'})`);
     }
     renderDetail();
+    $('detail').scrollTop = 0;
     // Scroll only if the selected element is not fully visible.
     if (selected) $('main').querySelector(`[data-id="${CSS.escape(selected)}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }

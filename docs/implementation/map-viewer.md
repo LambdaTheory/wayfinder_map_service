@@ -65,6 +65,10 @@ The live user tried the viewer against the acceptance copy with an interactive C
 
 Both were checked in headless Chromium at 1,000 px: four selections, a details-panel link and a new Revision left the scroll position where the reader put it, and every element stayed clickable.
 
+- In portrait windows narrower than 1,000 px the details came after the Map, the Scope Exclusions and the legend, so a selection opened them below the screen. Below 1,000 px they are now a sheet over the lower 45% of the window. The page's end still scrolls above the sheet, a selected element the sheet would hide scrolls into the part left in view, and a new selection starts the details at the top.
+
+The sheet was checked in headless Chromium at 390×844, 820×1180 and 900×1600, and the side panel again at 1280×800: no selected Ticket ended up under the details, and the close button worked with the details scrolled to the end.
+
 ## Review
 
 An independent read-only review of the diff found no way for a non-`/mcp` request to reach MCP handling, and no cross-origin read of Map data. It reported and the implementation then fixed: whole-history reads holding the event loop, page selection keys that a Ticket ID such as `dest` could collide with, a failed render that could leave an old Revision labelled current, two `map.update` commands in one Revision both reported as Destination changes, the missing-Map message echoing arbitrary address text, and the shared `map_apply` output schema allowing `viewerUrl`.
