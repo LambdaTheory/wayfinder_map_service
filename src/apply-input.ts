@@ -55,13 +55,16 @@ function validateRequest(raw: unknown): InvalidInput | undefined {
     }
     if (command.kind === 'claim.acquire' || command.kind === 'claim.release' || command.kind === 'claim.clear') {
       const clearing = command.kind === 'claim.clear';
-      const shape = validateObject(command, path, clearing ? ['kind', 'ticketId', 'expectedClaimantId', 'reason'] : ['kind', 'ticketId', 'claimantId']);
+      // A release may say why; a clear must.
+      const reasoned = clearing || (command.kind === 'claim.release' && Object.hasOwn(command, 'reason'));
+      const shape = validateObject(command, path, clearing ? ['kind', 'ticketId', 'expectedClaimantId', 'reason']
+        : command.kind === 'claim.release' ? ['kind', 'ticketId', 'claimantId', 'reason'] : ['kind', 'ticketId', 'claimantId']);
       if (shape) return shape;
       for (const key of ['ticketId', clearing ? 'expectedClaimantId' : 'claimantId']) {
         const identity = validateId(command[key], [...path, key]);
         if (identity) return identity;
       }
-      if (clearing && (typeof command.reason !== 'string' || command.reason.trim() === '')) return invalid([...path, 'reason'], 'Nonblank reason required');
+      if (reasoned && (typeof command.reason !== 'string' || command.reason.trim() === '')) return invalid([...path, 'reason'], 'Nonblank reason required');
       continue;
     }
     if (command.kind === 'content.add' || command.kind === 'content.update' || command.kind === 'content.remove') {

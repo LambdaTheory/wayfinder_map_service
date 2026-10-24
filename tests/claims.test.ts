@@ -204,6 +204,17 @@ test.each(['claim.release', 'claim.clear'] as const)('C05: %s then acquire a dif
   expect(await adapter.readRevision(mapId, 5)).toMatchObject({ kind: 'not_found', code: 'revision_not_found' });
 });
 
+test('C03: a release may record its exact reason; omitting it records none', async () => {
+  const adapter = await setup();
+  await commitCommands(adapter, [{ kind: 'claim.acquire', ticketId: a, claimantId: session }]);
+  const released = await commitCommands(adapter, [{ kind: 'claim.release', ticketId: a, claimantId: session, reason: ' Research unfinished\n' }]);
+  expect(released.revision.state.tickets[0]!.claim).toBeNull();
+  expect(released.revision.changes).toEqual([{ commandIndex: 0, command: 'claim.release', subjectId: 'A', reason: ' Research unfinished\n' }]);
+  await commitCommands(adapter, [{ kind: 'claim.acquire', ticketId: a, claimantId: session }]);
+  const plain = await commitCommands(adapter, [{ kind: 'claim.release', ticketId: a, claimantId: session }]);
+  expect(plain.revision.changes).toEqual([{ commandIndex: 0, command: 'claim.release', subjectId: 'A' }]);
+});
+
 test('C05/A07: cancelling Claim batches and changed author/reason alone are not business changes', async () => {
   const adapter = await setup();
   await rejectCommands(adapter, [{ kind: 'claim.acquire', ticketId: a, claimantId: session },
@@ -315,6 +326,10 @@ invalidClaims.push(...claimKinds.flatMap(kind => [
 invalidClaims.push(...[undefined, null, 10, '', ' \n\t'].map((reason, index) => ({
   label: `clear invalid reason ${index}`, command: { ...rawClaim('claim.clear'), reason }, path: ['reason'],
 })));
+invalidClaims.push(...[undefined, null, 10, '', ' \n\t'].map((reason, index) => ({
+  label: `release present but invalid reason ${index}`, command: { ...rawClaim('claim.release'), reason }, path: ['reason'],
+})));
+invalidClaims.push({ label: 'claim.acquire reason', command: { ...rawClaim('claim.acquire'), reason: 'Not accepted on acquire' }, path: ['reason'] });
 test.each(invalidClaims)('V03/V04/A02: $label rejects the complete raw/typed request before earlier execution and stale comparison', async ({ command, path }) => {
   const adapter = await setup();
   await commitCommands(adapter, [{ kind: 'claim.acquire', ticketId: a, claimantId: session }]);

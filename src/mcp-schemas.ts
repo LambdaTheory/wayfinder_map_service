@@ -41,7 +41,8 @@ const commands: Schema[] = [
   command('map.update', { patch: mapPatch }), command('ticket.create', { ticket: ticketInput }),
   command('ticket.update', { ticketId: id, patch: ticketPatch, claimantId: id }, ['claimantId']),
   ...['dependency.add', 'dependency.remove'].map(kind => command(kind, { dependentId: id, prerequisiteId: id, claimantId: id }, ['claimantId'])),
-  ...['claim.acquire', 'claim.release'].map(kind => command(kind, { ticketId: id, claimantId: id })),
+  command('claim.acquire', { ticketId: id, claimantId: id }),
+  command('claim.release', { ticketId: id, claimantId: id, reason: text }, ['reason']),
   command('claim.clear', { ticketId: id, expectedClaimantId: id, reason: text }),
   command('ticket.reopen', { ticketId: id, reason: text }),
   ...['content.add', 'content.update'].map(kind => command(kind, { section: { enum: ['fog', 'scopeExclusions'] }, item: content })),
@@ -55,7 +56,7 @@ const storedTicket = { oneOf: types.flatMap(type => [
 const state = object({ id, title: text, destination: text, notes: string, fog: array(content), scopeExclusions: array(content),
   tickets: array(storedTicket), extensions, currentRevision: revision });
 const changes = array({ oneOf: [
-  object({ commandIndex: { type: 'integer', minimum: 0 }, command: { enum: ['claim.clear', 'ticket.reopen'] }, subjectId: id, reason: text }),
+  object({ commandIndex: { type: 'integer', minimum: 0 }, command: { enum: ['claim.clear', 'ticket.reopen', 'claim.release'] }, subjectId: id, reason: text }),
   object({ commandIndex: { type: 'integer', minimum: 0 }, command: { enum: ['map.create', 'map.update', 'ticket.create', 'ticket.update',
     'ticket.settle', 'claim.acquire', 'claim.release', 'dependency.add', 'dependency.remove', 'content.add', 'content.update', 'content.remove'] }, subjectId: id }),
 ] }, { minItems: 1 });
