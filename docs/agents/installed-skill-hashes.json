@@ -24,6 +24,6 @@
   ".agents/skills/triage/OUT-OF-SCOPE.md": "1fbf9b432130c6380aa65813b55553cfda150309b27c595e183f8e335b8a190d",
   ".agents/skills/triage/SKILL.md": "94383c7d99ec5718f96f1bb62be1f55043f4fc5281c2a2a1e988d3e58327f28d",
   ".agents/skills/triage/agents/openai.yaml": "2e683717720cf456d165d0bb1a68bb600d0b6a8ccb61841c172e50d26f95351c",
-  ".agents/skills/wayfinder/SKILL.md": "d580cf537919f435efc027776bfa6d70013087ec53a22ffca458bed232400ab0",
-  ".agents/skills/wayfinder/agents/openai.yaml": "88bc81a11a6d52ac67aeaa76b8b619e387020d47c5133a4dd4927fd15c4ad073"
+  ".agents/skills/wayfinder/SKILL.md": "25b11702eeac545f40a72c1da0282fc5500e7cbe5de2fcf0babee384a83e5596",
+  ".agents/skills/wayfinder/agents/openai.yaml": "d408854e016f917f7f25615911738e8fb1d90b3f6f124a50855351d3a667eba0"
 }

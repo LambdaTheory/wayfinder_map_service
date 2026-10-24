@@ -13,6 +13,10 @@ All notable project changes are recorded here. Historical implementation evidenc
 - `1.1.0` (2026-09-20): add backward-compatible complete-command construction guidance after the first isolated Codex journey exposed partial validation probing. No Map tool, schema or state semantics changed.
 - `1.0.0` (2026-09-19): publish the Wayfinder exploration workflow through MCP initialization instructions and locally sufficient descriptions for the four Map tools, with complete stable/versioned Resources and an optional side-effect-free Prompt. The contract is generated from `docs/agents/exploration-mcp.md`, remains immutable for one service process and removes repository-file or installed-Skill requirements from compatible clients.
 
+### Skills
+
+- Replace the 30-line project `wayfinder` adapter with the MCP method skill used in the 2026-10-23 experiment, aligned with workflow 2.2.0, and allow implicit invocation. In the experiment both skill-only runs passed every check, and in the stress run the upstream body failed three scenarios this skill passed.
+
 ### Commands
 
 - `claim.release` accepts an optional nonblank `reason`, recorded in the Revision change like the reasons of `claim.clear` and `ticket.reopen`. Existing requests without it behave as before.

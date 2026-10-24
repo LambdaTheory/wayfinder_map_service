@@ -24,7 +24,7 @@ Single context: `GLOSSARY.md` and `docs/adr/`; see `docs/agents/domain.md`.
 
 Project-local skills live in `.agents/skills/`: `setup-matt-pocock-skills`, `wayfinder`, `grill-with-docs`, `grilling`, `domain-modeling`, `prototype`, `research`, and `triage`.
 
-Invoke `wayfinder` for work that spans more than one agent session, `prototype` for a disposable artifact that answers a design question, `domain-modeling` when changing the glossary or recording an ADR, and `grilling` when a human decision genuinely blocks progress. The project-local `wayfinder` skill routes new exploration state through MCP. Use skills as methods, while `docs/spec/v1.md` remains the product contract.
+Invoke `wayfinder` for work that spans more than one agent session, `prototype` for a disposable artifact that answers a design question, `domain-modeling` when changing the glossary or recording an ADR, and `grilling` when a human decision genuinely blocks progress. The project-local `wayfinder` skill carries the Wayfinder method for Maps held by the MCP service; the server contract alone remains sufficient. Use skills as methods, while `docs/spec/v1.md` remains the product contract.
 
 GitHub Issues coordinate implementation and preserve the existing rollback/deletion planning Maps. New exploration Maps use the product MCP as sole authority. Completed historical planning decisions and prototypes are frozen under `docs/archive/`; accepted specifications live in `docs/spec/`. These development records remain separate from product Map state.
 
