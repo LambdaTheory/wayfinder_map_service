@@ -257,6 +257,32 @@ test('P07: an operator credentials file admits further tokens, each authoring as
   expect(() => captureConfiguration({ ...configuration(f.path, port), credentialsPath: 'relative.json' })).toThrow();
 });
 
+test('U02: a credential marked toolsOnly gets write tools that state the release; others keep taking it from their instructions', async () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'wayfinder-tools-only-')));
+  cleanups.push(() => rmSync(directory, { recursive: true }));
+  const credentialsPath = join(directory, 'credentials.json');
+  const chatgptToken = 'chatgpt-credential-token-not-a-live-secret';
+  const sha = (value: string) => createHash('sha256').update(value).digest('hex');
+  writeFileSync(credentialsPath, JSON.stringify({ credentials: [{ clientId: 'ChatGPT', tokenSha256: sha(chatgptToken), toolsOnly: true }] }));
+  const f = storageFixture(); const port = await freePort();
+  const service = await serveLocalMcp(f.storage, { ...configuration(f.path, port), credentialsPath }); cleanups.push(() => service.stop());
+  const versionHelp = async (c: Awaited<ReturnType<typeof connect>>) => Object.fromEntries((await c.client.listTools()).tools
+    .filter(tool => tool.name === 'map_create' || tool.name === 'map_apply')
+    .map(tool => [tool.name, (tool.inputSchema.properties!.version as { description: string }).description]));
+  const chatgpt = await connect(port, chatgptToken);
+  for (const help of Object.values(await versionHelp(chatgpt))) expect(help).toContain(`set it to "${version}"`);
+  const operator = await connect(port);
+  for (const help of Object.values(await versionHelp(operator))) expect(help).not.toContain(version);
+  // The gate is the same for both: a stated release is still checked against the running one.
+  expect((await chatgpt.client.callTool({ name: 'map_create', arguments: { version: '1', mapId: 'Compat', title: 'T', destination: 'D' } }))
+    .structuredContent).toMatchObject({ kind: 'rejected', code: 'version_mismatch', version: '1' });
+  expect((await chatgpt.client.callTool({ name: 'map_create', arguments: { version, mapId: 'Compat', title: 'T', destination: 'D' } }))
+    .structuredContent).toMatchObject({ kind: 'committed', revision: 1 });
+  writeFileSync(credentialsPath, JSON.stringify({ credentials: [{ clientId: 'ChatGPT', tokenSha256: sha(chatgptToken), toolsOnly: 'yes' }] }));
+  expect((await raw(port, message(), { Authorization: `Bearer ${chatgptToken}` })).status).toBe(401);
+  expect(() => captureConfiguration({ ...configuration(f.path, port), toolsOnly: 'yes' as never })).toThrow();
+});
+
 test('P06: whole UTF-8 request 1 MiB inclusive, Content-Length and chunked excess refused with no publication', async () => {
   const f = await fixture(); const c = await connect(f.port); await seed(c); const before = await observe(c);
   const headers = sessionHeaders(c.transport.sessionId!);

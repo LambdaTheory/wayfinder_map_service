@@ -4,6 +4,13 @@ All notable project changes are recorded here. Historical implementation evidenc
 
 Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Release Version, covers the service and the workflow it carries; `docs/spec/mcp-sqlite.md` §14.3 says which part to raise, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion` (`1.0.0` to `3.0.0` below), and the server reported a fixed `0.1.0`.
 
+## 2.0.1 (2026-10-25)
+
+- Compatibility mode for clients that show their model no server instructions. A ChatGPT run showed that ChatGPT never shows the instructions to its model: after a tool refresh, a new chat had the new tool definition but had to guess the version, so 2.0.0 could not write from ChatGPT at all. A credential marked `toolsOnly` now gets `map_create` and `map_apply` whose `version` parameter states the release. `wayfinder chatgpt` and the ChatGPT runner's own service set it. Other clients still take the version from their instructions ([ADR 0005](docs/adr/0005-writes-attest-the-rules-version.md)).
+- The write tool descriptions now also cover callers without instructions. They say a `version_mismatch` is not a tool failure: read the Resource and retry, or, only for a client that cannot read Resources, ask the human to refresh the server's tools and start a new conversation. With a softer wording, Codex stopped instead of reading the Resource.
+- Rules that change writes live in both the instructions and the descriptions of the tools they govern (spec section 14.2).
+- 2.0.0 was never released.
+
 ## 2.0.0 (2026-10-25)
 
 - Writes attest the rules version. `map_create` and `map_apply` require `version`, the release whose rules the caller follows (its instructions' `version:` line, or the first line of the workflow Resource). A missing or other value returns `{ kind: 'rejected', code: 'version_mismatch', version, rules }` before anything is validated or written, without naming the running version. Real runs on 2026-10-25 showed Codex 0.164.0 and Claude Code 2.1.310 reconnecting silently after a restart and writing under the old rules ([ADR 0005](docs/adr/0005-writes-attest-the-rules-version.md)). Incompatible, because every write needs the new field.

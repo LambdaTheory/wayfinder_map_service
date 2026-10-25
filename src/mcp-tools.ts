@@ -7,14 +7,15 @@ import type { CreateMapInput, InvalidInput, MapId, MutationAuthor } from './type
 import type { SQLiteStorage } from './sqlite-storage.js';
 import { SQLiteFailure } from './sqlite-storage.js';
 import { invalid, isPlainObject, validateAuthor, validateId, validateObject } from './values.js';
-import { mapTools } from './mcp-schemas.js';
+import { mapTools, toolsOnlyMapTools } from './mcp-schemas.js';
 import { workflowContract } from './workflow.generated.js';
 import { viewerUrl } from './viewer-http.js';
 
-export { mapTools } from './mcp-schemas.js';
+export { mapTools, toolsOnlyMapTools } from './mcp-schemas.js';
 export { workflowContract } from './workflow.generated.js';
-// viewerOrigin is set by the local HTTP host, which also serves the read-only viewer.
-export interface ToolAuthorConfiguration { readonly actorId: string; readonly clientId: string; readonly viewerOrigin?: string }
+// viewerOrigin is set by the local HTTP host, which also serves the read-only viewer. toolsOnly marks a client that shows its
+// model no server instructions; its write tools state the release instead.
+export interface ToolAuthorConfiguration { readonly actorId: string; readonly clientId: string; readonly viewerOrigin?: string; readonly toolsOnly?: boolean }
 // The HTTP host owns admission/draining, including work whose response is lost.
 export type ToolCallControl = (call: () => Promise<CallToolResult>) => Promise<CallToolResult>;
 
@@ -22,19 +23,21 @@ export type ToolCallControl = (call: () => Promise<CallToolResult>) => Promise<C
 // instead of the high-level SDK's generic text errors/duplicate-text convenience.
 // Transport, admission, authentication and storage lifecycle belong to the host.
 export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAuthorConfiguration, control?: ToolCallControl): Server {
-  if (validateObject(configuration, [], ['actorId', 'clientId', 'viewerOrigin'])
+  if (validateObject(configuration, [], ['actorId', 'clientId', 'viewerOrigin', 'toolsOnly'])
+    || (configuration.toolsOnly !== undefined && typeof configuration.toolsOnly !== 'boolean')
     || validateAuthor({ actorId: configuration.actorId, clientId: configuration.clientId, occurredAt: new Date().toISOString() })
     || (configuration.viewerOrigin !== undefined && !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/.test(configuration.viewerOrigin))) {
     throw new Error('Invalid MCP author configuration');
   }
   const identity = { actorId: configuration.actorId, clientId: configuration.clientId };
+  const tools = configuration.toolsOnly ? toolsOnlyMapTools : mapTools;
   const { viewerOrigin } = configuration;
   const viewerLink = (mapId: string) => viewerOrigin === undefined ? {} : { viewerUrl: viewerUrl(viewerOrigin, mapId) };
   const author = (): MutationAuthor => ({ ...identity, occurredAt: new Date().toISOString() } as MutationAuthor);
   const server = new Server({ name: 'wayfinder-map', version: workflowContract.version }, {
     capabilities: { tools: {}, resources: {}, prompts: {} }, instructions: workflowContract.instructions,
   });
-  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: structuredClone(mapTools) }));
+  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: structuredClone(tools) }));
   const stableResourceUri = 'wayfinder://workflow/exploration';
   const versionedResourceUri = `${stableResourceUri}/${workflowContract.version}`;
   const resources = [stableResourceUri, versionedResourceUri].map(uri => ({
@@ -66,7 +69,7 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
       text: `${workflowContract.prompt}\n\nversion: ${workflowContract.version}. Mode: ${args.mode}.${selection}` } }] };
   });
   const callTool = async (request: CallToolRequest): Promise<CallToolResult> => {
-    const tool = mapTools.find(tool => tool.name === request.params.name);
+    const tool = tools.find(tool => tool.name === request.params.name);
     if (!tool) throw new McpError(ErrorCode.InvalidParams, 'Unknown Map tool');
     if (request.params.task !== undefined) throw new McpError(ErrorCode.InvalidParams, 'Task execution is not supported');
     const raw = request.params.arguments ?? {};
