@@ -49,11 +49,11 @@ async function tool(name, args) {
   return result.structuredContent;
 }
 // Real file access, so a sandboxed run shows what the agent can and cannot reach.
-const attempt = (command, action) => { let code = 0; try { action(); } catch { code = 1; }
+const tryFile = (command, action) => { let code = 0; try { action(); } catch { code = 1; }
   emit({ type: 'item.completed', item: { id: `item_${item++}`, type: 'command_execution', command, aggregated_output: '', exit_code: code, status: 'completed' } }); };
-attempt("/bin/zsh -lc 'cat README.md'", () => { if (existsSync('README.md')) readFileSync('README.md'); });
-attempt(`/bin/zsh -lc 'cat ${realHome}/workspace/AGENTS.md'`, () => readFileSync(join(realHome, 'workspace/AGENTS.md')));
-attempt("/bin/zsh -lc 'echo note > fake-note.txt'", () => writeFileSync('fake-note.txt', 'note\n'));
+tryFile("/bin/zsh -lc 'cat README.md'", () => { if (existsSync('README.md')) readFileSync('README.md'); });
+tryFile(`/bin/zsh -lc 'cat ${realHome}/workspace/AGENTS.md'`, () => readFileSync(join(realHome, 'workspace/AGENTS.md')));
+tryFile("/bin/zsh -lc 'echo note > fake-note.txt'", () => writeFileSync('fake-note.txt', 'note\n'));
 if (!/只用考虑飞书/.test(prompt)) {
   await tool('map_list', { limit: 100 });
   emit({ type: 'item.completed', item: { id: `item_${item++}`, type: 'agent_message', text: '建议目的地：飞书侧接入方案。请确认这个目的地和范围。' } });

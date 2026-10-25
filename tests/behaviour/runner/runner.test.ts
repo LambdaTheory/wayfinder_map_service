@@ -12,13 +12,16 @@ import { library } from '../library.ts';
 import { itemsOf } from '../scenario.ts';
 import { sandboxProfile } from './codex.ts';
 import { connectController } from './controller.ts';
-import { readsIn, relativePath } from './normalize.ts';
+import { normalizeTurn, readsIn, receiptsFrom, relativePath } from './normalize.ts';
 import { preflight, runAttempt, runBatch } from './run.ts';
 import type { BatchOptions } from './run.ts';
 import type { Scenario } from '../scenario.ts';
-import { newToken, startService } from './service.ts';
+import { freePort, newToken, startService } from './service.ts';
+import { createServer } from 'node:net';
 
 const scratch = realpathSync(mkdtempSync('/private/tmp/wf-behave-test-'));
+const sandboxAvailable = spawnSync('which', ['sandbox-exec']).status === 0;
+const fakeCodex = fileURLToPath(new URL('./fake-codex.mjs', import.meta.url));
 // The service refuses databases under temporary directories or inside a repository; tests keep theirs in Caches.
 const caches = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests');
 mkdirSync(caches, { recursive: true, mode: 0o700 });
@@ -64,16 +67,29 @@ describe('seeds against the real service', () => {
 });
 
 describe('sandbox', () => {
-  const available = spawnSync('which', ['sandbox-exec']).status === 0;
-  test.skipIf(!available)('hides the workspace and personal configuration, allows the run scratch', () => {
-    const profile = join(scratch, 'probe.sb');
-    writeFileSync(profile, sandboxProfile());
+  test.skipIf(!sandboxAvailable)('reads nothing in the home directory or other scratch, writes only its own, cannot reach blocked ports', async () => {
+    const own = mkdtempSync(join(scratch, 'own-'));
+    const other = mkdtempSync('/private/tmp/wf-behave-other-');
+    writeFileSync(join(other, 'secret.txt'), 'x');
+    const listener = createServer(socket => socket.end('hi'));
+    const port = await freePort();
+    await new Promise<void>(resolve => listener.listen(port, '127.0.0.1', resolve));
+    const profile = join(own, 'probe.sb');
+    writeFileSync(profile, sandboxProfile(own, [port]));
+    const q = JSON.stringify;
     const run = (cmd: string) => spawnSync('sandbox-exec', ['-f', profile, '/bin/sh', '-c', cmd], { encoding: 'utf8' }).status;
-    expect(run(`cat ${JSON.stringify(join(homedir(), 'workspace/AGENTS.md'))}`)).not.toBe(0);
-    expect(run(`ls ${JSON.stringify(join(homedir(), 'Library/Application Support/Wayfinder'))}`)).not.toBe(0);
-    expect(run(`touch ${JSON.stringify(join(homedir(), '.wf-behave-probe'))}`)).not.toBe(0);
-    expect(existsSync(join(homedir(), '.wf-behave-probe'))).toBe(false);
-    expect(run(`echo ok > ${JSON.stringify(join(scratch, 'probe.txt'))} && cat ${JSON.stringify(join(scratch, 'probe.txt'))}`)).toBe(0);
+    try {
+      expect(run(`cat ${q(join(homedir(), 'workspace/AGENTS.md'))}`)).not.toBe(0);
+      expect(run(`cat ${q(join(homedir(), '.zshrc'))} || cat ${q(join(homedir(), '.gitconfig'))}`)).not.toBe(0);
+      expect(run(`ls ${q(join(homedir(), 'Library/Application Support/Wayfinder'))}`)).not.toBe(0);
+      expect(run(`cat ${q(join(other, 'secret.txt'))}`)).not.toBe(0);
+      expect(run(`touch ${q(join(homedir(), '.wf-behave-probe'))}`)).not.toBe(0);
+      expect(run('touch /opt/homebrew/.wf-behave-probe || touch /usr/local/.wf-behave-probe')).not.toBe(0);
+      expect(existsSync(join(homedir(), '.wf-behave-probe'))).toBe(false);
+      expect(run(`echo ok > ${q(join(own, 'probe.txt'))} && cat ${q(join(own, 'probe.txt'))}`)).toBe(0);
+      expect(run(`node -e 1`)).toBe(0);
+      expect(run(`node -e "require('net').connect(${port}, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"`)).not.toBe(0);
+    } finally { listener.close(); rmSync(other, { recursive: true, force: true }); }
   });
 });
 
@@ -84,23 +100,30 @@ describe('normalizer', () => {
     expect(readsIn("/bin/zsh -lc 'sed -n 1,80p src/ask-card.js && cat README.md'", '/w')).toEqual(['src/ask-card.js', 'README.md']);
     expect(readsIn('/bin/zsh -lc "node --version"', '/w')).toEqual([]);
   });
+  test('a call still running when the turn ends leaves an unknown receipt', () => {
+    const lines = [{ type: 'turn.started' }, { type: 'item.started', item: { id: 'item_1', type: 'mcp_tool_call', server: 'wayfinder', tool: 'map_apply', arguments: { mapId: 'M' } } }];
+    const { events } = normalizeTurn(lines, 'A', 0, 'go', '', 0, '/w');
+    expect(receiptsFrom(events).map(r => r.outcome)).toEqual([{ kind: 'unknown', reason: 'the turn ended before the call completed' }]);
+  });
 });
 
 describe('one Attempt end to end, without a model', () => {
   test('S0b with the Codex stand-in: isolated, recorded, attributed, cleaned up', async () => {
     const out = join(records, 'runs', 'T-fake');
-    const fake = fileURLToPath(new URL('./fake-codex.mjs', import.meta.url));
-    const options = { batchId: 'T-fake', scenarios: ['S0b'], count: 1, ceiling: 1, model: 'fake-model', effort: 'low', out,
-      codex: { bin: fake, sandbox: false, timeoutMs: 60_000 }, scratchRoot: scratch };
+    const options: BatchOptions = { batchId: 'T-fake', scenarios: ['S0b'], count: 1, ceiling: 1, out,
+      codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs: 60_000 }, scratchRoot: scratch };
     const { outcomes, refusals } = await runBatch(options);
     expect(refusals).toEqual([]);
     expect(outcomes.map(o => [o.attemptId, o.completeness])).toEqual([['S0b-1', 'complete']]);
     const text = readFileSync(join(out, 'S0b-1', 'attempt.json'), 'utf8');
-    const record = JSON.parse(text) as AttemptRecord & { isolation: Record<string, unknown> };
+    const record = JSON.parse(text) as AttemptRecord & { isolation: { attribution: Record<string, unknown> } & Record<string, unknown> };
     expect(record.combination.visibleModel).toEqual({ known: true, value: 'fake-model' });
     expect(record.given[0]!.instructions.known).toBe(true);
     expect(record.receipts.map(r => [r.tool, r.turn, r.outcome.kind])).toEqual([['map_create', 1, 'committed'], ['map_apply', 1, 'committed']]);
-    expect(record.isolation).toMatchObject({ servedOwnDatabase: true, touchedRealDatabase: false, scratchRemoved: true });
+    expect(record.isolation).toMatchObject({ sandbox: false, servedOwnDatabase: true, scratchRemoved: true });
+    expect(record.isolation.touchedEverydayDatabase).not.toEqual({ known: true, value: true });
+    expect(record.isolation.attribution).toEqual({ agentRevisions: 2, committedReceipts: 2, mismatched: [], unplaced: [] });
+    expect(record.missing).toEqual([]);
     expect(text).not.toMatch(/[0-9a-f]{64}/);
     const s0b = library.find(s => s.id === 'S0b')!;
     const results = Object.fromEntries(itemsOf(s0b).flatMap(i => i.judge === 'script' ? [[i.id, i.check(record).status]] : []));
@@ -112,9 +135,8 @@ describe('one Attempt end to end, without a model', () => {
 });
 
 describe('every planned Attempt gets a result', () => {
-  const fake = fileURLToPath(new URL('./fake-codex.mjs', import.meta.url));
-  const options = (out: string, timeoutMs = 60_000): BatchOptions => ({ batchId: 'T-fail', scenarios: [], count: 1, ceiling: 1, model: 'fake-model', effort: 'low',
-    out, codex: { bin: fake, sandbox: false, timeoutMs }, scratchRoot: scratch });
+  const options = (out: string, timeoutMs = 60_000): BatchOptions => ({ batchId: 'T-fail', scenarios: [], count: 1, ceiling: 1,
+    out, codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs }, scratchRoot: scratch });
   const drill = (say: string): Scenario => ({ ...library.find(s => s.id === 'S12')!, id: 'Drill', turns: [{ session: 'A', kind: 'opening', say }] });
   const attempt = async (say: string, timeoutMs?: number, cancelled = () => false) => {
     const out = join(records, `fail-${Math.random().toString(36).slice(2)}`);
@@ -145,17 +167,17 @@ describe('every planned Attempt gets a result', () => {
 });
 
 describe('inside the sandbox', () => {
-  const available = spawnSync('which', ['sandbox-exec']).status === 0;
-  test.skipIf(!available)('the client reads and writes its fixture directory, cannot read the workspace, and its record is complete', async () => {
-    // The stand-in lives in the workspace, which the sandbox hides; run a copy from the scratch directory.
-    const fake = join(scratch, 'fake-codex.mjs');
-    copyFileSync(fileURLToPath(new URL('./fake-codex.mjs', import.meta.url)), fake);
+  test.skipIf(!sandboxAvailable)('the client reads and writes its fixture directory, cannot read the workspace, and its record is complete', async () => {
+    // The stand-in lives in the workspace, which the sandbox hides; run a copy from its own directory.
+    mkdirSync(join(scratch, 'client'), { recursive: true });
+    const fake = join(scratch, 'client', 'fake-codex.mjs');
+    copyFileSync(fakeCodex, fake);
     chmodSync(fake, 0o755);
     const out = join(records, 'sandboxed');
     const s15 = library.find(s => s.id === 'S15')!;
     const drill: Scenario = { ...s15, id: 'Drill', turns: [s15.turns[0]!] };
-    const outcome = await runAttempt({ batchId: 'T-sandbox', scenarios: [], count: 1, ceiling: 1, model: 'fake-model', effort: 'low', out,
-      codex: { bin: fake, sandbox: true, timeoutMs: 60_000 }, scratchRoot: scratch }, { attemptId: 'D-1', scenario: drill }, () => false, () => undefined);
+    const outcome = await runAttempt({ batchId: 'T-sandbox', scenarios: [], count: 1, ceiling: 1, out,
+      codex: { model: 'fake-model', effort: 'low', bin: fake, sandbox: true, timeoutMs: 60_000 }, scratchRoot: scratch }, { attemptId: 'D-1', scenario: drill }, () => false, () => undefined);
     expect(outcome.completeness).toBe('complete');
     const record = JSON.parse(readFileSync(join(out, 'D-1', 'attempt.json'), 'utf8')) as AttemptRecord;
     const commands = record.events.flatMap(e => e.kind === 'command' ? [[e.command.replace(homedir(), '~'), e.exitCode]] : []);
@@ -168,4 +190,3 @@ describe('inside the sandbox', () => {
     }
   }, 60_000);
 });
-

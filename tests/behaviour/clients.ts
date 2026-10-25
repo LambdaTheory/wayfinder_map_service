@@ -6,15 +6,16 @@ import type { Capability, Scenario } from './scenario.ts';
 /**
  * What each client supports. An Entry joins `onboarded` only when its Driver has passed the five onboarding checks
  * of R2 (B02a for Codex MCP-only, B02d and B06 for the rest); until then no cell is shown as applicable. `true`
- * means proven in a run; `'unverified'` means expected but not yet shown.
+ * means proven in a run, `false` known unsupported, `'unverified'` expected but not yet shown.
  */
 export const clientProfiles: Record<Harness, { onboarded: Entry[]; entries: Entry[]; supports: Partial<Record<Capability, boolean | 'unverified'>> }> = {
-  // Onboarded on 2026-10-25 by Batch B1-20261025 (#65): resumed sessions, sandboxed fixture access, complete records.
-  codex: { onboarded: ['mcp-only'], entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': true, 'workspace-files': true, commands: true,
+  // Batch B1-20261025 proved multi-turn resumption, but ran before the sandbox became an allowlist; onboarding
+  // waits for a run under the current profile (#65).
+  codex: { onboarded: [], entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': true, 'workspace-files': 'unverified', commands: 'unverified',
     'new-session': 'unverified', 'concurrent-sessions': 'unverified', 'resource-read': 'unverified', 'sub-agents': 'unverified', 'async-questions': false } },
-  claude: { onboarded: [], entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': true, 'new-session': true, 'concurrent-sessions': true,
-    'workspace-files': true, commands: true, 'resource-read': true, 'sub-agents': 'unverified', 'async-questions': false } },
-  chatgpt: { onboarded: [], entries: ['chatgpt'], supports: { 'multi-turn': true, 'new-session': true, 'concurrent-sessions': 'unverified',
+  claude: { onboarded: [], entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': 'unverified', 'new-session': 'unverified', 'concurrent-sessions': 'unverified',
+    'workspace-files': 'unverified', commands: 'unverified', 'resource-read': 'unverified', 'sub-agents': 'unverified', 'async-questions': false } },
+  chatgpt: { onboarded: [], entries: ['chatgpt'], supports: { 'multi-turn': 'unverified', 'new-session': 'unverified', 'concurrent-sessions': 'unverified',
     'workspace-files': false, commands: false, 'resource-read': false, 'sub-agents': false, 'async-questions': false } },
   pi: { onboarded: [], entries: ['mcp-only'], supports: {} },
   grok: { onboarded: [], entries: ['mcp-only'], supports: {} },

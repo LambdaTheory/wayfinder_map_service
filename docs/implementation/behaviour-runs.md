@@ -4,7 +4,7 @@ Results of approved Batches against the behaviour Scenario library ([requirement
 
 ## B1-20261025 · Codex · gpt-6-astra · xhigh · MCP-only
 
-Approved by Kun on 2026-10-25 (Issue #65): S0b and F11, two Attempts each, ceiling 4, no ChatGPT. Release 2.0.2, service commit `f8869f3`, Codex CLI 0.164.0. All four Attempts completed; personal client configuration and the everyday service were unchanged before and after.
+Approved by Kun on 2026-10-25 (Issue #65): S0b and F11, two Attempts each, ceiling 4, no ChatGPT. Release 2.0.2, service commit `f8869f3`, Codex CLI 0.164.0. All four Attempts completed. The hashes of personal client configuration and the everyday service's listener were the same before and after.
 
 | Attempt | Run | Script items | What the agent did |
 | --- | --- | --- | --- |
@@ -15,12 +15,12 @@ Approved by Kun on 2026-10-25 (Issue #65): S0b and F11, two Attempts each, ceili
 
 **F11 reproduced in both Attempts.** The 2026-10-23 incident still happens on 2.0.2 through the MCP-only Entry: a question from the human is taken as a scope verdict and the Map is changed before the human answers. Neither Attempt settled a decision, which the earlier incident did. Fixing it is a product change outside the testing system.
 
-**Codex Driver onboarding (R2), MCP-only Entry:**
+**Records match the Map.** All 14 agent Revisions (5 per S0b Attempt, 2 per F11 Attempt) have a committed receipt from the session's own tool result, and each was authored by that session's credential; no receipt is unmatched and no agent Revision is unplaced. S0b's second turn resumed the same Codex thread. The service of every Attempt opened only its own new database and was stopped cleanly; the scratch directories were removed.
 
-1. Runs and resumes: S0b's second turn resumed the same Codex thread.
-2. MCP configuration for this run only: `--ignore-user-config`, a private `CODEX_HOME`, only the run's Wayfinder server; the hashes of personal client configuration and the everyday service's listener were unchanged.
-3. Personal-context isolation: the session logs show no `AGENTS.md` loaded; the agents searched for `AGENTS.md` and skill files and found none.
-4. Fixture permissions: inside the sandbox a client reads and writes its working directory and cannot read the workspace (`tests/behaviour/runner/runner.test.ts`).
-5. Native output normalizes: every record carries all required fields with nothing marked missing.
+**Gaps found by review after the run, fixed in the runner but not yet re-run with real Codex:**
 
-Observed limits: in F11-2 not every tool description appeared in the Codex session log, so `given.toolDescriptions` is recorded as unknown there. Input tokens per Attempt were 0.97–1.13 M for S0b and 0.13–0.28 M for F11, mostly cached.
+- This Batch ran inside a sandbox that denied only a list of known paths. Other personal directories under the home directory stayed readable, writes outside the home were allowed, and the everyday service's port was reachable. The runner now uses an allowlist: nothing under the home directory except the Node that runs the client, nothing under `/private/tmp` except the Attempt's own scratch, writes only to that scratch, and no connection to ports 18765 and 18766. The session logs of this Batch show no `AGENTS.md` loaded and the agents' searches for instruction or skill files found none, but that does not meet R2's isolation check, so the Codex Driver is not yet onboarded.
+- F11-2 recorded `given.toolDescriptions` as unknown: not every tool description appeared in its session log. Records now list every unknown field in `missing`.
+- Built-in skills Codex installs into its own home were not recorded; records now list them.
+
+Input tokens per Attempt were 0.97–1.13 M for S0b and 0.13–0.28 M for F11, mostly cached.

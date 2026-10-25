@@ -1,7 +1,7 @@
 // Codex `exec --json` output and its session log, normalized into the evidence record of `../evidence.ts`.
 import { readFileSync } from 'node:fs';
 import { classifyResult } from '../evidence.ts';
-import type { EventRecord, Receipt } from '../evidence.ts';
+import type { EventRecord, GivenRules, Receipt } from '../evidence.ts';
 
 interface CodexItem {
   id: string; type: string; text?: string; command?: string; exit_code?: number | null; server?: string; tool?: string;
@@ -16,10 +16,11 @@ export const parseLines = (stdout: string): Line[] => stdout.split('\n').flatMap
 });
 
 const readers = /(?:^|[\s;&|('"])(?:cat|head|tail|sed|nl|less|more|awk|rg|grep|wc)\s+([^;&|]*)/g;
+const unquote = (text: string) => text.replace(/^['"]|['"]$/g, '');
 
 /** Workdir-relative POSIX path, or `<outside>/…` for anything outside it (R3 path rule). */
 export function relativePath(path: string, workdir: string): string {
-  const clean = path.replace(/^['"]|['"]$/g, '');
+  const clean = unquote(path);
   if (clean.startsWith(workdir + '/')) return clean.slice(workdir.length + 1);
   if (clean.startsWith('/')) return `<outside>${clean.replace(/^\/(Users|home)\/[^/]+/, '')}`;
   return clean.replace(/^\.\//, '');
@@ -30,7 +31,7 @@ export function readsIn(command: string, workdir: string): string[] {
   const out: string[] = [];
   for (const m of command.matchAll(readers)) {
     for (const arg of (m[1] ?? '').split(/\s+/)) {
-      const a = arg.replace(/^['"]|['"]$/g, '');
+      const a = unquote(arg);
       if (!a || a.startsWith('-') || /^\d/.test(a) || !/[./]/.test(a) || /^[^/]*['"$]/.test(a)) continue;
       out.push(relativePath(a, workdir));
     }
@@ -48,11 +49,14 @@ export function normalizeTurn(lines: Line[], session: string, turn: number, inpu
   events.push({ ...base('script-human'), kind: 'message', role: 'user', text: input });
   const usage = { inputTokens: 0, outputTokens: 0 };
   const errors: string[] = [];
+  const pending = new Map<string, CodexItem>();
   for (const line of lines) {
+    if (line.type === 'item.started' && line.item?.type === 'mcp_tool_call') pending.set(line.item.id, line.item);
     if (line.type === 'turn.completed' && line.usage) { usage.inputTokens += line.usage.input_tokens ?? 0; usage.outputTokens += line.usage.output_tokens ?? 0; }
     if ((line.type === 'error' || line.type === 'turn.failed') && line.message) errors.push(line.message);
     if (line.type !== 'item.completed' || !line.item) continue;
     const item = line.item;
+    pending.delete(item.id);
     switch (item.type) {
       case 'agent_message': events.push({ ...base('agent'), kind: 'message', role: 'assistant', text: item.text ?? '' }); break;
       case 'command_execution':
@@ -74,6 +78,11 @@ export function normalizeTurn(lines: Line[], session: string, turn: number, inpu
       case 'collab_tool_call': events.push({ ...base('agent'), kind: 'delegation', phase: 'start', id: item.id, summary: item.tool ?? 'collab' }); break;
       default: break;
     }
+  }
+  // A call still running when the turn ended (timeout, cancellation) has no known outcome; its receipt stays unknown.
+  for (const item of pending.values()) {
+    events.push({ ...base('agent'), kind: 'tool-call', callId: item.id, server: item.server ?? '', tool: item.tool ?? '', arguments: item.arguments ?? null,
+      result: { known: false, reason: 'the turn ended before the call completed' }, failed: false, requestId: { known: false, reason: 'Codex does not report JSON-RPC request IDs' } });
   }
   return { events, usage, errors };
 }
@@ -116,5 +125,17 @@ export function readRollout(path: string): RolloutFacts {
   return { visibleModel, effort, cliVersion, text };
 }
 
-/** Content counts as shown only if its opening appears in what the client sent its model. */
-export const shown = (rolloutText: string, content: string) => content.length > 0 && rolloutText.includes(JSON.stringify(content.slice(0, 80)).slice(1, -1));
+/** Content counts as shown only if every non-blank line of it appears in what the client sent its model. */
+export function shown(rolloutText: string, content: string): boolean {
+  const lines = content.split('\n').map(l => l.trim()).filter(Boolean);
+  return lines.length > 0 && lines.every(line => rolloutText.includes(JSON.stringify(line).slice(1, -1)));
+}
+
+/** The rules the client was given in its first phase, claimed as read only where the session log shows them. */
+export function initialRules(version: string, instructions: string, toolDescriptions: Record<string, string>, rollout: RolloutFacts | null): GivenRules {
+  const absent = (what: string) => ({ known: false as const, reason: rollout ? `${what} not found in what the client sent its model` : 'no session log' });
+  return { phase: 'initial', fromSeq: 0, compatibilityMode: 'instructions', rulesSource: { kind: 'instructions', versionLine: `version: ${version}` },
+    instructions: rollout && shown(rollout.text, instructions) ? { known: true, value: instructions } : absent('the instructions'),
+    toolDescriptions: rollout && Object.values(toolDescriptions).every(d => shown(rollout.text, d)) ? { known: true, value: toolDescriptions } : absent('some tool descriptions'),
+    resources: 'undocumented', prompts: 'undocumented', extraContext: [] };
+}

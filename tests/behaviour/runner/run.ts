@@ -8,15 +8,16 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { attemptSchema, leaks, redact } from '../evidence.ts';
-import type { AttemptRecord, Completeness, EventRecord, GivenRules, SessionRecord } from '../evidence.ts';
+import type { AttemptRecord, Completeness, EventRecord, Field, SessionRecord } from '../evidence.ts';
 import { library } from '../library.ts';
 import { fixturesRoot, readiness, validateScenario } from '../scenario.ts';
 import type { Scenario } from '../scenario.ts';
-import { findRollout, looksRateLimited, prepareSession, prepareWorkdir, runTurn, writeProfile } from './codex.ts';
-import type { CodexOptions } from './codex.ts';
+import { clientSkills, findRollout, loginSecrets, looksRateLimited, prepareSession, prepareWorkdir, runTurn, writeProfile } from './codex.ts';
+import type { CodexOptions, CodexSession } from './codex.ts';
 import { connectController } from './controller.ts';
-import { normalizeTurn, parseLines, readRollout, receiptsFrom, shown } from './normalize.ts';
-import { checkoutRoot, newToken, startService } from './service.ts';
+import { initialRules, normalizeTurn, parseLines, readRollout, receiptsFrom } from './normalize.ts';
+import type { RolloutFacts } from './normalize.ts';
+import { checkoutRoot, everydayPort, newToken, startService } from './service.ts';
 import type { Credential } from './service.ts';
 
 export interface BatchOptions {
@@ -24,11 +25,9 @@ export interface BatchOptions {
   scenarios: string[];
   count: number;
   ceiling: number;
-  model: string;
-  effort: string;
   out: string;
-  codex: Omit<CodexOptions, 'model' | 'effort'>;
-  /** Where per-Attempt scratch (HOME, working directory) lives; must be outside the real home for the sandbox. */
+  codex: CodexOptions;
+  /** Where per-Attempt scratch (HOME, working directory) lives; outside the home directory, which the sandbox hides. */
   scratchRoot: string;
 }
 
@@ -45,58 +44,71 @@ export function preflight(o: Pick<BatchOptions, 'scenarios' | 'count' | 'ceiling
   for (const id of o.scenarios) {
     const s = library.find(x => x.id === id);
     if (!s) { refusals.push(`${id}: no such Scenario`); continue; }
-    const problems = [...validateScenario(s), ...readiness(s).map(r => `${id}: not ready: ${r}`)];
-    if (!s.applies.entries.includes('mcp-only')) problems.push(`${id}: does not apply to the MCP-only Entry`);
-    if (s.controller.length) problems.push(`${id}: Controller actions (${s.controller.map(a => a.action).join(', ')}) are not supported by this runner yet (B02b)`);
-    if (s.turns.some(t => t.concurrent || t.freshProcess)) problems.push(`${id}: concurrent or fresh-process sessions are not supported by this runner yet (B02b)`);
-    if (new Set(s.turns.map(t => t.session)).size > 1) problems.push(`${id}: several sessions are not supported by this runner yet (B02b)`);
-    if (s.seed.restores === 'history') problems.push(`${id}: history seeds are not supported by this runner yet (B04)`);
-    refusals.push(...problems);
+    refusals.push(...validateScenario(s), ...readiness(s).map(r => `${id}: not ready: ${r}`));
+    if (!s.applies.entries.includes('mcp-only')) refusals.push(`${id}: does not apply to the MCP-only Entry`);
+    if (s.controller.length) refusals.push(`${id}: Controller actions (${s.controller.map(a => a.action).join(', ')}) are not supported by this runner yet (B02b)`);
+    if (s.turns.some(t => t.concurrent || t.freshProcess)) refusals.push(`${id}: concurrent or fresh-process sessions are not supported by this runner yet (B02b)`);
+    if (new Set(s.turns.map(t => t.session)).size > 1) refusals.push(`${id}: several sessions are not supported by this runner yet (B02b)`);
+    if (s.seed.restores === 'history') refusals.push(`${id}: history seeds are not supported by this runner yet (B04)`);
     for (let k = 1; k <= o.count; k++) plan.push({ attemptId: `${id}-${k}`, scenario: s });
   }
   return { plan, refusals };
 }
 
-const tilde = (p: string) => p.replace(homedir(), '~');
+const tilde = (p: string) => p.split(homedir()).join('~');
 const sha = (path: string) => existsSync(path) ? createHash('sha256').update(readFileSync(path)).digest('hex') : null;
+const lsof = (...args: string[]) => spawnSync('lsof', args, { encoding: 'utf8' }).stdout;
+const everydayPid = () => lsof('-nP', `-iTCP:${everydayPort}`, '-sTCP:LISTEN', '-t').trim() || null;
+const openDatabases = (pid: string | number) => lsof('-p', String(pid), '-Fn').split('\n').filter(l => l.startsWith('n') && /\.sqlite$/.test(l)).map(l => l.slice(1));
 
-/** Global state the runner must leave alone: personal client configuration, the everyday service's credentials and listener. */
+/** Global state the runner must leave alone: personal client configuration and the everyday service. */
 export function isolationSnapshot() {
   const files = ['.codex/config.toml', '.codex/auth.json', '.claude/settings.json', '.codex-wayfinder/config.toml', '.wayfinder-service/credentials.json']
     .map(f => join(homedir(), f));
-  const listener = spawnSync('lsof', ['-nP', '-iTCP:18766', '-sTCP:LISTEN', '-t'], { encoding: 'utf8' }).stdout.trim() || null;
-  return { files: Object.fromEntries(files.map(f => [tilde(f), sha(f)])), everydayServicePid: listener };
+  return { files: Object.fromEntries(files.map(f => [tilde(f), sha(f)])), everydayServicePid: everydayPid() };
 }
 
-/** The real database path, read only to prove the runner's services never opened it; never recorded. */
-function realDatabasePath(): string | null {
-  const env = join(homedir(), 'workspace/runtime/repos/wayfinder_map_service/.env.local');
-  if (!existsSync(env)) return null;
-  return /^WAYFINDER_DATABASE_PATH=["']?([^"'\n]+)/m.exec(readFileSync(env, 'utf8'))?.[1] ?? null;
-}
-
-function openDatabases(pid: number): string[] {
-  const out = spawnSync('lsof', ['-p', String(pid), '-Fn'], { encoding: 'utf8' }).stdout;
-  return out.split('\n').filter(l => l.startsWith('n') && /\.sqlite/.test(l)).map(l => l.slice(1));
+/** Whether the Attempt's service opened the everyday service's database; null when no everyday service runs to locate it. */
+function touchedEverydayDatabase(opened: string[]): Field<boolean> {
+  const pid = everydayPid();
+  if (!pid) return { known: false, reason: 'no everyday service running, so its database could not be located' };
+  const everyday = openDatabases(pid);
+  return everyday.length ? { known: true, value: opened.some(p => everyday.includes(p)) } : { known: false, reason: 'the everyday service shows no open database' };
 }
 
 const codexVersion = (bin: string) => { try { return execFileSync(bin, ['--version'], { encoding: 'utf8' }).trim(); } catch { return null; } };
-const serviceCommit = () => execFileSync('git', ['-C', checkoutRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+const serviceCommit = () => { try { return execFileSync('git', ['-C', checkoutRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(); } catch { return 'unknown'; } };
+
+interface Session { label: string; credential: Credential; codex: CodexSession; record: SessionRecord; rollout: RolloutFacts | null }
+
+/** Every committed receipt must name a Revision its session's credential authored; agent Revisions without one stay unplaced. */
+function attribution(record: AttemptRecord) {
+  const clientOf = Object.fromEntries(record.sessions.map(s => [s.label, s.clientId]));
+  const revisions = record.maps.flatMap(m => m.history.filter(r => m.seedHeadRevision === null || r.revision > m.seedHeadRevision));
+  const committed = record.receipts.filter(r => r.outcome.kind === 'committed');
+  const mismatched = committed.filter(r => !revisions.some(v => v.mapId === r.mapId && r.outcome.kind === 'committed' && v.revision === r.outcome.revision
+    && v.author.clientId === clientOf[r.session])).map(r => r.callId);
+  const unplaced = revisions.filter(v => v.author.clientId !== record.controller.clientId
+    && !committed.some(r => r.mapId === v.mapId && r.outcome.kind === 'committed' && r.outcome.revision === v.revision)).map(v => `${v.mapId}@${v.revision}`);
+  return { agentRevisions: revisions.length, committedReceipts: committed.length, mismatched, unplaced };
+}
 
 export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: () => boolean, register: (kill: () => void) => void): Promise<AttemptOutcome> {
   const s = p.scenario;
   const dir = join(o.out, p.attemptId);
   mkdirSync(join(dir, 'raw'), { recursive: true, mode: 0o700 });
   const scratch = mkdtempSync(join(o.scratchRoot, `wf-behave-${p.attemptId}-`));
-  const tag = `${o.batchId}.${p.attemptId}`;
   const controller: Credential = { clientId: 'Behaviour-Controller', token: newToken() };
-  const labels = [...new Set(s.turns.map(t => t.session))];
-  const agents = Object.fromEntries(labels.map(l => [l, { clientId: `Behaviour.${tag}.${l}`, token: newToken() }]));
-  const secrets: Record<string, string> = { 'controller-token': controller.token, ...Object.fromEntries(labels.map(l => [`token-${l}`, agents[l]!.token])) };
+  const sessions: Session[] = [...new Set(s.turns.map(t => t.session))].map(label => {
+    const credential = { clientId: `Behaviour.${o.batchId}.${p.attemptId}.${label}`, token: newToken() };
+    return { label, credential, codex: prepareSession(scratch, label, credential.token), rollout: null,
+      record: { label, nativeId: { known: false, reason: 'no thread started' }, clientId: credential.clientId,
+        mcpSessionIds: { known: false, reason: 'Codex does not report MCP session IDs; service metadata (B07) will' }, turns: [] } };
+  });
+  const secrets: Record<string, string> = { 'controller-token': controller.token,
+    ...Object.fromEntries(sessions.flatMap(x => [[`token-${x.label}`, x.credential.token], ...loginSecrets(x.codex).map((v, i) => [`codex-login-${x.label}-${i}`, v])])) };
   const startedAt = new Date().toISOString();
   const events: EventRecord[] = [];
-  const sessions: SessionRecord[] = labels.map(l => ({ label: l, nativeId: { known: false, reason: 'no thread started' }, clientId: agents[l]!.clientId,
-    mcpSessionIds: { known: false, reason: 'Codex does not report MCP session IDs; service metadata (B07) will' }, turns: [] }));
   const rawFiles: string[] = [];
   const writeRaw = (name: string, text: string) => { writeFileSync(join(dir, 'raw', name), tilde(redact(text, secrets)), { mode: 0o600 }); rawFiles.push(name); };
   const usage = { inputTokens: 0, outputTokens: 0 };
@@ -106,97 +118,92 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   let service: Awaited<ReturnType<typeof startService>> | undefined;
   let ctl: Awaited<ReturnType<typeof connectController>> | undefined;
   const seedHeads: Record<string, number> = {};
-  let openedDatabases: string[] = [];
-  let rollout: ReturnType<typeof readRollout> | null = null;
+  const opened = new Set<string>();
+  let skills: string[] = [];
   try {
-    service = await startService(join(dir, 'service'), controller, Object.values(agents));
-    openedDatabases = openDatabases(service.pid);
+    service = await startService(join(dir, 'service'), controller, sessions.map(x => x.credential));
+    openDatabases(service.pid).forEach(d => opened.add(d));
     ctl = await connectController(service.port, controller.token);
     for (const map of s.seed.maps) seedHeads[map.mapId] = await ctl.seed(map);
     const workdir = prepareWorkdir(scratch, s.seed.fixtures, fixturesRoot);
-    const profile = writeProfile(scratch);
-    const codexSessions = Object.fromEntries(labels.map(l => [l, prepareSession(scratch, l, agents[l]!.token)]));
-    const threads: Record<string, string | null> = Object.fromEntries(labels.map(l => [l, null]));
+    const profile = writeProfile(scratch, o.codex.bin);
     let seq = 0;
     for (const [index, turn] of s.turns.entries()) {
       if (cancelled()) { completeness = 'cancelled'; break; }
+      const session = sessions.find(x => x.label === turn.session)!;
       if (turn.kind === 'reply') {
-        const last = [...events].reverse().find(e => e.kind === 'message' && e.role === 'assistant' && e.session === turn.session);
+        const last = events.findLast(e => e.kind === 'message' && e.role === 'assistant' && e.session === turn.session);
         if (!last || last.kind !== 'message' || !turn.answers!.cue.test(last.text)) {
           completeness = 'precondition-not-met'; detail = `turn ${index}: the proposal "${turn.answers!.proposal}" did not appear`; break;
         }
       }
-      const r = await runTurn({ ...o.codex, model: o.model, effort: o.effort }, codexSessions[turn.session]!, service.port, workdir, turn.say,
-        threads[turn.session]!, profile, register);
+      const r = await runTurn({ options: o.codex, session: session.codex, port: service.port, workdir, prompt: turn.say, profile, onChild: register });
       writeRaw(`turn-${index}-${turn.session}.stdout.jsonl`, r.stdout);
       if (r.stderr.trim()) writeRaw(`turn-${index}-${turn.session}.stderr.txt`, r.stderr);
       const n = normalizeTurn(parseLines(r.stdout), turn.session, index, turn.say, r.startedAt, seq, workdir);
       seq += n.events.length;
       events.push(...n.events);
       usage.inputTokens += n.usage.inputTokens; usage.outputTokens += n.usage.outputTokens;
-      threads[turn.session] = r.threadId;
-      const record = sessions.find(x => x.label === turn.session)!;
-      if (r.threadId) record.nativeId = { known: true, value: r.threadId };
-      record.turns.push({ index, input: turn.say, startedAt: r.startedAt, endedAt: r.endedAt, durationMs: r.durationMs });
+      if (r.threadId) session.record.nativeId = { known: true, value: r.threadId };
+      session.record.turns.push({ index, input: turn.say, startedAt: r.startedAt, endedAt: r.endedAt, durationMs: r.durationMs });
+      openDatabases(service.pid).forEach(d => opened.add(d));
       if (cancelled()) { completeness = 'cancelled'; break; }
       if (r.timedOut) { completeness = 'timeout'; detail = `turn ${index} exceeded ${o.codex.timeoutMs} ms`; break; }
-      if (r.exitCode !== 0) {
-        completeness = !r.threadId ? 'launch-failed' : looksRateLimited(r) ? 'rate-limited' : 'driver-failed';
+      if (r.exitCode !== 0 || !r.turnStarted) {
+        completeness = !r.turnStarted ? 'launch-failed' : looksRateLimited(r) ? 'rate-limited' : 'driver-failed';
         detail = `turn ${index}: exit ${r.exitCode ?? r.signal}; ${[...n.errors, r.stderr.trim().split('\n').at(-1) ?? ''].join(' ').slice(0, 300)}`;
         break;
       }
     }
-    const first = labels[0]!;
-    const thread = threads[first];
-    const rolloutPath = thread ? findRollout(codexSessions[first]!.codexHome, thread) : null;
-    if (rolloutPath) { rollout = readRollout(rolloutPath); writeRaw(`rollout-${first}.jsonl`, rollout.text); } else missing.push('combination.visibleModel', 'given.instructions', 'given.toolDescriptions');
+    for (const session of sessions) {
+      const path = findRollout(session.codex);
+      if (path) { session.rollout = readRollout(path); writeRaw(`rollout-${session.label}.jsonl`, session.rollout.text); }
+    }
+    skills = [...new Set(sessions.flatMap(x => clientSkills(x.codex)))];
     cpSync(workdir, join(dir, 'raw', 'work'), { recursive: true, filter: src => !src.includes('/node_modules') });
     rawFiles.push('work/');
   } catch (error) {
-    completeness = service ? 'driver-failed' : 'service-failed';
-    detail = String(error instanceof Error ? error.message : error).slice(0, 300);
+    if (completeness === 'complete') completeness = service ? 'driver-failed' : 'service-failed';
+    detail = `${detail ?? ''} ${String(error instanceof Error ? error.message : error)}`.trim().slice(0, 300);
   }
   let maps: AttemptRecord['maps'] = [];
   try {
-    if (ctl) maps = (await ctl.exportCatalog()).map(m => ({ mapId: m.mapId, seedHeadRevision: seedHeads[m.mapId] ?? null, history: m.history }));
-    else missing.push('maps');
-  } catch (error) { missing.push('maps'); detail = `${detail ?? ''} catalog export failed: ${String(error)}`.trim(); }
+    if (!ctl) throw new Error('no Controller connection');
+    maps = (await ctl.exportCatalog()).map(m => ({ mapId: m.mapId, seedHeadRevision: seedHeads[m.mapId] ?? null, history: m.history }));
+  } catch (error) { missing.push('maps'); detail = `${detail ?? ''} catalog export failed: ${String(error instanceof Error ? error.message : error)}`.trim(); }
   await ctl?.close().catch(() => undefined);
   const stopped = await service?.stop();
   if (service) { writeRaw('protocol.jsonl', existsSync(service.protocolReport) ? readFileSync(service.protocolReport, 'utf8') : ''); writeRaw('service.log', service.logs()); }
-  for (const session of labels) rmSync(join(scratch, `home-${session}`, '.codex', 'auth.json'), { force: true });
   rmSync(scratch, { recursive: true, force: true });
-  const realDb = realDatabasePath();
-  const instructions = ctl?.instructions ?? '';
-  const given: GivenRules = { phase: 'initial', fromSeq: 0, compatibilityMode: 'instructions',
-    rulesSource: { kind: 'instructions', versionLine: `version: ${ctl?.version ?? 'unknown'}` },
-    instructions: rollout && shown(rollout.text, instructions.split('\n')[0] ?? '') ? { known: true, value: instructions }
-      : { known: false, reason: rollout ? 'the instructions do not appear in what the client sent its model' : 'no session log' },
-    toolDescriptions: rollout && ctl && Object.values(ctl.toolDescriptions).every(d => shown(rollout!.text, d)) ? { known: true, value: ctl.toolDescriptions }
-      : { known: false, reason: rollout ? 'not every tool description appears in what the client sent its model' : 'no session log' },
-    resources: 'undocumented', prompts: 'undocumented', extraContext: [] };
+  const first = sessions[0]!.rollout;
+  const visibleModel: Field<string> = first?.visibleModel ? { known: true, value: first.visibleModel } : { known: false, reason: 'not in the session log' };
+  const effort: Field<string> = first?.effort ? { known: true, value: first.effort } : { known: false, reason: `not in the session log; requested ${o.codex.effort}` };
+  const version = codexVersion(o.codex.bin);
+  const clientVersion: Field<string> = first?.cliVersion ? { known: true, value: first.cliVersion } : version ? { known: true, value: version } : { known: false, reason: 'codex --version failed' };
+  const given = initialRules(ctl?.version ?? 'unknown', ctl?.instructions ?? '', ctl?.toolDescriptions ?? {}, first);
   const record: AttemptRecord = {
     schema: attemptSchema, attemptId: `${o.batchId}/${p.attemptId}`, batchId: o.batchId, subject: { kind: 'scenario', id: s.id, version: s.version },
-    entry: 'mcp-only',
-    combination: { harness: 'codex', requestedModel: o.model,
-      visibleModel: rollout?.visibleModel ? { known: true, value: rollout.visibleModel } : { known: false, reason: 'not in the session log' },
-      effort: rollout?.effort ? { known: true, value: rollout.effort } : { known: true, value: `${o.effort} (requested)` } },
-    client: { version: rollout?.cliVersion ? { known: true, value: rollout.cliVersion } : (v => v ? { known: true as const, value: v } : { known: false as const, reason: 'codex --version failed' })(codexVersion(o.codex.bin)),
-      surface: { known: true, value: 'codex exec' } },
+    entry: 'mcp-only', combination: { harness: 'codex', requestedModel: o.codex.model, visibleModel, effort },
+    client: { version: clientVersion, surface: { known: true, value: 'codex exec' } },
     service: { commit: serviceCommit(), series: 'release', version: ctl?.version ?? 'unknown' },
     given: [given],
     run: { startedAt, endedAt: new Date().toISOString(), completeness, ...(detail ? { detail } : {}) },
     controller: { clientId: controller.clientId }, baitClientIds: [],
-    sessions, events, maps, receipts: receiptsFrom(events),
+    sessions: sessions.map(x => x.record), events, maps, receipts: receiptsFrom(events),
     usage: usage.inputTokens || usage.outputTokens ? { known: true, value: usage } : { known: false, reason: 'no usage reported' },
     raw: { path: join(o.batchId, p.attemptId, 'raw'), files: rawFiles },
-    missing: [...new Set(missing)],
+    missing: [],
   };
-  const isolation = { serviceStopped: stopped ?? null, openDatabases: openedDatabases.length, servedOwnDatabase: service ? openedDatabases.includes(service.databasePath) : false,
-    touchedRealDatabase: realDb ? openedDatabases.includes(realDb) : false, scratchRemoved: !existsSync(scratch) };
-  const text = JSON.stringify({ ...record, isolation }, null, 1);
-  if (leaks(text, secrets).length) throw new Error(`a credential would leak into ${p.attemptId}`);
-  writeFileSync(join(dir, 'attempt.json'), tilde(text), { mode: 0o600 });
+  // Every field recorded as unknown is also listed, so a gap is visible without walking the record.
+  const unknownFields: [string, Field<unknown>][] = [['combination.visibleModel', visibleModel], ['combination.effort', effort], ['client.version', clientVersion],
+    ['given[0].instructions', given.instructions], ['given[0].toolDescriptions', given.toolDescriptions], ['usage', record.usage],
+    ...record.sessions.map((x, i): [string, Field<unknown>] => [`sessions[${i}].nativeId`, x.nativeId])];
+  record.missing = [...new Set([...missing, ...unknownFields.filter(([, f]) => !f.known).map(([path]) => path)])];
+  const isolation = { sandbox: o.codex.sandbox, serviceStopped: stopped ?? null, servedOwnDatabase: service ? opened.has(service.databasePath) : false,
+    touchedEverydayDatabase: touchedEverydayDatabase([...opened]), scratchRemoved: !existsSync(scratch), clientSkills: skills, attribution: attribution(record) };
+  const text = tilde(redact(JSON.stringify({ ...record, isolation }, null, 1), secrets));
+  if (leaks(text, secrets).length) return { attemptId: p.attemptId, scenario: s.id, completeness: 'driver-failed', detail: 'a credential survived redaction; record withheld' };
+  writeFileSync(join(dir, 'attempt.json'), text, { mode: 0o600 });
   return { attemptId: p.attemptId, scenario: s.id, completeness, ...(detail ? { detail } : {}), record: join(p.attemptId, 'attempt.json') };
 }
 
@@ -204,7 +211,7 @@ export async function runBatch(o: BatchOptions): Promise<{ outcomes: AttemptOutc
   const { plan, refusals } = preflight(o);
   if (refusals.length) return { outcomes: [], refusals };
   if (existsSync(o.out)) return { outcomes: [], refusals: [`${tilde(o.out)} already exists; a Batch never reuses an output directory`] };
-  if (o.scratchRoot.startsWith(homedir())) return { outcomes: [], refusals: ['scratch must live outside the home directory, where the sandbox allows writes'] };
+  if (o.scratchRoot.startsWith(homedir())) return { outcomes: [], refusals: ['scratch must live outside the home directory, which the sandbox hides'] };
   mkdirSync(o.out, { recursive: true, mode: 0o700 });
   const before = isolationSnapshot();
   let cancel = false;
@@ -214,15 +221,21 @@ export async function runBatch(o: BatchOptions): Promise<{ outcomes: AttemptOutc
   const outcomes: AttemptOutcome[] = [];
   try {
     for (const [i, p] of plan.entries()) {
-      if (i >= o.ceiling) { outcomes.push({ attemptId: p.attemptId, scenario: p.scenario.id, completeness: 'not-run', detail: `ceiling ${o.ceiling} reached` }); continue; }
-      if (cancel) { outcomes.push({ attemptId: p.attemptId, scenario: p.scenario.id, completeness: 'cancelled', detail: 'cancelled before start' }); continue; }
-      outcomes.push(await runAttempt(o, p, () => cancel, k => { kill = k; }));
-      console.log(`${p.attemptId}: ${outcomes.at(-1)!.completeness}${outcomes.at(-1)!.detail ? ` (${outcomes.at(-1)!.detail})` : ''}`);
+      let outcome: AttemptOutcome;
+      if (i >= o.ceiling) outcome = { attemptId: p.attemptId, scenario: p.scenario.id, completeness: 'not-run', detail: `ceiling ${o.ceiling} reached` };
+      else if (cancel) outcome = { attemptId: p.attemptId, scenario: p.scenario.id, completeness: 'cancelled', detail: 'cancelled before start' };
+      else {
+        try { outcome = await runAttempt(o, p, () => cancel, k => { kill = k; }); }
+        catch (error) { outcome = { attemptId: p.attemptId, scenario: p.scenario.id, completeness: 'driver-failed', detail: String(error instanceof Error ? error.message : error).slice(0, 300) }; }
+      }
+      outcomes.push(outcome);
+      console.log(`${p.attemptId}: ${outcome.completeness}${outcome.detail ? ` (${outcome.detail})` : ''}`);
     }
   } finally { process.off('SIGINT', onSignal); process.off('SIGTERM', onSignal); }
   const after = isolationSnapshot();
-  writeFileSync(join(o.out, 'batch.json'), JSON.stringify({ batchId: o.batchId, combination: `codex:${o.model}:${o.effort}`, entry: 'mcp-only',
-    plan: plan.map(p => p.attemptId), ceiling: o.ceiling, outcomes, isolation: { before, after, unchanged: JSON.stringify(before) === JSON.stringify(after) } }, null, 1), { mode: 0o600 });
+  writeFileSync(join(o.out, 'batch.json'), JSON.stringify({ batchId: o.batchId, combination: `codex:${o.codex.model}:${o.codex.effort}`, entry: 'mcp-only',
+    sandbox: o.codex.sandbox, plan: plan.map(p => p.attemptId), ceiling: o.ceiling, outcomes,
+    isolation: { before, after, unchanged: JSON.stringify(before) === JSON.stringify(after) } }, null, 1), { mode: 0o600 });
   return { outcomes, refusals: [] };
 }
 
@@ -235,8 +248,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exit(2);
   }
   const result = await runBatch({ batchId: values.batch, scenarios: values.scenarios.split(','), count: Number(values.count), ceiling: Number(values.ceiling),
-    model: values.model, effort: values.effort, out: values.out ?? join(homedir(), 'Library/Application Support/Wayfinder/behaviour-runs', values.batch),
-    codex: { bin: values.codex, sandbox: !values['no-sandbox'], timeoutMs: Number(values['timeout-min']) * 60_000 }, scratchRoot: '/private/tmp' });
+    out: values.out ?? join(homedir(), 'Library/Application Support/Wayfinder/behaviour-runs', values.batch), scratchRoot: '/private/tmp',
+    codex: { model: values.model, effort: values.effort, bin: values.codex, sandbox: !values['no-sandbox'], timeoutMs: Number(values['timeout-min']) * 60_000 } });
   for (const r of result.refusals) console.error(`refused: ${r}`);
   if (result.refusals.length) process.exit(1);
 }

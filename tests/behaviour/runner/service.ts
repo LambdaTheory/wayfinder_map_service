@@ -9,10 +9,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const checkoutRoot = fileURLToPath(new URL('../../../', import.meta.url));
 const observer = fileURLToPath(new URL('../../helpers/codex-acceptance-observer.mjs', import.meta.url));
-/** The ChatGPT relay and the everyday service. */
-export const reservedPorts = new Set([18765, 18766]);
+/** The everyday service and the ChatGPT relay in front of it. */
+export const everydayPort = 18766;
+export const reservedPorts = [18765, everydayPort];
 
-export interface Credential { clientId: string; token: string; toolsOnly?: boolean }
+export interface Credential { clientId: string; token: string }
 export const newToken = () => randomBytes(32).toString('hex');
 
 export async function freePort(): Promise<number> {
@@ -25,7 +26,7 @@ export async function freePort(): Promise<number> {
         server.close(() => resolve(typeof address === 'object' && address ? address.port : 0));
       });
     });
-    if (port && !reservedPorts.has(port)) return port;
+    if (port && !reservedPorts.includes(port)) return port;
   }
 }
 
@@ -36,40 +37,49 @@ export interface IsolatedService {
   /** Initialize results the service sent, one JSON line per MCP session (instructions, version, capabilities). */
   protocolReport: string;
   logs(): string;
+  /** SIGTERM, then SIGKILL if the service has not exited after 10 s. */
   stop(): Promise<{ code: number | null; signal: string | null }>;
 }
 
 /**
  * Start the service in `dir` (created, private). The Controller authenticates with the primary token; every
- * other credential goes into the credentials file, so each Revision names the credential that wrote it.
+ * other credential goes into the credentials file, so each Revision names the credential that wrote it. The
+ * service runs in its own process group, so a Ctrl-C to the runner reaches it only through `stop()`, after the
+ * evidence has been read.
  */
-export async function startService(dir: string, controller: Credential, others: Credential[], checkout = checkoutRoot): Promise<IsolatedService> {
+export async function startService(dir: string, controller: Credential, others: Credential[]): Promise<IsolatedService> {
   mkdirSync(join(dir, 'db'), { recursive: true, mode: 0o700 });
   const databasePath = join(dir, 'db', 'maps.sqlite');
-  const { initializeSQLite } = await import(pathToFileURL(join(checkout, 'dist/sqlite-storage.js')).href) as { initializeSQLite(path: string): unknown };
+  const { initializeSQLite } = await import(pathToFileURL(join(checkoutRoot, 'dist/sqlite-storage.js')).href) as { initializeSQLite(path: string): unknown };
   await initializeSQLite(databasePath);
   const credentialsPath = join(dir, 'credentials.json');
   writeFileSync(credentialsPath, JSON.stringify({ credentials: others.map(c => ({ clientId: c.clientId,
-    tokenSha256: createHash('sha256').update(c.token).digest('hex'), ...(c.toolsOnly ? { toolsOnly: true } : {}) })) }), { mode: 0o600 });
+    tokenSha256: createHash('sha256').update(c.token).digest('hex') })) }), { mode: 0o600 });
   const protocolReport = join(dir, 'protocol.jsonl');
   const port = await freePort();
-  const child = spawn(process.execPath, ['--import', observer, join(checkout, 'dist/mcp-start.js')], {
+  const child = spawn(process.execPath, ['--import', observer, join(checkoutRoot, 'dist/mcp-start.js')], {
     env: { PATH: process.env.PATH ?? '', WAYFINDER_DATABASE_PATH: databasePath, WAYFINDER_PORT: String(port), WAYFINDER_TOKEN: controller.token,
       WAYFINDER_ACTOR_ID: 'behaviour-runner', WAYFINDER_CLIENT_ID: controller.clientId, WAYFINDER_ALLOWED_ORIGINS: '[]',
       WAYFINDER_CREDENTIALS_FILE: credentialsPath, WAYFINDER_PROTOCOL_REPORT: protocolReport },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe'], detached: true,
   });
   let logs = '';
   const exit = new Promise<{ code: number | null; signal: string | null }>(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('service did not become ready in 20 s')), 20_000);
-    const seen = (data: Buffer) => { logs += data; if (logs.includes('Wayfinder local MCP ready')) { clearTimeout(timer); resolve(); } };
-    child.stdout.on('data', seen);
-    child.stderr.on('data', (data: Buffer) => { logs += data; });
-    void exit.then(({ code }) => { clearTimeout(timer); reject(new Error(`service exited during startup (${code}): ${logs.trim()}`)); });
-  });
-  return {
-    port, pid: child.pid!, databasePath, protocolReport, logs: () => logs,
-    stop: async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); return exit; },
+  const stop = async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGTERM');
+      const timer = setTimeout(() => child.kill('SIGKILL'), 10_000);
+      void exit.then(() => clearTimeout(timer));
+    }
+    return exit;
   };
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('service did not become ready in 20 s')), 20_000);
+      child.stdout.on('data', (data: Buffer) => { logs += data; if (logs.includes('Wayfinder local MCP ready')) { clearTimeout(timer); resolve(); } });
+      child.stderr.on('data', (data: Buffer) => { logs += data; });
+      void exit.then(({ code }) => { clearTimeout(timer); reject(new Error(`service exited during startup (${code}): ${logs.trim()}`)); });
+    });
+  } catch (error) { await stop(); throw error; }
+  return { port, pid: child.pid!, databasePath, protocolReport, logs: () => logs, stop };
 }
