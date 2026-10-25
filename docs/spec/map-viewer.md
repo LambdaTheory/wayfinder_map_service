@@ -1,6 +1,6 @@
 # Local read-only Map viewer requirements
 
-Status: requirements accepted by the live user on 2026-10-23 after reviewing a requirement page and a clickable prototype built from real local Map Revisions. The user selected the dependency-graph layout. This confirms what the slice must do; it does not yet authorize implementation Tickets. The implementation design and acceptance plan remain to be written.
+Status: requirements accepted by the live user on 2026-10-23 after reviewing a requirement page and a clickable prototype built from real local Map Revisions. The user selected the dependency-graph layout. The same day the user accepted an implementation plan with its three default decisions (section 4). Delivery and acceptance evidence: [docs/implementation/map-viewer.md](../implementation/map-viewer.md).
 
 Use [GLOSSARY.md](../../GLOSSARY.md) for domain language and the [v1 contract](v1.md) for the wider product. This slice delivers part of M4 (visual projection) locally; it does not complete M4.
 
@@ -9,7 +9,7 @@ Use [GLOSSARY.md](../../GLOSSARY.md) for domain language and the [v1 contract](v
 - The viewer is a read-only projection of the authoritative Map ([ADR 0001](../adr/0001-remote-map-is-authoritative.md), [ADR 0002](../adr/0002-mcp-tools-are-the-primary-interface.md)). Destination and route planning, discussion, Claims and Settlements happen in the agent through the four MCP tools. The viewer has no mutation path and no embedded assistant.
 - An earlier interactive workbench (`codex/wayfinder-map-workbench`, never merged) was discarded on 2026-10-23. It ran its own Codex conversation in the page and reimplemented the exploration workflow that the MCP service already supplies to agents.
 - The first delivery is a local browser page. MCP Apps embedding in ChatGPT is deferred.
-- The existing local MCP service process also serves the viewer, reachable only from this machine. The on-demand ChatGPT test tunnel publishes that service without user authentication; how the viewer is protected there must be decided before it runs behind the tunnel.
+- The existing local MCP service process also serves the viewer, reachable only from this machine. The on-demand ChatGPT test tunnel forwards only `/mcp` (`scripts/local-chatgpt-test.mjs`), so the viewer is never published through it. Exposing the viewer beyond this machine needs a separate decision.
 - Destination confirmation is not recorded as Map state. The workflow settles the Destination with the human before `map_create`, so the Revision that creates the Map is the confirmation point. The viewer shows which Revision set the Destination and whether a later Revision changed it.
 
 ## 2. Observable behavior
@@ -27,7 +27,14 @@ Use [GLOSSARY.md](../../GLOSSARY.md) for domain language and the [v1 contract](v
 
 Editing from the viewer, an embedded chat, MCP Apps, zoom and filtering (the largest current Map has five Tickets), browsing older Revisions, share links, public access, authentication, rollback and deletion.
 
-## 4. Open design questions
+## 4. Design decisions
 
-- How agents receive the viewer link. Preferred: return it from existing tool results and tell agents to show it through the server-supplied workflow, without a fifth tool. That changes the workflow contract and therefore needs a SemVer increase and cross-client acceptance under [ADR 0003](../adr/0003-mcp-service-carries-the-versioned-exploration-workflow.md).
-- How the viewer learns of new Revisions, how the graph is laid out, and how "what changed" is derived from Revision history.
+Accepted with the implementation plan on 2026-10-23.
+
+- **Link.** `map_create` and `map_read` results carry an optional `viewerUrl` (`http://127.0.0.1:<port>/maps/<mapId>`); `map_apply` results do not. The server-supplied workflow tells agents to give the link to the human once when they create or resume a Map. This is workflow `2.1.0`, a backward-compatible change; there is no fifth tool. Real-client acceptance for `2.1.0` is one installed Codex session; ChatGPT is confirmed at the next live tunnel test.
+- **Access.** The viewer has no key. The MCP host checks the exact loopback Host first, then sends every path other than `/mcp` to the viewer, so `/mcp` keeps its token. The viewer answers only GET and HEAD. Map data and scripts go only to same-origin requests or an address typed into the browser; another site or app may only navigate to a page, which holds no Map data. Responses forbid framing, caching and cross-origin reads. Accepted consequence: any process or macOS user that can reach this Mac's loopback port can read Maps while the service runs; writing still requires the `/mcp` token.
+- **Following.** The page asks `GET /api/maps/<mapId>/view?known=<revision>` every two seconds. The service answers 204 while the latest Revision is unchanged. There is no push channel: an open stream would hold graceful shutdown, which waits for every request.
+- **Layout.** A Ticket's layer is the length of its longest prerequisite chain; rows keep Map order within a layer. The Destination follows the last layer. Tickets that nothing depends on lead to the Destination. An edge that skips a layer runs in a lane beside the cards it passes.
+- **What changed.** The view classifies the latest Revision's semantic changes. A content change is Fog or a Scope Exclusion according to the section that holds the item: this Revision for an addition or update, the previous Revision for a removal. `map.update` names the Destination only when the Destination text changed, and at most once per Revision because a change does not record which fields it patched.
+- **History.** Polling reads only the latest two Revisions. The Destination's creating Revision and later changes, and the Revision where a Fog item appeared, are read only when the human opens those details.
+- **Browser tests.** No browser-test dependency is added. Projection and HTTP behaviour are tested in the service; the page is checked with screenshots during acceptance.

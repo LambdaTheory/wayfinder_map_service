@@ -6,10 +6,15 @@ All notable project changes are recorded here. Historical implementation evidenc
 
 ### Workflow
 
+- `2.1.0` (2026-10-23): `map_create` and `map_read` results may carry `viewerUrl`, the local read-only viewer link; agents give it to the human once when they create or resume a Map. Backward compatible; tool inputs, Map state and `map_apply`/`map_list` results are unchanged.
 - `2.0.0` (2026-09-20): change mandatory Conflict handling after a real ChatGPT acceptance attempt automatically resubmitted a stale intention at the reread head. A Conflict now voids that request; the client must reread, report the new Revision and stop until the human issues a new request after seeing it. The four tools, schemas and Map state semantics are unchanged.
 - `1.2.0` (2026-09-20): make nested Reference, Provenance and Evidence object shapes explicit after the `1.1.0` diagnostic exposed a string-source mismatch. No Map tool, schema or state semantics changed.
 - `1.1.0` (2026-09-20): add backward-compatible complete-command construction guidance after the first isolated Codex journey exposed partial validation probing. No Map tool, schema or state semantics changed.
 - `1.0.0` (2026-09-19): publish the Wayfinder exploration workflow through MCP initialization instructions and locally sufficient descriptions for the four Map tools, with complete stable/versioned Resources and an optional side-effect-free Prompt. The contract is generated from `docs/agents/exploration-mcp.md`, remains immutable for one service process and removes repository-file or installed-Skill requirements from compatible clients.
+
+### Viewer
+
+- Serve a local read-only Map viewer from the MCP service: the route of Tickets laid out by prerequisites, Fog in front of the Destination, Scope Exclusions outside the Map, details on request, and a page that follows new Revisions every two seconds and shows when it is stale. `/mcp` keeps its token; the ChatGPT test relay still forwards only `/mcp`.
 
 ### Architecture
 

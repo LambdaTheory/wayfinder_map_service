@@ -105,9 +105,14 @@ async function seed(c: Connection) {
     evidence: [], references: [], provenance: { method: 'HTTP test', sources: [] }, extensions: {},
   } }], 2);
 }
+// The viewer link names the serving port, which a restart may change; Map state never does.
+function mapState(result: CallToolResult) {
+  const { viewerUrl: _link, ...structuredContent } = result.structuredContent ?? {};
+  return { ...result, structuredContent };
+}
 async function observe(c: Connection) {
   return { catalog: await c.call('map_list'), maps: await Promise.all(['Acceptance.Alpha', 'Acceptance.Other'].map(async mapId => ({
-    current: await c.read(undefined, mapId), history: await Promise.all([1, 2, 3, 4, 5].map(n => c.read(n, mapId))),
+    current: mapState(await c.read(undefined, mapId)), history: await Promise.all([1, 2, 3, 4, 5].map(async n => mapState(await c.read(n, mapId)))),
   }))) };
 }
 
@@ -243,13 +248,13 @@ test('W03: real Streamable HTTP initialization carries immutable workflow instru
   expect(c.client.getInstructions()).toBe(workflowContract.instructions);
   expect(c.client.getServerCapabilities()).toMatchObject({ tools: {}, resources: {}, prompts: {} });
   expect((await c.client.listResources()).resources.map(resource => resource.uri)).toEqual([
-    'wayfinder://workflow/exploration', 'wayfinder://workflow/exploration/2.0.0',
+    'wayfinder://workflow/exploration', 'wayfinder://workflow/exploration/2.1.0',
   ]);
   expect((await c.client.readResource({ uri: 'wayfinder://workflow/exploration' })).contents[0]).toMatchObject({
-    text: workflowContract.markdown, _meta: { 'wayfinder/workflowVersion': '2.0.0' },
+    text: workflowContract.markdown, _meta: { 'wayfinder/workflowVersion': '2.1.0' },
   });
   expect((await c.client.getPrompt({ name: 'start_wayfinder_exploration', arguments: { mode: 'resume', mapId: 'Stable.Map' } }))
-    .messages[0]).toMatchObject({ role: 'user', content: { type: 'text', text: expect.stringContaining('workflowVersion: 2.0.0') } });
+    .messages[0]).toMatchObject({ role: 'user', content: { type: 'text', text: expect.stringContaining('workflowVersion: 2.1.0') } });
   expect((await c.call('map_list')).structuredContent).toEqual({ kind: 'listed', maps: [], nextAfterMapId: null });
 });
 
