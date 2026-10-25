@@ -12,6 +12,7 @@ import { mapTools } from '../src/mcp-tools.js';
 import { sqliteLifecycleForTests } from '../src/sqlite-internal.js';
 import { prepareCreate } from '../src/index.js';
 import type { CreateMapInput } from '../src/index.js';
+import { versioned } from './helpers/write-version.js';
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -41,7 +42,7 @@ async function service() {
   const { client } = await createHttpTestClient(port, token);
   cleanups.push(() => client.close());
   async function call(name: string, args: Record<string, unknown>) {
-    const result = await client.callTool({ name, arguments: args }) as CallToolResult;
+    const result = await client.callTool({ name, arguments: versioned(name, args) }) as CallToolResult;
     expect(outputs.get(name)!(result.structuredContent), JSON.stringify(outputs.get(name)!.errors)).toBe(true);
     return result.structuredContent!;
   }

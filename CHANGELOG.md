@@ -4,6 +4,12 @@ All notable project changes are recorded here. Historical implementation evidenc
 
 Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Release Version, covers the service and the workflow it carries; `docs/spec/mcp-sqlite.md` §14.3 says which part to raise, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion` (`1.0.0` to `3.0.0` below), and the server reported a fixed `0.1.0`.
 
+## 2.0.0 (2026-10-25)
+
+- Writes attest the rules version. `map_create` and `map_apply` require `version`, the release whose rules the caller follows (its instructions' `version:` line, or the first line of the workflow Resource). A missing or other value returns `{ kind: 'rejected', code: 'version_mismatch', version, rules }` before anything is validated or written, without naming the running version. Real runs on 2026-10-25 showed Codex 0.164.0 and Claude Code 2.1.310 reconnecting silently after a restart and writing under the old rules ([ADR 0005](docs/adr/0005-writes-attest-the-rules-version.md)). Incompatible, because every write needs the new field.
+- The workflow Resource text begins with `version: <version>`. The `map_create` and `map_apply` descriptions say what to do on `version_mismatch`: read the Resource, follow it, reread the Map, retry with its version, or ask the human to reconnect.
+- How each client behaves across an upgrade, and the manual recovery steps, are in [Open conversations across an upgrade](docs/implementation/client-upgrade.md).
+
 ## 1.0.1 (2026-10-25)
 
 - One version for the service and its workflow, starting at `1.0.1`. `package.json` holds it, and the workflow source no longer carries a number. The server reports it in MCP `serverInfo.version`, which was a fixed `0.1.0`. Initialization instructions and the Prompt now say `version: 1.0.1` instead of `workflowVersion: 3.0.0`, Resource metadata uses `wayfinder/version`, and the readiness line reads `ready version=`. Every change to the service or its workflow raises the version, and a test compares shipped files with the last `v*` tag. The workflow rules and the tools are unchanged. PR #55 first numbered this release `3.0.1`; it never ran, and its tag was withdrawn.

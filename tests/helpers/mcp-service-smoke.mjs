@@ -58,8 +58,8 @@ try {
   const a = await createHttpTestClient(port, privateToken);
   assert.equal(a.negotiatedProtocol, '2025-11-25');
   assert.deepEqual((await a.client.listTools()).tools.map(tool => tool.name), ['map_create', 'map_list', 'map_read', 'map_apply']);
-  await a.client.callTool({ name: 'map_create', arguments: { mapId: 'Acceptance.Operator', title: 'Isolated operator acceptance', destination: 'Manual service proof', notes: 'private decision body' } });
-  await a.client.callTool({ name: 'map_apply', arguments: { mapId: 'Acceptance.Operator', expectedRevision: 1, commands: [
+  await a.client.callTool({ name: 'map_create', arguments: { version: workflowContract.version, mapId: 'Acceptance.Operator', title: 'Isolated operator acceptance', destination: 'Manual service proof', notes: 'private decision body' } });
+  await a.client.callTool({ name: 'map_apply', arguments: { version: workflowContract.version, mapId: 'Acceptance.Operator', expectedRevision: 1, commands: [
     { kind: 'ticket.create', ticket: { id: 'Retained', title: 'Retained', question: 'Continue?', type: 'task' } },
     { kind: 'claim.acquire', ticketId: 'Retained', claimantId: 'operator:continued' },
     { kind: 'content.add', section: 'fog', item: { id: 'Fog', text: 'private evidence body', references: [] } },
