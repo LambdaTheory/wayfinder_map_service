@@ -1,6 +1,6 @@
 # Issue tracker: GitHub Issues
 
-Implementation uses [GitHub Issues](https://github.com/kun-g/wayfinder_map_service/issues) in the private repository `kun-g/wayfinder_map_service`. The 2026-09-18 migration moved completed M1 planning to `docs/archive/m1-planning/` and the two deferred planning Maps to native GitHub parent/child Issues. Those rollback/deletion Maps remain on GitHub. New exploration Map state uses the product MCP workflow in [exploration-mcp.md](exploration-mcp.md). Local `.scratch/` paths are compatibility redirects, not live trackers.
+Implementation uses [GitHub Issues](https://github.com/kun-g/wayfinder_map_service/issues) in the private repository `kun-g/wayfinder_map_service`. The 2026-09-18 migration moved completed M1 planning to `docs/archive/m1-planning/` and the two deferred planning Maps to native GitHub parent/child Issues. The deletion Map remains on GitHub; the rollback Map was closed on 2026-10-25 when the user dropped rollback. New exploration Map state uses the product MCP workflow in [exploration-mcp.md](exploration-mcp.md). Local `.scratch/` paths are compatibility redirects, not live trackers.
 
 ## Authority
 
@@ -8,7 +8,7 @@ Implementation uses [GitHub Issues](https://github.com/kun-g/wayfinder_map_servi
 - Implementation progress, assignees, blockers and delivery resolutions: GitHub Issues.
 - New exploration Destination, Tickets, Dependencies, Claims, Settlements, Fog and Scope: the product MCP Map described in [exploration-mcp.md](exploration-mcp.md).
 - Completed planning provenance, human confirmations, withdrawn proposals and prototypes: `docs/archive/`. Earlier statements yield to later accepted scope corrections and the current specification.
-- Active planning entry points: `docs/planning/README.md`, [Revision rollback Map](https://github.com/kun-g/wayfinder_map_service/issues/12), and [Ticket and Map deletion Map](https://github.com/kun-g/wayfinder_map_service/issues/17). No rollback/deletion specification is accepted yet. Ticket 06 preserves the inherited rollback baseline; Ticket 07 preserves unconfirmed deletion recommendations.
+- Active planning entry points: `docs/planning/README.md` and [Ticket and Map deletion Map](https://github.com/kun-g/wayfinder_map_service/issues/17). No deletion specification is accepted yet. Ticket 07 preserves unconfirmed deletion recommendations.
 
 PRs as a request surface: **off**. PRs are implementation evidence rather than independent triage requests. These development trackers are separate from product Map state, Claims and StateAdapter operations.
 
@@ -25,16 +25,16 @@ User instruction (2026-09-18): do not monitor, wait for, or use CodeRabbit as an
 
 ## Existing GitHub planning Maps
 
-These operations apply only to the existing rollback/deletion planning Maps. The project-local `wayfinder` skill uses product MCP for new exploration:
+These operations apply only to the existing deletion planning Map. The project-local `wayfinder` skill uses product MCP for new exploration:
 
 - **Map:** an Issue labelled `wayfinder:map` and `planning`, with Destination, Notes, Decisions so far, Not yet specified and Out of scope in its body. Open Tickets are its native sub-issues, queried rather than manually mirrored in a file.
-- **Child Ticket:** one native sub-issue per bounded Question, labelled `wayfinder:grilling`, `wayfinder:prototype`, `wayfinder:research` or `wayfinder:task`. Provision a type label when first needed. Apply `planning`; deferred rollback/deletion also carries `post-m1`.
+- **Child Ticket:** one native sub-issue per bounded Question, labelled `wayfinder:grilling`, `wayfinder:prototype`, `wayfinder:research` or `wayfinder:task`. Provision a type label when first needed. Apply `planning`; deferred deletion also carries `post-m1`.
 - **Blocking:** native `blocked_by` relationships. Create Issues before wiring edges, using database Issue IDs rather than local ticket numbers in REST payloads. Name blockers in the body for readability. Parent/sub-issue membership does not itself imply blocking. Existing Maps preserve their internal blocker routes; cross-Map dependency changes require a settled reason.
 - **Frontier:** open, unassigned children whose native blockers are closed. `ready-for-human` interviews/prototype verdicts require the human; `ready-for-agent` specifies agent-executable work. A deferred Map is resumed explicitly, rather than automatically mixed into M1 implementation work.
 - **Claim:** assign the developer driving the Map before work and identify the session when needed. Preserve other claims. A parent container is not a claim on all children.
 - **Resolve:** post the accepted Answer as a resolution comment, close the child, then add a named summary link to the parent's Decisions so far. A live human verdict is required for interviews/prototypes; the agent does not answer on the human's behalf.
 - **Fog and exclusions:** graduate only precise in-scope Questions to children. Close a mis-scoped child with a scope-disposition reason and link it under Out of scope; it is not an accepted decision.
-- **Handoff:** synthesize settled decisions into `docs/spec/rollback.md` or `docs/spec/deletion.md`. Close the synthesis child and parent only after explicit human confirmation. M1 historical planning files remain frozen; accepted contract changes belong in `docs/spec/` with their Issue provenance.
+- **Handoff:** synthesize settled decisions into `docs/spec/deletion.md`. Close the synthesis child and parent only after explicit human confirmation. M1 historical planning files remain frozen; accepted contract changes belong in `docs/spec/` with their Issue provenance.
 
 Native relationships use the documented [sub-issue API](https://docs.github.com/en/rest/issues/sub-issues) and [Issue dependency API](https://docs.github.com/en/rest/issues/issue-dependencies).
 
