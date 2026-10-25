@@ -13,9 +13,11 @@ Wayfinder Map Service 是一套与客户端无关的决策地图系统，供 Cha
 
 `main` 上已接受 M1 地图核心和本地 MCP/SQLite 服务。Node.js 钉在 26.3.0。存储是私有 SQLite：`initializeSQLite(path)` 创建新数据库，`openSQLite(path)` 只打开受支持的已有数据库。领域入口保持纯粹。SQLite 只用于这个本地切片。
 
-探索工作流版本是 `workflowVersion: 2.0.0`。兼容客户端凭 MCP 初始化说明和上述四份工具描述创建、恢复、认领并推进地图。新探索地图以[这份 MCP 工作流](docs/agents/exploration-mcp.md)为唯一权威。发生冲突时，该次请求作废；客户端重读并报告新的 Revision，停到人看到后再发出新请求。
+服务和它携带的探索工作流共用 `package.json` 里的一个语义化版本号，从 1.0.1 起（[ADR 0004](docs/adr/0004-one-release-version.md)）；升哪一位见[规格 §14.3](docs/spec/mcp-sqlite.md)，每版的变化见 [CHANGELOG](CHANGELOG.md)。兼容客户端凭 MCP 初始化说明和上述四份工具描述创建、恢复、认领并推进地图。新探索地图以[这份 MCP 工作流](docs/agents/exploration-mcp.md)为唯一权威。发生冲突时，该次请求作废；客户端重读并报告新的 Revision，停到人看到后再发出新请求。
 
-回滚和删除仍在规划，规格尚未接受。实现跟踪见 [GitHub Issues](https://github.com/kun-g/wayfinder_map_service/issues)，规划入口见 [GitHub 规划地图](docs/planning/README.md)。v1 契约中的网页渲染、MCP Apps UI、OAuth 和 PostgreSQL 尚未进入这个本地切片。
+本地 MCP 服务同时提供只读的地图查看页，只能从本机打开：`http://127.0.0.1:<port>/` 列出所有地图，`/maps/<mapId>` 画出一张地图，新 Revision 提交后几秒内自动更新。`map_create` 和 `map_read` 的结果带着这个链接（`viewerUrl`）。查看页不写地图，ChatGPT 测试隧道也不转发它。见[查看页规格](docs/spec/map-viewer.md)和[实现记录](docs/implementation/map-viewer.md)。
+
+回滚和删除仍在规划，规格尚未接受。实现跟踪见 [GitHub Issues](https://github.com/kun-g/wayfinder_map_service/issues)，规划入口见 [GitHub 规划地图](docs/planning/README.md)。v1 契约中网页渲染的缩放和过滤、MCP Apps UI、OAuth 和 PostgreSQL 尚未进入这个本地切片。
 
 ## 启动
 
@@ -49,6 +51,7 @@ npm run --silent backup -- <absolute-source> <fresh-absolute-destination>
 - [v1 可执行规格](docs/spec/v1.md)
 - [已接受的 M1 实现规格](docs/spec/m1.md)
 - [已接受的本地 MCP/SQLite 实现规格](docs/spec/mcp-sqlite.md)
+- [已接受的本地只读查看页规格](docs/spec/map-viewer.md)
 - [M1 可执行验收矩阵](docs/implementation/m1-acceptance.md)
 - [自包含工作流验收](docs/implementation/mcp-self-contained-workflow.md)
 - [进行中的规划地图](docs/planning/README.md)
@@ -56,6 +59,7 @@ npm run --silent backup -- <absolute-source> <fresh-absolute-destination>
 - [ADR 0001：远端地图作为权威状态](docs/adr/0001-remote-map-is-authoritative.md)
 - [ADR 0002：MCP 工具是主要接口](docs/adr/0002-mcp-tools-are-the-primary-interface.md)
 - [ADR 0003：MCP 服务携带版本化探索工作流](docs/adr/0003-mcp-service-carries-the-versioned-exploration-workflow.md)
+- [ADR 0004：服务和工作流共用一个版本号](docs/adr/0004-one-release-version.md)
 - [智能体工作流与项目本地技能](AGENTS.md)
 - [Matt Pocock 技能出处](docs/agents/skills-provenance.md)
 
