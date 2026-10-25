@@ -4,6 +4,10 @@ All notable project changes are recorded here. Historical implementation evidenc
 
 Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Release Version, covers the service and the workflow it carries; `docs/spec/mcp-sqlite.md` §14.3 says which part to raise, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion` (`1.0.0` to `3.0.0` below), and the server reported a fixed `0.1.0`.
 
+## 2.0.2 (2026-10-25)
+
+- Behaviour unchanged. The `wayfinder` launcher (the dedicated Codex and Claude Code entry) moved from the workspace into this repository as `scripts/wayfinder-agent/`, so it is versioned with the service and is the entry the behaviour tests exercise. It serves from the repository it lives in by default (`WAYFINDER_AGENT_CHECKOUT` still overrides), and its instruction files are now `agent-instructions.md` and `agent-instructions.matt.md`, installed into each state directory under the name its harness expects. Upstream Matt skills path is overridable with `WAYFINDER_AGENT_MATT_SKILLS`.
+
 ## 2.0.1 (2026-10-25)
 
 - Compatibility mode for clients that show their model no server instructions. A ChatGPT run showed that ChatGPT never shows the instructions to its model: after a tool refresh, a new chat had the new tool definition but had to guess the version, so 2.0.0 could not write from ChatGPT at all. A credential marked `toolsOnly` now gets `map_create` and `map_apply` whose `version` parameter states the release. `wayfinder chatgpt` and the ChatGPT runner's own service set it. Other clients still take the version from their instructions ([ADR 0005](docs/adr/0005-writes-attest-the-rules-version.md)).

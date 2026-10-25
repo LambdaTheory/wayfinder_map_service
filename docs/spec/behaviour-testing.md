@@ -175,7 +175,7 @@ Implementers decide internal modules and file names, driver organization, port a
 
 ## 6. Work packages
 
-Close the minimal Codex loop first, then widen combinations. Usage records (B07) and ChatGPT (B09) may run in parallel once the shared evidence contract is clear. Each implementation Issue carries its R clauses, prerequisites and completion evidence below. Work on the dedicated launchers lives in the workspace that holds them, not in this repository.
+Close the minimal Codex loop first, then widen combinations. Usage records (B07) and ChatGPT (B09) may run in parallel once the shared evidence contract is clear. Each implementation Issue carries its R clauses, prerequisites and completion evidence below. The dedicated launcher lives in this repository under `scripts/wayfinder-agent/` (moved in from the workspace on 2026-10-25, Issue #63), so launcher work ships and is versioned with the service.
 
 | Package · priority | Delivery boundary | Prerequisites | Completion evidence |
 | --- | --- | --- | --- |

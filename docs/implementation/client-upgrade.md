@@ -48,4 +48,4 @@ What happens to a chat that stays open while the service is upgraded, as of rele
   - Codex with deferred tool search, where only the first line of the instructions reaches the model and the `version:` line would not.
   - ChatGPT on the web and on mobile; only the macOS app was driven.
 
-Rerun with `WAYFINDER_LAUNCHER=~/workspace/runtime/tools/wayfinder_agent/wayfinder node tests/helpers/upgrade-live.mjs <codex|claude> <live|resume>` after `npm run build`. Each run uses real model quota and writes its evidence to a new private folder under `~/Library/Application Support/Wayfinder/`.
+Rerun with `WAYFINDER_LAUNCHER=scripts/wayfinder-agent/wayfinder node tests/helpers/upgrade-live.mjs <codex|claude> <live|resume>` after `npm run build`. Each run uses real model quota and writes its evidence to a new private folder under `~/Library/Application Support/Wayfinder/`.

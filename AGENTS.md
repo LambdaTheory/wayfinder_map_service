@@ -4,6 +4,8 @@ Start by reading `README.md`, `GLOSSARY.md`, and `docs/spec/v1.md`. Read relevan
 
 M1 and the local MCP/SQLite service are accepted. `docs/agents/exploration-mcp.md` is the authored source for maintainers changing the product workflow; a compatible connected client operates from the MCP server's versioned initialization instructions and tool metadata without reading that repository file. Deletion remains a separate post-M1 iteration on its existing GitHub planning Map; read `docs/planning/README.md` before resuming it. Rollback was dropped on 2026-10-25. The [local read-only Map viewer](docs/spec/map-viewer.md) is implemented in the local MCP service; read its [implementation record](docs/implementation/map-viewer.md) before changing it. Keep deployment, OAuth, PostgreSQL, MCP Apps, editing in the renderer, and plugin packaging outside the accepted local slices unless the user changes the scope.
 
+The dedicated-agent launcher (`wayfinder` command) lives in `scripts/wayfinder-agent/`; read its `README.md` before changing it. Its instruction files are named `agent-instructions*.md` so they are not read as directory instructions here.
+
 Use the domain language in `GLOSSARY.md`. Record a newly settled domain term there. Add an ADR only for a hard-to-reverse, surprising trade-off with meaningful alternatives.
 
 ## Versioning
