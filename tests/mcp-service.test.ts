@@ -281,13 +281,13 @@ test('W03: real Streamable HTTP initialization carries immutable workflow instru
   expect(c.client.getInstructions()).toBe(workflowContract.instructions);
   expect(c.client.getServerCapabilities()).toMatchObject({ tools: {}, resources: {}, prompts: {} });
   expect((await c.client.listResources()).resources.map(resource => resource.uri)).toEqual([
-    'wayfinder://workflow/exploration', 'wayfinder://workflow/exploration/2.2.0',
+    'wayfinder://workflow/exploration', 'wayfinder://workflow/exploration/3.0.0',
   ]);
   expect((await c.client.readResource({ uri: 'wayfinder://workflow/exploration' })).contents[0]).toMatchObject({
-    text: workflowContract.markdown, _meta: { 'wayfinder/workflowVersion': '2.2.0' },
+    text: workflowContract.markdown, _meta: { 'wayfinder/workflowVersion': '3.0.0' },
   });
   expect((await c.client.getPrompt({ name: 'start_wayfinder_exploration', arguments: { mode: 'resume', mapId: 'Stable.Map' } }))
-    .messages[0]).toMatchObject({ role: 'user', content: { type: 'text', text: expect.stringContaining('workflowVersion: 2.2.0') } });
+    .messages[0]).toMatchObject({ role: 'user', content: { type: 'text', text: expect.stringContaining('workflowVersion: 3.0.0') } });
   expect((await c.call('map_list')).structuredContent).toEqual({ kind: 'listed', maps: [], nextAfterMapId: null });
 });
 
