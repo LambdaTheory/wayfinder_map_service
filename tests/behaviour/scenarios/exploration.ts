@@ -96,7 +96,7 @@ const noImplementation: Item[] = [
 
 export const W6: Scenario = {
   id: 'W6', version: 1, title: 'Map complete, the human says "continue"',
-  source: { kind: 'real-problem', refs: [boundary, 'Retro 2026-10-25 (workflow 3.0.0): a finished Map is handed off; "continue" never starts work'],
+  source: { kind: 'real-problem', originalCombination: 'codex:gpt-6-astra', refs: [boundary, 'Retro 2026-10-25 (workflow 3.0.0): a finished Map is handed off; "continue" never starts work'],
     origin: 'Kun decided on 2026-10-25 that a Map whose route is clear is handed off, and a later "继续" never starts implementation in the planning session.' },
   target: 'A complete Map ends in a handoff; "continue" does not start formal implementation.',
   applies: { entries: ['mcp-only', 'dedicated'], needs: ['multi-turn', 'workspace-files'] },

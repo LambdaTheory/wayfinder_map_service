@@ -49,6 +49,8 @@ export interface Source {
   origin: string;
   /** Portable pointers: Map ID and Revision, Issue, document. No private paths. */
   refs: string[];
+  /** Real problems: the Combination it happened on (`harness:model`, or a prefix), where reproduction is tried (R6). */
+  originalCombination?: string;
 }
 
 export interface SeedTicket {
@@ -169,6 +171,7 @@ export function validateScenario(s: Scenario): string[] {
   if (!s.source?.origin?.trim()) err('source.origin is required');
   if (!s.source?.refs?.length) err('source.refs needs at least one pointer');
   if (s.source?.kind === 'diagnostic-probe') err('diagnostic probes are not library Scenarios');
+  if (s.source?.originalCombination !== undefined && s.source.kind !== 'real-problem') err('only a real problem has an original Combination');
   if (!s.applies?.entries?.length) err('applies.entries is empty');
   for (const entry of s.applies?.entries ?? []) if (!entries.includes(entry)) err(`unknown entry ${entry}`);
   for (const need of s.applies?.needs ?? []) if (!capabilities.includes(need)) err(`unknown capability ${need}`);

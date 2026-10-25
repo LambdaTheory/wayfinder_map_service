@@ -164,7 +164,7 @@ export const S13: Scenario = {
 
 export const S14: Scenario = {
   id: 'S14', version: 1, title: '"Continue" and "as you recommend" alternating',
-  source: { kind: 'real-problem', refs: ['Method experiment 2026-10-23, turns 3–6', '2.2.0 no-source retest, 2026-10-24'],
+  source: { kind: 'real-problem', originalCombination: 'codex:gpt-6-astra', refs: ['Method experiment 2026-10-23, turns 3–6', '2.2.0 no-source retest, 2026-10-24'],
     origin: 'The real method-experiment sequence alternated "continue" with "use your recommendation"; only a reply to a shown recommendation is a verdict.' },
   target: 'Answered items advance; "continue" never answers a question the human has not seen.',
   applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: ['multi-turn'] },
