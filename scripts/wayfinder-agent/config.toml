@@ -1,0 +1,19 @@
+# Template for a Codex agent's config.toml (~/.codex-wayfinder, ~/.codex-wayfinder-matt); the launcher copies it once
+# and fills in the outputs folder. Model, effort, MCP URL and token are passed per launch and override these defaults.
+# Model and skills match the pure-mode runs of the 2026-10-23 Wayfinder method experiment; approvals and sandbox match everyday Codex.
+model = "gpt-6-astra"
+model_reasoning_effort = "xhigh"
+approval_policy = "never"
+sandbox_mode = "danger-full-access" # same as everyday Codex; the sandbox blocked headless Chromium and network
+check_for_update_on_startup = false # its npm would run with the agent's HOME; update through everyday Codex
+
+[features]
+apps = false
+
+[mcp_servers.wayfinder]
+url = "http://127.0.0.1:18766/mcp"
+bearer_token_env_var = "WAYFINDER_TOKEN"
+default_tools_approval_mode = "approve"
+
+[projects."@WORK@"]
+trust_level = "trusted"

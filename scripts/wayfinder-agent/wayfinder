@@ -1,0 +1,894 @@
+#!/usr/bin/env python3
+"""Dedicated Wayfinder agent: Codex or Claude Code in its own state folder, with the MCP
+wayfinder skill and the local Wayfinder service, or Matt Pocock's original skills keeping
+Maps as local Markdown. One command also runs the service, the ChatGPT test connection and
+the Map and session listings. See README.md in this directory.
+
+Standard library only, Python 3.9+, so it starts from any shell without a virtualenv.
+"""
+import fcntl
+import hashlib
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import unicodedata
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+HOME = Path.home()
+TOOL_DIR = Path(__file__).resolve().parent
+WORKSPACE = Path(os.path.expanduser("~/workspace"))
+# Overrides exist for tests, which must never touch the live service, state or outputs.
+# The checkout served from defaults to the repository this script lives in (scripts/wayfinder-agent/).
+CHECKOUT = Path(os.environ.get("WAYFINDER_AGENT_CHECKOUT", TOOL_DIR.parents[1]))
+MATT_SKILLS = Path(os.environ.get("WAYFINDER_AGENT_MATT_SKILLS",
+                                  os.path.expanduser("~/workspace/runtime/repos/mattpocock-skills/skills")))
+STATE_ROOT = Path(os.environ.get("WAYFINDER_AGENT_STATE_ROOT", HOME))
+SVC = Path(os.environ.get("WAYFINDER_AGENT_SERVICE_DIR", HOME / ".wayfinder-service"))
+LEGACY_SVC = STATE_ROOT / ".codex-wayfinder"  # held the service until 2026-10-25
+OUTPUTS = Path(os.environ.get("WAYFINDER_AGENT_OUTPUTS", WORKSPACE / "outputs/wayfinder"))
+PORT = int(os.environ.get("WAYFINDER_AGENT_PORT", "18766"))
+RELAY_PORT = 18765  # fixed in the product's ChatGPT test runner
+
+HARNESSES = {
+    "codex": {"label": "Codex", "bin": "codex", "client": "Codex", "model": "gpt-6-astra",
+              "efforts": ("minimal", "low", "medium", "high", "xhigh")},
+    "claude": {"label": "Claude Code", "bin": "claude", "client": "Claude-Code", "model": "opus",
+               "efforts": ("low", "medium", "high", "xhigh", "max")},
+}
+DEFAULT_EFFORT = "xhigh"
+METHODS = {"mcp": "MCP 版", "matt": "Matt 原版"}
+MATT_SKILL_NAMES = ("wayfinder", "grilling", "prototype", "research", "domain-modeling")
+SUBCOMMANDS = ("serve", "status", "stop", "restart", "maps", "sessions", "resume", "chatgpt", "help")
+REFUSED = {
+    "login": "登录、登出请用日常的 codex 或 claude：专用 Agent 共用日常的登录，在这里做会动到它。",
+    "logout": "登录、登出请用日常的 codex 或 claude：专用 Agent 共用日常的登录，在这里做会动到它。",
+    "update": "更新请在日常终端里做：用 Agent 的环境更新，2026-10-24 弄坏过全局 Codex。",
+}
+ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
+
+
+def say(message):
+    print(message, file=sys.stderr)
+
+
+def die(message, code=2):
+    say(message)
+    sys.exit(code)
+
+
+def state_dir(harness, method):
+    return STATE_ROOT / ".{}-wayfinder{}".format(harness, "-matt" if method == "matt" else "")
+
+
+def outputs_dir(method):
+    return OUTPUTS / method
+
+
+def write_private(path, text):
+    """Atomic write, 0600, so a reader never sees half a file."""
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(text)
+    os.replace(str(tmp), str(path))
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, ValueError):
+        return False
+    except PermissionError:
+        return True
+
+
+def read_pid(path):
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def command_of(pid):
+    out = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+def cwd_of(pid):
+    out = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True)
+    for line in out.stdout.splitlines():
+        if line.startswith("n"):
+            return line[1:]
+    return None
+
+
+def open_database(pid):
+    """The SQLite file a running service holds open: the one with its -wal or -shm beside it."""
+    out = subprocess.run(["lsof", "-a", "-p", str(pid), "-Fn"], capture_output=True, text=True)
+    names = {line[1:] for line in out.stdout.splitlines() if line.startswith("n")}
+    for name in sorted(names):
+        if name + "-wal" in names or name + "-shm" in names:
+            return name
+    return None
+
+
+def listener(port):
+    out = subprocess.run(["lsof", "-tiTCP:{}".format(port), "-sTCP:LISTEN"], capture_output=True, text=True)
+    pids = out.stdout.split()
+    return int(pids[0]) if pids else None
+
+
+def width(text):
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
+def table(rows):
+    if not rows:
+        return
+    widths = [max(width(str(row[i])) for row in rows) for i in range(len(rows[0]))]
+    for row in rows:
+        cells = [str(cell) + " " * (widths[i] - width(str(cell))) for i, cell in enumerate(row)]
+        print("  ".join(cells).rstrip())
+
+
+def local_time(iso):
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone().strftime("%m-%d %H:%M")
+    except (AttributeError, ValueError):
+        return ""
+
+
+# ---------------------------------------------------------------- service
+
+def primary_token():
+    SVC.mkdir(parents=True, exist_ok=True)
+    os.chmod(str(SVC), 0o700)
+    path = SVC / "wayfinder-token"
+    if not path.exists() or not path.read_text().strip():
+        # Keep the token of a service started before the move to SVC, so it is still recognised as ours.
+        legacy = LEGACY_SVC / "wayfinder-token"
+        token = legacy.read_text().strip() if legacy.exists() else ""
+        write_private(path, (token or secrets.token_hex(32)) + "\n")
+    return path.read_text().strip()
+
+
+def post(token, body, session=None, method="POST"):
+    headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json",
+               "Accept": "application/json, text/event-stream"}
+    if session:
+        headers["mcp-session-id"] = session
+    data = json.dumps(body).encode() if body is not None else None
+    request = urllib.request.Request("http://127.0.0.1:{}/mcp".format(PORT), data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            return response.status, response.read().decode(), response.headers.get("mcp-session-id")
+    except urllib.error.HTTPError as error:
+        return error.code, "", None
+    except (urllib.error.URLError, OSError):
+        return 0, "", None
+
+
+def probe(token):
+    """200: a service that accepts this token. 401/403: another service, or a token it refuses. 0: nothing."""
+    status, body, session = post(token, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "wayfinder-launcher", "version": "2"}}})
+    if session:
+        post(token, None, session, "DELETE")
+    return status, service_version(body)
+
+
+def service_version(body):
+    """The version line after the safety core: "version: 1.0.1", or "workflowVersion: 3.0.0" before the shared version."""
+    for chunk in [body] + [line[5:] for line in body.splitlines() if line.startswith("data:")]:
+        try:
+            instructions = json.loads(chunk)["result"]["instructions"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        found = re.search(r"^(?:workflowVersion|version): (\S+)$", instructions, re.M)
+        if found:
+            return found.group(1)
+    return "?"
+
+
+def node_bin():
+    for path in (SVC / "node-path", HOME / ".codex-wayfinder/node-path"):
+        try:
+            node = path.read_text().strip()
+        except OSError:
+            continue
+        if os.access(node, os.X_OK):
+            return node
+    out = subprocess.run(["npm", "exec", "--yes", "--package=node@26.3.0", "--", "node", "-p", "process.execPath"],
+                         cwd=str(CHECKOUT), capture_output=True, text=True)
+    node = out.stdout.strip()
+    if not os.access(node, os.X_OK):
+        die("找不到 Node 26.3.0。在 {} 里运行 npm exec --package=node@26.3.0 -- node --version 看看。".format(CHECKOUT))
+    write_private(SVC / "node-path", node + "\n")
+    return node
+
+
+def configured_database():
+    if os.environ.get("WAYFINDER_AGENT_DATABASE"):
+        return os.environ["WAYFINDER_AGENT_DATABASE"]
+    try:
+        for line in (CHECKOUT / ".env.local").read_text().splitlines():
+            if line.startswith("WAYFINDER_DATABASE_PATH="):
+                return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+def database_path():
+    return configured_database() or die("{}/.env.local 里没有 WAYFINDER_DATABASE_PATH。".format(CHECKOUT))
+
+
+def ensure_service(quiet=False):
+    token = primary_token()
+    prune_credentials()
+    status, version = probe(token)
+    if status in (401, 403):
+        die("端口 {} 被另一个 Wayfinder 服务占着（多半是 npm run serv）。真实库只能有一个服务进程，先停掉它。".format(PORT))
+    if status != 200:
+        if not (CHECKOUT / "dist/mcp-start.js").exists():
+            die("{} 还没构建，请在那里运行 npm run build。".format(CHECKOUT))
+        env = dict(os.environ, WAYFINDER_DATABASE_PATH=database_path(), WAYFINDER_PORT=str(PORT),
+                   WAYFINDER_TOKEN=token, WAYFINDER_ACTOR_ID="Kun", WAYFINDER_CLIENT_ID="Wayfinder-Launcher",
+                   WAYFINDER_ALLOWED_ORIGINS="[]", WAYFINDER_CREDENTIALS_FILE=str(SVC / "credentials.json"))
+        with open(str(SVC / "service.log"), "a") as log:
+            child = subprocess.Popen([node_bin(), "dist/mcp-start.js"], cwd=str(CHECKOUT), env=env,
+                                     stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+        write_private(SVC / "service.pid", "{}\n".format(child.pid))
+        for _ in range(40):
+            status, version = probe(token)
+            if status == 200:
+                break
+            time.sleep(0.25)
+        if status != 200:
+            die("服务没有起来，见 {}".format(SVC / "service.log"))
+    if not quiet:
+        say("✓ Wayfinder 服务 127.0.0.1:{} · 版本 {}".format(PORT, version))
+        say("✓ 查看页 http://127.0.0.1:{}/".format(PORT))
+    return token
+
+
+def stop_pid(pid, label):
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(60):
+        if not alive(pid):
+            break
+        time.sleep(0.25)
+    say("已停止{}（pid {}）。".format(label, pid))
+
+
+def stop_service():
+    stop_chatgpt()
+    stopped = False
+    for pid_file in (SVC / "service.pid", LEGACY_SVC / "service.pid"):
+        pid = read_pid(pid_file)
+        if pid and alive(pid) and "mcp-start.js" in command_of(pid):
+            stop_pid(pid, " Wayfinder 服务")
+            stopped = True
+        try:
+            pid_file.unlink()
+        except OSError:
+            pass
+    if not stopped:
+        say("没有由 wayfinder 拉起、仍在运行的服务。")
+
+
+# ---------------------------------------------------------------- credentials
+
+class CredentialLock:
+    def __enter__(self):
+        primary_token()
+        self.handle = open(str(SVC / "credentials.lock"), "a")
+        fcntl.flock(self.handle, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.handle, fcntl.LOCK_UN)
+        self.handle.close()
+
+
+def load_owners():
+    try:
+        return json.loads((SVC / "credential-owners.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_owners(owners):
+    """The service reads credentials.json; the owners file keeps which process each token belongs to."""
+    write_private(SVC / "credential-owners.json", json.dumps(owners, indent=2, ensure_ascii=False) + "\n")
+    write_private(SVC / "credentials.json", json.dumps({"credentials": [
+        dict({"clientId": owner["clientId"], "tokenSha256": sha}, **({"toolsOnly": True} if owner.get("toolsOnly") else {}))
+        for sha, owner in owners.items()]}, indent=2) + "\n")
+
+
+def live_owners():
+    return {s: o for s, o in load_owners().items() if alive(o.get("pid", 0))}
+
+
+def prune_credentials():
+    """Revoke the tokens of launches whose process has exited."""
+    with CredentialLock():
+        owners = load_owners()
+        live = live_owners()
+        if live != owners or not (SVC / "credentials.json").exists():
+            save_owners(live)
+
+
+def register_credential(client_id, pid, tools_only=False):
+    """A fresh token for this launch, recorded under client_id; tokens of exited processes are revoked.
+    tools_only marks a client that shows its model no server instructions (ChatGPT): from 2.0.1 the service
+    then states the release in its write tools."""
+    token = secrets.token_hex(32)
+    sha = hashlib.sha256(token.encode()).hexdigest()
+    with CredentialLock():
+        owners = live_owners()
+        owners[sha] = {"clientId": client_id, "pid": pid, "createdAt": datetime.now(timezone.utc).isoformat()}
+        if tools_only:
+            owners[sha]["toolsOnly"] = True
+        save_owners(owners)
+    return token, sha
+
+
+def release_credential(sha):
+    with CredentialLock():
+        owners = load_owners()
+        owners.pop(sha, None)
+        save_owners(owners)
+
+
+def client_id(harness, model, effort):
+    raw = "{}:{}:{}".format(HARNESSES[harness]["client"], model, effort) if harness in HARNESSES else harness
+    return re.sub(r"[^A-Za-z0-9._:-]", "-", raw)[:128]
+
+
+def agent_token(harness, model, effort):
+    """Per-launch credential, so each Revision records the harness, model and effort that wrote it.
+    A service built before credentials existed refuses it; then the launch falls back to the shared token."""
+    primary = ensure_service(quiet=True)
+    token, sha = register_credential(client_id(harness, model, effort), os.getpid())
+    if probe(token)[0] == 200:
+        return token
+    release_credential(sha)
+    say("! 服务还不支持按来源记录，这次写入会记成 Wayfinder-Launcher。服务换到新代码后（wayfinder restart）就会分开。")
+    return primary
+
+
+# ---------------------------------------------------------------- harness setup
+
+def check_harness(harness):
+    binary = HARNESSES[harness]["bin"]
+    if not shutil.which(binary):
+        die("找不到 {}。".format(binary))
+    # A broken global install (e.g. a half-finished npm upgrade) shows here, before any state is touched.
+    if subprocess.run([binary, "--version"], capture_output=True).returncode != 0:
+        die("全局 {} 无法运行。在日常终端里修复后，用 {} --version 检查。".format(binary, binary))
+
+
+def relaunch(harness, method):
+    words = ["wayfinder"]
+    if harness != "codex":
+        words += ["--harness", harness]
+    if method != "mcp":
+        words += ["--method", method]
+    return " ".join(words)
+
+
+def instructions(method, harness):
+    template = (TOOL_DIR / ("agent-instructions.matt.md" if method == "matt" else "agent-instructions.md")).read_text()
+    return template.replace("@WORK@", str(outputs_dir(method))).replace("@RELAUNCH@", relaunch(harness, method))
+
+
+def install_skills(skills, method):
+    skills.mkdir(parents=True, exist_ok=True)
+    if method == "mcp":
+        link = skills / "wayfinder"
+        if link.is_symlink() or link.exists():
+            if link.is_symlink():
+                link.unlink()
+            else:
+                shutil.rmtree(str(link))
+        link.symlink_to(CHECKOUT / ".agents/skills/wayfinder")
+        return
+    # Matt's wayfinder plus the skills it hands work to, without agents/openai.yaml, which turns
+    # implicit invocation off; both variants then start the same way.
+    for name in MATT_SKILL_NAMES:
+        found = [p for p in MATT_SKILLS.glob("*/{}".format(name)) if p.is_dir()]
+        if not found:
+            die("在 {} 里找不到 {} 技能。".format(MATT_SKILLS, name))
+        subprocess.run(["rsync", "-a", "--delete", "--exclude", "/agents/", str(found[0]) + "/", str(skills / name) + "/"],
+                       check=True)
+
+
+def link_codex_auth(state):
+    """One login for both: the agent's auth.json links to Kun's. If a token refresh replaced
+    the link with a file, keep the newer copy in ~/.codex and link again."""
+    main_auth = HOME / ".codex/auth.json"
+    own = state / "auth.json"
+    if not main_auth.exists():
+        die("找不到 {}，请先在日常 Codex 里登录。".format(main_auth))
+    if own.exists() and not own.is_symlink():
+        if own.stat().st_mtime > main_auth.stat().st_mtime:
+            shutil.copy2(str(main_auth), "{}.bak-{}".format(main_auth, time.strftime("%Y%m%d%H%M%S")))
+            shutil.copy2(str(own), str(main_auth))
+            say("专用会话刷新过登录令牌，已同步回 ~/.codex/auth.json（旧文件已备份）。")
+        own.unlink()
+    if not own.is_symlink():
+        own.symlink_to(main_auth)
+
+
+def prepare_codex(state, method):
+    agent_home = state / "home"
+    agent_home.mkdir(parents=True, exist_ok=True)
+    os.chmod(str(state), 0o700)
+    work = outputs_dir(method)
+    config = state / "config.toml"
+    if not config.exists():
+        text = (TOOL_DIR / "config.toml").read_text().replace("@WORK@", str(work))
+        if method == "matt":  # the comparison variant gets no MCP server
+            text = re.sub(r"\n\[mcp_servers\.[^\]]+\]\n(?:[^\[\n][^\n]*\n)*", "\n", text)
+        config.write_text(text)
+    text = config.read_text()
+    if not re.search(r"^check_for_update_on_startup", text, re.M):
+        text = "check_for_update_on_startup = false\n" + text
+    if '[projects."{}"]'.format(work) not in text:
+        text += '\n[projects."{}"]\ntrust_level = "trusted"\n'.format(work)
+    config.write_text(text)
+    (state / "AGENTS.md").write_text(instructions(method, "codex"))
+    install_skills(agent_home / ".agents/skills", method)
+    link_codex_auth(state)
+    # Requests carry the installation ID; sending the daily one makes the agent the same install.
+    daily_id = HOME / ".codex/installation_id"
+    if daily_id.exists():
+        (state / "installation_id").write_text(daily_id.read_text())
+
+
+def merge_json(path, update):
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        data = {}
+    for key, value in update.items():
+        if isinstance(value, dict) and isinstance(data.get(key), dict):
+            for inner, inner_value in value.items():
+                if isinstance(inner_value, dict) and isinstance(data[key].get(inner), dict):
+                    data[key][inner].update(inner_value)
+                else:
+                    data[key][inner] = inner_value
+        else:
+            data[key] = value
+    write_private(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
+def claude_env(state):
+    """Own config folder, daily login: the empty secure-storage folder makes Claude Code read the
+    daily keychain entry and share its refresh lock (verified 2026-10-25; the variable is undocumented)."""
+    env = dict(os.environ, CLAUDE_CONFIG_DIR=str(state), CLAUDE_SECURESTORAGE_CONFIG_DIR="",
+               DISABLE_AUTOUPDATER="1", CLAUDE_CODE_DISABLE_AUTO_MEMORY="1")
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"):
+        env.pop(key, None)
+    # The daily settings carry the proxy; the agent does not load those settings.
+    try:
+        daily = json.loads((HOME / ".claude/settings.json").read_text()).get("env", {})
+    except (OSError, ValueError):
+        daily = {}
+    for key in PROXY_VARS:
+        if key in daily and key not in os.environ:
+            env[key] = daily[key]
+    return env
+
+
+def daily_claude_ids():
+    """Requests and telemetry carry userID as the device ID, error reports part of machineID. Claude Code
+    generates either only when missing, so the agent takes the daily ones and reads as the same install."""
+    try:
+        daily = json.loads((HOME / ".claude.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return {key: daily[key] for key in ("userID", "machineID")
+            if re.fullmatch(r"[0-9a-f]{64}", str(daily.get(key, "")))}
+
+
+def prepare_claude(state, method, cwd, env):
+    state.mkdir(parents=True, exist_ok=True)
+    os.chmod(str(state), 0o700)
+    merge_json(state / "settings.json", {"skipDangerousModePermissionPrompt": True, "autoUpdates": False})
+    merge_json(state / ".claude.json", dict(daily_claude_ids(), hasCompletedOnboarding=True,
+                                            bypassPermissionsModeAccepted=True,
+                                            projects={cwd: {"hasTrustDialogAccepted": True,
+                                                            "hasCompletedProjectOnboarding": True}}))
+    (state / "wayfinder-instructions.md").write_text(instructions(method, "claude"))
+    install_skills(state / "skills", method)
+    if method == "mcp":
+        write_private(state / "mcp.json", json.dumps({"mcpServers": {"wayfinder": {
+            "type": "http", "url": "http://127.0.0.1:{}/mcp".format(PORT),
+            "headers": {"Authorization": "Bearer ${WAYFINDER_TOKEN}"}}}}, indent=2) + "\n")
+    out = subprocess.run(["claude", "auth", "status"], env=env, capture_output=True, text=True)
+    try:
+        logged_in = json.loads(out.stdout).get("loggedIn")
+    except ValueError:
+        logged_in = False
+    if not logged_in:
+        die("专用 Claude Code 读不到日常的登录。先确认日常的 claude auth status 是已登录；"
+            "如果日常已登录，多半是 Claude Code 升级后不再认这个开关，见 README「Claude Code 的登录」。")
+
+
+# ---------------------------------------------------------------- launch
+
+def parse(argv, default_method):
+    options = {"harness": "codex", "model": None, "effort": None, "method": default_method}
+    given = set()
+    positional, passthrough = [], []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":
+            passthrough = argv[i + 1:]
+            break
+        name, _, value = arg[2:].partition("=") if arg.startswith("--") else ("", "", "")
+        if name in options:
+            if not value:
+                i += 1
+                if i >= len(argv):
+                    die("--{} 后面要跟一个值。".format(name))
+                value = argv[i]
+            options[name] = value
+            given.add(name)
+        elif arg.startswith("-"):
+            die("不认识的选项 {}。要原样交给 harness 的参数放在 -- 后面；wayfinder help 看用法。".format(arg))
+        else:
+            positional.append(arg)
+        i += 1
+    options["given"] = given
+    if options["harness"] not in HARNESSES:
+        die("--harness 只能是 {}。".format("、".join(HARNESSES)))
+    if options["method"] not in METHODS:
+        die("--method 只能是 mcp 或 matt。")
+    spec = HARNESSES[options["harness"]]
+    options["model"] = options["model"] or spec["model"]
+    options["effort"] = options["effort"] or DEFAULT_EFFORT
+    if options["effort"] not in spec["efforts"]:
+        die("{} 的推理强度只有 {}。".format(spec["label"], "、".join(spec["efforts"])))
+    return options, positional, passthrough
+
+
+def start_cwd(method):
+    """Start where Kun ran the command, so the project's AGENTS.md and files are in view;
+    outside a project (home, /, a state or service folder) fall back to the outputs folder."""
+    cwd = Path.cwd()
+    if cwd in (HOME, Path("/")) or any(str(cwd).startswith(str(p)) for p in
+                                       [SVC] + [state_dir(h, m) for h in HARNESSES for m in METHODS]):
+        cwd = outputs_dir(method)
+    return cwd
+
+
+def launch(options, prompt=None, passthrough=(), resume_id=None, cwd=None):
+    harness, method, model, effort = options["harness"], options["method"], options["model"], options["effort"]
+    check_harness(harness)
+    state = state_dir(harness, method)
+    for method_name in METHODS:
+        outputs_dir(method_name).mkdir(parents=True, exist_ok=True)
+    cwd = Path(cwd) if cwd else start_cwd(method)
+    token = agent_token(harness, model, effort) if method == "mcp" else None
+    if method == "mcp":
+        say("✓ Wayfinder 服务 127.0.0.1:{} · 查看页 http://127.0.0.1:{}/".format(PORT, PORT))
+    say("✓ 专用 {} · {} · {} · {}".format(HARNESSES[harness]["label"], model, effort, METHODS[method]))
+    say("✓ 工作目录 {}".format(cwd))
+    say("✓ 产出目录 {}".format(outputs_dir(method)))
+    if prompt:
+        say("✓ " + prompt)
+    if harness == "codex":
+        prepare_codex(state, method)
+        env = dict(os.environ, HOME=str(state / "home"), CODEX_HOME=str(state))
+        for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"):
+            env.pop(key, None)
+        # Without the shared daemon, the MCP connection runs in this process and sees this launch's token.
+        argv = ["codex", "--no-daemon", "-C", str(cwd), "-m", model, "-c", 'model_reasoning_effort="{}"'.format(effort)]
+        if method == "mcp":
+            argv += ["-c", 'mcp_servers.wayfinder.url="http://127.0.0.1:{}/mcp"'.format(PORT)]
+        if resume_id:
+            argv += ["resume", resume_id]
+        argv += list(passthrough)
+    else:
+        env = claude_env(state)
+        prepare_claude(state, method, str(cwd), env)
+        argv = ["claude", "--model", model, "--effort", effort, "--dangerously-skip-permissions", "--strict-mcp-config",
+                "--append-system-prompt-file", str(state / "wayfinder-instructions.md")]
+        if method == "mcp":
+            argv.append("--mcp-config={}".format(state / "mcp.json"))
+        if resume_id:
+            argv += ["--resume", resume_id]
+        argv += list(passthrough)
+    if token:
+        env["WAYFINDER_TOKEN"] = token
+    if prompt:
+        argv.append(prompt)
+    if os.environ.get("WAYFINDER_AGENT_DRY_RUN"):  # tests: show the launch instead of running it
+        print(json.dumps({"cwd": str(cwd), "argv": argv}, ensure_ascii=False))
+        return
+    os.chdir(str(cwd))
+    os.execvpe(argv[0], argv, env)
+
+
+# ---------------------------------------------------------------- listings
+
+def get_json(path):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:{}{}".format(PORT, path), timeout=3) as response:
+            return json.loads(response.read().decode())
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+def matt_maps():
+    roots = [outputs_dir("matt"), STATE_ROOT / ".codex-wayfinder-matt/work/.scratch"]
+    found, seen = [], set()
+    for root in roots:
+        for map_file in sorted(root.glob("*/map.md")):
+            if map_file.resolve() in seen:  # the old folder links to the moved one
+                continue
+            seen.add(map_file.resolve())
+            text = map_file.read_text(errors="replace")
+            status = re.search(r"^Status:\s*(\S+)", text, re.M)
+            state = {"resolved": "已完成"}.get(status.group(1), status.group(1)) if status else ""
+            when = datetime.fromtimestamp(map_file.stat().st_mtime).strftime("%m-%d %H:%M")
+            found.append((map_file.parent.name, METHODS["matt"], state, when, ""))
+    return found
+
+
+def cmd_maps(_args):
+    if not listener(PORT):  # the viewer API needs no token, so a running ChatGPT test service also answers
+        ensure_service(quiet=True)
+    rows = [("地图", "方法版本", "版本", "最近写入", "写入来源")]
+    listing = get_json("/api/maps") or {"maps": []}
+    for item in listing.get("maps", []):
+        view = get_json("/api/maps/{}/view".format(urllib.request.quote(item["mapId"], safe=""))) or {}
+        rows.append((item["mapId"], METHODS["mcp"], "第 {} 版".format(item.get("currentRevision", "?")),
+                     local_time(view.get("occurredAt")), view.get("clientId", "")))
+    rows += matt_maps()
+    table(rows)
+    print("\n接着推进：wayfinder <地图 ID>；Matt 原版：wayfinder --method matt <名字>")
+
+
+def human_text(text):
+    text = " ".join(text.split())
+    return text if text and not text.startswith("<") else ""
+
+
+def codex_session(path):
+    info = {"harness": "codex", "id": None, "cwd": None, "start": None, "model": None, "effort": None, "first": ""}
+    humans = 0
+    with open(str(path), errors="replace") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            payload = record.get("payload") or {}
+            if record.get("type") == "session_meta" and not info["id"]:
+                info.update(id=payload.get("id"), cwd=payload.get("cwd"), start=payload.get("timestamp"))
+            elif record.get("type") == "turn_context" and not info["model"]:
+                info.update(model=payload.get("model"), effort=payload.get("effort"))
+            elif record.get("type") == "event_msg" and payload.get("type") == "item_completed":
+                item = payload.get("item") or {}
+                if item.get("type") == "UserMessage":
+                    humans += 1
+                    if not info["first"]:
+                        content = item.get("content")
+                        parts = content if isinstance(content, list) else []
+                        info["first"] = human_text(" ".join(p.get("text", "") for p in parts if isinstance(p, dict)))
+    return info if humans else None
+
+
+def claude_session(path):
+    info = {"harness": "claude", "id": path.stem, "cwd": None, "start": None, "model": None, "effort": None, "first": ""}
+    humans = 0
+    with open(str(path), errors="replace") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("isSidechain"):
+                continue
+            if record.get("type") == "user" and not record.get("isMeta"):
+                content = (record.get("message") or {}).get("content")
+                text = human_text(content) if isinstance(content, str) else ""
+                if text:
+                    humans += 1
+                    info["first"] = info["first"] or text
+                    info["cwd"] = info["cwd"] or record.get("cwd")
+                    info["start"] = info["start"] or record.get("timestamp")
+            elif record.get("type") == "assistant" and not info["model"]:
+                info["model"] = (record.get("message") or {}).get("model")
+    return info if humans else None
+
+
+def all_sessions():
+    sessions = []
+    for harness in HARNESSES:
+        for method in METHODS:
+            state = state_dir(harness, method)
+            files = state.glob("sessions/**/*.jsonl") if harness == "codex" else state.glob("projects/*/*.jsonl")
+            for path in files:
+                info = codex_session(path) if harness == "codex" else claude_session(path)
+                if info and info["id"]:
+                    info.update(method=method, path=path)
+                    sessions.append(info)
+    sessions.sort(key=lambda s: s["start"] or "", reverse=True)
+    return sessions
+
+
+def mentions(info, name):
+    with open(str(info["path"]), errors="replace") as handle:
+        return name in handle.read()
+
+
+def cmd_sessions(args):
+    sessions = all_sessions()
+    if args:
+        sessions = [s for s in sessions if mentions(s, args[0])]
+    if not sessions:
+        print("没有找到会话。")
+        return
+    rows = [("开始", "harness", "方法版本", "模型", "开场那句", "接着这个会话")]
+    for s in sessions[:20]:
+        first = s["first"]
+        first = first if width(first) <= 40 else first[:20] + "……"
+        rows.append((local_time(s["start"]), HARNESSES[s["harness"]]["label"], METHODS[s["method"]],
+                     s["model"] or "", first, "wayfinder resume " + s["id"]))
+    table(rows)
+
+
+def cmd_resume(args, default_method):
+    if not args:
+        die("用法：wayfinder resume <会话 ID>；wayfinder sessions 列出会话。")
+    options, positional, passthrough = parse(args, default_method)
+    if not positional:
+        die("用法：wayfinder resume <会话 ID>；wayfinder sessions 列出会话。")
+    match = [s for s in all_sessions() if s["id"] == positional[0]]
+    if not match:
+        die("专用 Agent 的会话里没有 {}。wayfinder sessions 列出会话。".format(positional[0]))
+    s = match[0]
+    options["harness"], options["method"] = s["harness"], s["method"]
+    spec = HARNESSES[s["harness"]]
+    if "model" not in options["given"]:
+        options["model"] = s["model"] or spec["model"]
+    if "effort" not in options["given"]:
+        options["effort"] = s["effort"] if s["effort"] in spec["efforts"] else DEFAULT_EFFORT
+    launch(options, passthrough=passthrough, resume_id=s["id"], cwd=s["cwd"])
+
+
+# ---------------------------------------------------------------- chatgpt, status
+
+def stop_chatgpt():
+    pid = read_pid(SVC / "chatgpt.pid")
+    if pid and alive(pid):
+        os.kill(pid, signal.SIGINT)
+        for _ in range(80):
+            if not alive(pid):
+                break
+            time.sleep(0.25)
+        say("已关掉 ChatGPT 测试连接（pid {}）。".format(pid))
+
+
+def cmd_chatgpt(_args):
+    runner = CHECKOUT / "scripts/local-chatgpt-test.mjs"
+    if "WAYFINDER_ATTACH_TOKEN" not in runner.read_text():
+        die("{} 的 ChatGPT 测试脚本还不能接到已在跑的服务上；产品仓库的 client-credentials 改动合入后才能用。".format(CHECKOUT))
+    ensure_service()
+    # A service before 2.0.1 refuses the whole credentials file when it sees the toolsOnly field.
+    version = probe(primary_token())[1]
+    tools_only = bool(re.match(r"\d+\.\d+\.\d+$", version)) and tuple(map(int, version.split("."))) >= (2, 0, 1)
+    token, sha = register_credential("ChatGPT", os.getpid(), tools_only)
+    try:
+        if probe(token)[0] != 200:
+            die("服务还不支持按来源记录，先 wayfinder restart 换到新代码。")
+        env = dict(os.environ, WAYFINDER_DATABASE_PATH=database_path(), WAYFINDER_ATTACH_TOKEN=token)
+        # Ctrl-C reaches the runner through the terminal; it stops the relay and tunnel, then this cleans up.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        child = subprocess.Popen([node_bin(), str(runner)], cwd=str(CHECKOUT), env=env,
+                                 preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+        write_private(SVC / "chatgpt.pid", "{}\n".format(child.pid))
+        code = child.wait()
+    finally:
+        release_credential(sha)
+        try:
+            (SVC / "chatgpt.pid").unlink()
+        except OSError:
+            pass
+    sys.exit(code)
+
+
+def cmd_status(_args):
+    pid = listener(PORT)
+    if pid:
+        status, version = probe(primary_token())
+        owner = "wayfinder 拉起" if status == 200 else "别的服务（多半是 npm run serv）"
+        print("服务：运行中，{}；端口 {}，pid {}，版本 {}，代码来自 {}".format(
+            owner, PORT, pid, version, cwd_of(pid)))
+        database, configured = open_database(pid), configured_database()
+        note = "（配置现在指向 {}，restart 后换过去）".format(configured) if database and configured and \
+            os.path.realpath(database) != os.path.realpath(configured) else ""
+        print("数据库：{}{}".format(database or "看不出（服务没开着 SQLite 文件）", note))
+    else:
+        print("服务：未运行；下次用 {} 的代码".format(CHECKOUT))
+        configured = configured_database()
+        print("数据库：{}".format("下次用 " + configured if configured else
+                                 "未配置（{}/.env.local 里没有 WAYFINDER_DATABASE_PATH）".format(CHECKOUT)))
+    relay = read_pid(SVC / "chatgpt.pid")
+    print("ChatGPT 测试：{}".format("开着（pid {}），公开地址没有用户认证".format(relay) if relay and alive(relay) else "关着"))
+    owners = list(live_owners().values())
+    print("在用的写入来源：{}".format("、".join(o["clientId"] for o in owners) if owners else "无"))
+    print("产出目录：{}".format(OUTPUTS))
+    for harness, spec in HARNESSES.items():
+        for method in METHODS:
+            print("{} · {}：状态目录 {}".format(spec["label"], METHODS[method], state_dir(harness, method)))
+
+
+def cmd_help(_args):
+    print("""用法：
+  wayfinder [地图 ID] [--harness codex|claude] [--model 模型] [--effort 档位] [--method mcp|matt] [-- harness 参数]
+      开一个专用 Agent；写了地图 ID 就开场续接它。flag 只管这一次，不带就是 Codex · gpt-6-astra · xhigh · MCP 版。
+  wayfinder maps                     列出所有地图（两个方法版本）
+  wayfinder sessions [地图 ID]       列出专用 Agent 的会话，可按地图筛
+  wayfinder resume <会话 ID>          接着某个会话，harness 和方法版本按原会话
+  wayfinder serve | status | stop | restart
+                                     服务：拉起 | 查看 | 停止（连同 ChatGPT 测试） | 换到最新代码
+  wayfinder chatgpt                  打开 ChatGPT 测试连接，Ctrl-C 关掉；和专用 Agent 共用一个服务
+  wayfinder-matt …                   等于 wayfinder --method matt …
+推理强度：Codex 有 minimal low medium high xhigh；Claude Code 有 low medium high xhigh max。""")
+
+
+def main():
+    default_method = "matt" if Path(sys.argv[0]).name == "wayfinder-matt" else "mcp"
+    args = sys.argv[1:]
+    head = args[0] if args else ""
+    if head in REFUSED:
+        die(REFUSED[head])
+    if head in ("serve", "stop", "restart", "chatgpt") and default_method == "matt":
+        die("对照版不连 Wayfinder 服务；服务用 wayfinder {} 管理。".format(head))
+    if head == "serve":
+        ensure_service()
+    elif head == "stop":
+        stop_service()
+    elif head == "restart":
+        stop_service()
+        ensure_service()
+    elif head == "status":
+        cmd_status(args[1:])
+    elif head == "maps":
+        cmd_maps(args[1:])
+    elif head == "sessions":
+        cmd_sessions(args[1:])
+    elif head == "resume":
+        cmd_resume(args[1:], default_method)
+    elif head == "chatgpt":
+        cmd_chatgpt(args[1:])
+    elif head in ("help", "-h", "--help"):
+        cmd_help(args[1:])
+    else:
+        options, positional, passthrough = parse(args, default_method)
+        if len(positional) > 1 or (positional and not ID_PATTERN.match(positional[0])):
+            die("只认一个地图 ID；要原样交给 harness 的参数放在 -- 后面。wayfinder help 看用法。")
+        prompt = "继续 Wayfinder 地图 {}".format(positional[0]) if positional else None
+        launch(options, prompt=prompt, passthrough=passthrough)
+
+
+if __name__ == "__main__":
+    main()

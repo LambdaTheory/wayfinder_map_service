@@ -53,6 +53,7 @@ npm run --silent backup -- <absolute-source> <fresh-absolute-destination>
 - [已接受的本地 MCP/SQLite 实现规格](docs/spec/mcp-sqlite.md)
 - [已接受的本地只读查看页规格](docs/spec/map-viewer.md)
 - [已接受的行为测试与验收需求](docs/spec/behaviour-testing.md)（尚未实现）
+- [专用 Wayfinder Agent 启动器](scripts/wayfinder-agent/README.md)（`wayfinder` 命令）
 - [M1 可执行验收矩阵](docs/implementation/m1-acceptance.md)
 - [自包含工作流验收](docs/implementation/mcp-self-contained-workflow.md)
 - [进行中的规划地图](docs/planning/README.md)

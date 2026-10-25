@@ -3,7 +3,7 @@
 // supports the WAYFINDER_AGENT_* overrides (the workspace `wayfinder` command), against a disposable
 // database and a canary build of the same checkout whose rules a model can only follow if it saw them.
 //
-//   WAYFINDER_LAUNCHER=~/workspace/runtime/tools/wayfinder_agent/wayfinder \
+//   WAYFINDER_LAUNCHER=scripts/wayfinder-agent/wayfinder \
 //     node tests/helpers/upgrade-live.mjs <codex|claude> <live|resume> [model] [effort]
 //
 // live:   one client process creates a Map, sleeps while the service restarts as the canary, then adds a Ticket.
