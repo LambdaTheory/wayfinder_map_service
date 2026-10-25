@@ -1,52 +1,64 @@
 # Wayfinder Map Service
 
-Wayfinder Map Service is a client-neutral decision-map system for ChatGPT, Codex, and other MCP-capable agents.
+Wayfinder Map Service 是一套与客户端无关的决策地图系统，供 ChatGPT、Codex 以及其他具备 MCP 能力的智能体使用。
 
-It combines two explicit workflows:
+它把两条显式工作流合在一起：
 
-- `@grilling` explores the current decision frontier in rounds.
-- `@wayfinder` manages long-running work as a persistent map of destinations, decisions, tickets, dependencies, evidence, and revisions.
+- `@grilling` 按轮次探查当前的决策前沿（decision frontier）。
+- `@wayfinder` 把长期工作管理为一张持久的地图（Map），记录目的地（destinations）、决策（decisions）、工单（tickets）、依赖（dependencies）、证据（evidence）和修订（revisions）。
 
-The remote service owns canonical state. Clients interact through a small MCP interface, while a web renderer and optional MCP Apps UI present the same map visually.
+服务持有权威状态。客户端通过 `map_create`、`map_list`、`map_read` 和 `map_apply` 四个 MCP 工具交互。
 
-## Current status
+## 当前状态
 
-M1 Map core is complete on `main` as of 2026-09-18: the six implementation Issues are closed, all 56 acceptance scenario groups have executable assertions, strict TypeScript checking passes, and 1,061 tests pass. See the [cumulative acceptance matrix](docs/implementation/m1-acceptance.md). M1 delivers the pure domain module and in-memory Adapter only; rollback/deletion, persistence, remote transport, authentication and rendering remain outside this slice.
+`main` 上已接受 M1 地图核心和本地 MCP/SQLite 服务。Node.js 钉在 26.3.0。存储是私有 SQLite：`initializeSQLite(path)` 创建新数据库，`openSQLite(path)` 只打开受支持的已有数据库。领域入口保持纯粹。SQLite 只用于这个本地切片。
 
-The accepted handoff is [docs/spec/m1.md](docs/spec/m1.md); the wider v1 product contract is [docs/spec/v1.md](docs/spec/v1.md).
+探索工作流版本是 `workflowVersion: 2.0.0`。兼容客户端凭 MCP 初始化说明和上述四份工具描述创建、恢复、认领并推进地图。新探索地图以[这份 MCP 工作流](docs/agents/exploration-mcp.md)为唯一权威。发生冲突时，该次请求作废；客户端重读并报告新的 Revision，停到人看到后再发出新请求。
 
-The local slice follows the [accepted MCP/SQLite implementation handoff](docs/spec/mcp-sqlite.md), human-confirmed on 2026-09-18; see [Codex MCP and SQLite acceptance planning](https://github.com/kun-g/wayfinder_map_service/issues/27) for its decisions. SQLite is selected for this local slice only. The Wayfinder MCP connection, real Codex acceptance and the separately gated [new-exploration workflow adoption](https://github.com/kun-g/wayfinder_map_service/issues/39) are implemented.
+回滚和删除仍在规划，规格尚未接受。实现跟踪见 [GitHub Issues](https://github.com/kun-g/wayfinder_map_service/issues)，规划入口见 [GitHub 规划地图](docs/planning/README.md)。v1 契约中的网页渲染、MCP Apps UI、OAuth 和 PostgreSQL 尚未进入这个本地切片。
 
-The first persistence slice implemented a private SQLite Adapter on pinned Node.js 26.3.0. Its separate operator entry point is `src/sqlite-storage.ts`: `initializeSQLite(path)` explicitly creates a fresh database, and `openSQLite(path)` opens only a supported existing database. The domain entry point remains pure. See [storage verification and operator constraints](docs/implementation/sqlite-storage.md).
+## 启动
 
-The storage failure/backup slice adds explicit busy/non-publication/unknown-outcome diagnostics, controlled Adapter-host restart/termination evidence, and `storage.backup(destination)`. Run `npm run --silent backup -- <absolute-source> <fresh-absolute-destination>` for a manual consistent local backup; `--silent` prevents npm echoing private path arguments. See [failure and backup evidence](docs/implementation/sqlite-failure-backup.md). This is not HTTP shutdown/reconnect, real connected Codex acceptance, a restore feature, or exploration adoption.
+按需的 ChatGPT 测试会话在仓库根目录使用已被忽略的 `.env.local`。其中 `WAYFINDER_DATABASE_PATH` 指向已有私有 SQLite 的绝对路径。启动：
 
-The headless tool slice exposes exactly `map_create`, `map_list`, `map_read` and `map_apply` through `createMapMcpServer(storage, { actorId, clientId })` in `src/mcp-tools.ts`. It uses the real M1 core and SQLite Adapter, declares complete JSON schemas and returns results once in `structuredContent`. The function creates an unconnected SDK server; the operator owns storage and transport lifecycle. See [tool/protocol evidence and limits](docs/implementation/mcp-tools.md). There is no runnable HTTP service or installed Codex connection in this slice, and exploration authority has not switched.
+```sh
+npm run serv
+```
 
-The local service slice adds the independently/manual-started `npm run --silent start` command and `startLocalMcpService(configuration)` in `src/mcp-service.ts`. It opens supported existing private SQLite storage only, serves authenticated Streamable HTTP at a fixed `127.0.0.1:<port>/mcp`, enforces request/tool admission limits and drains active work on SIGINT/SIGTERM. See [operator configuration and real HTTP lifecycle evidence](docs/implementation/local-mcp-service.md). Automated SDK-client HTTP tests are not installed Codex acceptance; no connection settings or exploration authority have changed.
+`serv` 即 `chatgpt:test`：先构建，再在 `.env.local` 存在时加载它，然后以前台方式连接 Cloudflare。它不新建数据库。会话期间转发地址公开，且没有用户认证。见[测试手册](docs/implementation/local-chatgpt-test-runbook.md)。
 
-The [on-demand local ChatGPT test runbook](docs/implementation/local-chatgpt-test-runbook.md) describes the separate foreground Cloudflare connection to an existing SQLite database, its private consistent backups, and its unauthenticated-public-endpoint limitation. It is not a production deployment.
+本地 MCP 服务：
 
-Track implementation in [GitHub Issues](https://github.com/kun-g/wayfinder_map_service/issues) and the private [M1 project board](https://github.com/users/kun-g/projects/5). Active rollback/deletion planning uses [GitHub planning Maps](docs/planning/README.md). Completed M1 planning decisions and prototype captures are preserved in [the planning archive](docs/archive/m1-planning/README.md).
+```sh
+npm run --silent start
+```
 
-The integration closeout retains all 56 M1 groups, passes 1,167 tests and records actual installed Codex CLI acceptance across independent sessions, stale-write conflicts and service restart. See the [cumulative acceptance report](docs/implementation/mcp-sqlite-acceptance.md) and [native call evidence](docs/implementation/mcp-sqlite-codex-evidence.json). L01–L05 pass, including the explicit live human verdict recorded on 2026-09-19. New exploration Maps now use the [adopted MCP workflow](docs/agents/exploration-mcp.md) as sole authority; its [cross-session evidence](docs/implementation/mcp-exploration-adoption.md) covers creation, resume, Claim, atomic advance, Conflict and outage pause. GitHub remains the implementation tracker, and existing rollback/deletion planning Maps remain there unchanged.
+在进程环境中提供 `WAYFINDER_DATABASE_PATH`、`WAYFINDER_PORT`、`WAYFINDER_TOKEN`、`WAYFINDER_ACTOR_ID` 和 `WAYFINDER_CLIENT_ID`。服务只打开已有的受支持私有库，监听 `127.0.0.1:<port>/mcp`。见[操作者配置](docs/implementation/local-mcp-service.md)。
 
-The self-contained workflow follow-on is accepted at `workflowVersion: 2.0.0`. A compatible client can create, resume, Claim and advance a Map from MCP initialization instructions and the four locally sufficient tool descriptions without an installed Skill or repository file. The real journey used ChatGPT Desktop's synchronized Wayfinder-Save connector and independent Codex CLI sessions, retained structured stale-Revision Conflict behavior across restart, and received the explicit live-human verdict on 2026-09-20. See the [self-contained workflow acceptance report](docs/implementation/mcp-self-contained-workflow.md) and [machine-readable evidence](docs/implementation/mcp-self-contained-workflow-evidence.json).
+一致的本地备份：
 
-## Project documents
+```sh
+npm run --silent backup -- <absolute-source> <fresh-absolute-destination>
+```
 
-- [Domain language](GLOSSARY.md)
-- [v1 executable specification](docs/spec/v1.md)
-- [Accepted M1 implementation specification](docs/spec/m1.md)
-- [Accepted local MCP/SQLite implementation specification](docs/spec/mcp-sqlite.md)
-- [M1 executable acceptance matrix](docs/implementation/m1-acceptance.md)
-- [Active planning Maps](docs/planning/README.md)
-- [M1 planning archive](docs/archive/m1-planning/README.md)
-- [ADR 0001: remote map as authoritative state](docs/adr/0001-remote-map-is-authoritative.md)
-- [ADR 0002: MCP tools are the primary interface](docs/adr/0002-mcp-tools-are-the-primary-interface.md)
-- [Agent workflow and project-local skills](AGENTS.md)
-- [Matt Pocock skill provenance](docs/agents/skills-provenance.md)
+`--silent` 避免 npm 回显私有路径。见[故障与备份证据](docs/implementation/sqlite-failure-backup.md)。
 
-## Provenance
+## 项目文档
 
-The interaction methods originate from Matt Pocock's MIT-licensed [`mattpocock/skills`](https://github.com/mattpocock/skills). This project preserves upstream provenance while maintaining a product-specific adaptation for convergence, persistence, portability, and recovery.
+- [领域语言](GLOSSARY.md)
+- [v1 可执行规格](docs/spec/v1.md)
+- [已接受的 M1 实现规格](docs/spec/m1.md)
+- [已接受的本地 MCP/SQLite 实现规格](docs/spec/mcp-sqlite.md)
+- [M1 可执行验收矩阵](docs/implementation/m1-acceptance.md)
+- [自包含工作流验收](docs/implementation/mcp-self-contained-workflow.md)
+- [进行中的规划地图](docs/planning/README.md)
+- [M1 规划归档](docs/archive/m1-planning/README.md)
+- [ADR 0001：远端地图作为权威状态](docs/adr/0001-remote-map-is-authoritative.md)
+- [ADR 0002：MCP 工具是主要接口](docs/adr/0002-mcp-tools-are-the-primary-interface.md)
+- [ADR 0003：MCP 服务携带版本化探索工作流](docs/adr/0003-mcp-service-carries-the-versioned-exploration-workflow.md)
+- [智能体工作流与项目本地技能](AGENTS.md)
+- [Matt Pocock 技能出处](docs/agents/skills-provenance.md)
+
+## 出处
+
+交互方法源自 Matt Pocock 以 MIT 许可证发布的 [`mattpocock/skills`](https://github.com/mattpocock/skills)。本项目保留上游出处，同时维护一份面向收敛、持久化、可移植性与恢复的产品专用改编。
