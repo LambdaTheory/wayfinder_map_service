@@ -96,7 +96,10 @@ describe('library', () => {
   });
 
   test('no cell is applicable before its Driver is onboarded; capability gaps are not applicable', () => {
-    expect(cell(byId('S0'), 'codex', 'mcp-only').state).toBe('unverified');
+    expect(cell(byId('S0'), 'claude', 'mcp-only').state).toBe('unverified');
+    expect(cell(byId('S0'), 'codex', 'dedicated').state).toBe('unverified');
+    expect(cell(byId('S0b'), 'codex', 'mcp-only').state).toBe('applicable');
+    expect(cell(byId('S6'), 'codex', 'mcp-only')).toEqual({ state: 'unverified', reasons: ['concurrent-sessions'] });
     expect(cell(byId('S7'), 'chatgpt', 'chatgpt')).toEqual({ state: 'not-applicable', reasons: ['entry chatgpt'] });
     expect(cell(byId('S0'), 'chatgpt', 'mcp-only').state).toBe('not-applicable');
   });

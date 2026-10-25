@@ -16,6 +16,7 @@ Nothing here starts a service or a model. Runs that spend model quota happen onl
 | `upgrade-checks.ts` | Upgrade compatibility checks, listed apart from the 26 |
 | `seeds/` | Seed Maps; `f11.json` is the redacted capture of a real Map |
 | `fixtures/` | Working-directory fixtures copied into the agent's directory |
+| `runner/` | The runner: isolated service, Controller, Codex Driver, normalizer (B02a) |
 
 ```sh
 node tests/behaviour/cli.ts list       # candidates, readiness, item counts
@@ -43,3 +44,19 @@ Script checks answer `holds`, `violated` or `unknown`. Missing records (the `mis
 2. Write must-not items as the wrong action itself and expectations as the right action, each with the evidence that proves it.
 3. Run `node tests/behaviour/cli.ts validate` and `npm test`.
 4. A real problem starts from the Revision before the incident and the human's own words (R6); record the conversion in `seed.derivedFrom` and redact private paths and credentials.
+
+## Running a Batch
+
+```sh
+npm run build    # the runner serves this checkout's dist/
+node tests/behaviour/runner/run.ts --batch B1-20261025 --scenarios S0b,F11 --count 2 --ceiling 4 --model gpt-6-astra --effort xhigh
+```
+
+Run only a Batch Kun approved: it spends model quota. Every Attempt gets a new database under `~/Library/Application Support/Wayfinder/behaviour-runs/<batch>/<attempt>/`, a free port (never 18765 or 18766), a Controller credential and one credential per session, so each Revision names the session's credential. The Controller seeds the Maps with the current release's `version`; the agent must find its own `version` in what its client shows it.
+
+Codex runs with a private `HOME` and `CODEX_HOME` under `/private/tmp`, `--ignore-user-config`, only this run's Wayfinder server, and inside `sandbox-exec` with a profile that denies reading `~/workspace`, personal client configuration, the everyday service's files and the Wayfinder folder (the real database and every run record), and denies writing under the home directory. The daily Codex login is copied in and deleted after the Attempt.
+
+Before anything runs, the runner refuses what it cannot do (Controller actions, several or concurrent sessions, history seeds: B02b and B04) and an existing output directory. A plan larger than `--ceiling` runs up to it and lists the rest as not run; Ctrl-C stops the client and service and marks what is left cancelled. Each Attempt writes `attempt.json` (the evidence record plus isolation facts: which database the service opened, whether it touched the real one, scratch removed) and `raw/` (Codex JSON per turn, the session log, the service log and initialize report, the final working directory), with credentials replaced by placeholders. `batch.json` lists every planned Attempt's outcome and compares personal configuration and the everyday service before and after.
+
+`runner/runner.test.ts` covers the runner without a model: refusals, every library seed against the real service, the sandbox profile, and one S0b Attempt played by `runner/fake-codex.mjs`, which makes real MCP calls.
+
