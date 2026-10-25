@@ -50,6 +50,7 @@ Exactly these tools, without SQL, DB-path selection, PreparedCommit import or an
 ```ts
 // M1 types and nested command fields are defined in m1.md sections 2–4.
 interface MapCreateArgs {
+  readonly version: string;
   readonly mapId: MapId;
   readonly title: string;
   readonly destination: string;
@@ -66,6 +67,7 @@ interface MapReadArgs {
   readonly revision?: RevisionNumber;
 }
 interface MapApplyArgs {
+  readonly version: string;
   readonly mapId: MapId;
   readonly expectedRevision: RevisionNumber;
   readonly commands: NonEmpty<Command>;
@@ -74,6 +76,8 @@ interface MapApplyArgs {
 ```
 
 `map_create` maps public mapId to M1 CreateMapInput.id and enriches author. It creates Revision 1, not an empty shell or Revision 0. `map_apply` enriches ApplyRequest.author, validates the entire ordered batch, prepares through M1 and commits through the real Adapter. Preparation alone is never durable success. Preserve whole-shape-before-semantics validation and the second authoritative head comparison at publication.
+
+`version` names the Release Version whose rules the caller follows: the `version:` line of the instructions it was given, or the first line of the workflow Resource it read. It is checked before any other validation and before storage is observed. A missing value or any other value than the running release returns `{ kind: 'rejected', code: 'version_mismatch', version, rules: 'wayfinder://workflow/exploration' }`, with the claimed value echoed (or null) and nothing written; the result does not name the running version, so the caller learns it only by reading the rules. Reads take no version ([ADR 0005](../adr/0005-writes-attest-the-rules-version.md)).
 
 `includeSnapshot` defaults to false, is boolean, and affects only successful write response size, never mutation semantics. `map_read` defaults to the committed authoritative head observed for the request; historical state requires an explicit revision. A valid nonexistent historical number is revision_not_found, never a fallback to latest. expectedRevision is only a write CAS precondition, not a request to mutate an old historical state.
 
@@ -134,7 +138,7 @@ Preserve the structured M1 ReadResult, PrepareResult, CommitResult and Rejection
 
 | Class | Required treatment |
 | --- | --- |
-| Argument validation, business rejection, missing object, stale Revision | Ordinary structured tool result with no `isError`; preserve applicable M1 fields/codes so clients do not collapse the domain result into a generic runtime exception |
+| Argument validation, business rejection, missing object, stale Revision, rules from another release (`version_mismatch`) | Ordinary structured tool result with no `isError`; preserve applicable M1 fields/codes so clients do not collapse the domain result into a generic runtime exception |
 | Unknown tool or malformed protocol request | Protocol error, not a fabricated domain rejection |
 | Storage/transport/service failure | Distinct infrastructure diagnosis with `isError: true`; safe fields only, not SQL, private paths or credentials |
 | Proven non-publication | State/history unchanged; do not label uncertain outcomes as this class |
@@ -289,9 +293,11 @@ This follow-on slice includes an isolated ChatGPT Desktop acceptance through the
 
 - Initialization `instructions` begin with an independently complete safety core no longer than 512 characters. It states the sole-authority/outage boundary, full catalog check and create-once rule, authoritative reread after resumption/uncertainty, Frontier/Claim gate, latest-revision/no-replay rule, the post-Conflict human reauthorization gate and live-human Settlement boundary. A concise method summary follows it.
 - Each of the four tool descriptions is locally sufficient for its operation. `map_list` requires full pagination before creation and rejects title-as-handle selection; `map_create` is create-once and uncertain results require discovery/reread; `map_read` is the authority after resumption, conflict and uncertainty; `map_apply` states latest `expectedRevision`, Claim/Settlement boundaries, and that a Conflict voids the old request until the human sees the new Revision and issues a new request.
-- The complete authoritative Markdown is exposed at stable URI `wayfinder://workflow/exploration` and a current-build immutable SemVer alias (for example `wayfinder://workflow/exploration/1.0.1`) with a Markdown media type. The service need not retain older workflow bodies.
+- The complete authoritative Markdown, preceded by a `version: <version>` line, is exposed at stable URI `wayfinder://workflow/exploration` and a current-build immutable SemVer alias (for example `wayfinder://workflow/exploration/2.0.0`) with a Markdown media type. The service need not retain older workflow bodies.
 - The optional `start_wayfinder_exploration` Prompt accepts `mode=create|resume` and an optional stable Map ID. It only produces an entry message, has no storage side effect and contains no safety rule absent from instructions/tool metadata.
 - An optional external Wayfinder Skill is an invocation/method adapter only. It must not require a repository-relative file, duplicate the workflow body or become necessary for correct operation.
+
+A rule that applies across tools, or that changes what a caller writes, lives in the safety core or the instructions summary. A tool description may restate it, but is never its only home: after an upgrade some clients keep a tool definition they loaded earlier while showing the new instructions ([Open conversations across an upgrade](../implementation/client-upgrade.md)). Tool descriptions own how to call their tool.
 
 Protocol-level text is English; clients may answer users in their language. Resource and Prompt support never substitutes for initialization instructions and locally sufficient tool metadata.
 
@@ -306,6 +312,8 @@ The service and the workflow it carries share one SemVer, the Release Version, h
 Shipped means `src/`, `web/`, `scripts/`, `package-lock.json` and `docs/agents/exploration-mcp.md`; documentation- and test-only changes keep the version. Each release adds a `CHANGELOG.md` section headed `## <version> (<date>)` and, once merged, the tag `v<version>` on `main`. Never decrease or reuse a Release Version, including when restoring earlier behavior.
 
 Before 2026-10-25 only the workflow had a version, `workflowVersion`, while the server reported a fixed `0.1.0`. The workflow's initial test publication was `1.0.0`; `1.1.0` added complete-command guidance after real Codex exposed partial validation probing; `1.2.0` made nested Reference/Provenance/Evidence shapes explicit; `2.0.0` changed mandatory Conflict behavior after a real ChatGPT run reread a newer Revision but automatically resubmitted the stale intention: a Conflict now voids the rejected request and requires the client to report and stop until the human issues a new request after seeing the new Revision. Later steps through `3.0.0` are in `CHANGELOG.md`. Those numbers overlap the Release Version series; the names `workflowVersion` and `version` keep them apart.
+
+An upgrade is a process restart onto the new build; the service never swaps definitions inside a running session, so it declares no `listChanged` capability and offers no stream for change notifications. A restart ends every session: a request carrying an old `mcp-session-id` gets HTTP 404 and the client must initialize again, receiving the new instructions, tool list, Resource and Prompt. What a client then shows its model is the client's choice, and some keep the definitions they loaded first; the write `version` check (section 4) stops such a caller before it writes under old rules. Client behavior and recovery steps are in [Open conversations across an upgrade](../implementation/client-upgrade.md).
 
 The build extracts and validates the named blocks and emits an immutable asset into `dist`; generated runtime copies are not committed. The service must run from built artifacts without the repository source path and captures one workflow contract for the process lifetime. Workflow changes require rebuild and restart; there is no hot reload or list-changed promise. A new connection receives the new instructions, Resources must be reread, and ChatGPT plugin snapshots follow their own rescan/republication lifecycle.
 

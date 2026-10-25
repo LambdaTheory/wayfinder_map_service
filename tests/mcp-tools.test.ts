@@ -14,6 +14,7 @@ import type { SQLiteStorage } from '../src/sqlite-storage.js';
 import { calculateFrontier, parseId, prepareApply } from '../src/index.js';
 import type { Command, NonEmpty, Revision, TicketType } from '../src/index.js';
 import { rejectionSeed, rejectionCases } from './helpers/mcp-rejection-cases.js';
+import { versioned } from './helpers/write-version.js';
 
 const version: string = JSON.parse(readFileSync('package.json', 'utf8')).version;
 
@@ -50,7 +51,7 @@ async function fixture(faults: Parameters<typeof sqliteLifecycleForTests>[0] = {
   await client.connect(clientTransport);
   cleanups.push(async () => { await client.close(); await server.close(); });
   async function call(name: string, args: Record<string, unknown> = {}): Promise<CallToolResult> {
-    const result = await client.callTool({ name, arguments: args }) as CallToolResult;
+    const result = await client.callTool({ name, arguments: versioned(name, args) }) as CallToolResult;
     expect(result.content).toEqual([]);
     expect(result.structuredContent).toBeDefined();
     expect(schemas.get(name)!.output(result.structuredContent), JSON.stringify(schemas.get(name)!.output.errors)).toBe(true);
@@ -120,7 +121,30 @@ test('W02: the map_apply description names every command and field its input sch
   }
 });
 
-test('W01/W02: initialization, generated tool guidance, Resources and side-effect-free Prompt expose workflow 3.0.0', async () => {
+test('U00: writes name the release whose rules they follow; a missing or other version is refused before anything is read or written', async () => {
+  const f = await fixture();
+  const refused = (version: string | null) => ({ kind: 'rejected', code: 'version_mismatch', version, rules: 'wayfinder://workflow/exploration' });
+  const bare = { mapId: 'Acceptance.Alpha', title: 'Gate', destination: 'Gate' };
+  for (const [args, echoed] of [[bare, null], [{ ...bare, version: '1.0.1' }, '1.0.1'], [{ ...bare, version: 'x'.repeat(33) }, null],
+    [{ ...bare, version: 2 }, null]] as const) {
+    const result = await f.client.callTool({ name: 'map_create', arguments: args }) as CallToolResult;
+    expect(result.structuredContent).toEqual(refused(echoed));
+    expect(schemas.get('map_create')!.output(result.structuredContent)).toBe(true);
+  }
+  expect((await f.call('map_list')).structuredContent).toMatchObject({ maps: [] });
+  await f.create();
+  // Fields a caller kept from an older schema do not hide the version answer behind an input rejection.
+  expect((await f.client.callTool({ name: 'map_apply', arguments: { mapId: 'Acceptance.Alpha', expectedRevision: 1, commands: [], retired: true } }))
+    .structuredContent).toEqual(refused(null));
+  expect((await f.read()).structuredContent).toMatchObject({ revision: { revision: 1 } });
+  for (const name of ['map_create', 'map_apply']) {
+    const schema = mapTools.find(tool => tool.name === name)!.inputSchema as { required: string[]; properties: Record<string, { description: string }> };
+    expect(schema.required).toContain('version');
+    expect(schema.properties.version!.description).not.toContain(workflowContract.version);
+  }
+});
+
+test('W01/W02: initialization, generated tool guidance, Resources and side-effect-free Prompt expose the current release', async () => {
   const f = await fixture();
   expect(f.client.getInstructions()).toBe(workflowContract.instructions);
   expect(f.client.getInstructions()!.startsWith(workflowContract.safetyCore)).toBe(true);
@@ -138,7 +162,7 @@ test('W01/W02: initialization, generated tool guidance, Resources and side-effec
   for (const resource of listed.resources) {
     expect(resource).toMatchObject({ mimeType: 'text/markdown', _meta: { 'wayfinder/version': version } });
     expect(await f.client.readResource({ uri: resource.uri })).toEqual({ contents: [{ uri: resource.uri,
-      mimeType: 'text/markdown', text: readFileSync('docs/agents/exploration-mcp.md', 'utf8'),
+      mimeType: 'text/markdown', text: `version: ${version}\n\n${readFileSync('docs/agents/exploration-mcp.md', 'utf8')}`,
       _meta: { 'wayfinder/version': version } }] });
   }
 
@@ -282,9 +306,9 @@ test('P01: every M1 command schema validates nested shape and the real whole-sha
     { kind: 'content.remove', section: 'fog', itemId: 'F' }, { kind: 'map.update', patch: { notes: '', extensions: { 'test.json': [null, 2, { nested: true }] } } },
     ...(['grilling', 'prototype', 'research', 'task'] as const).map(type => ({ kind: 'ticket.settle', ticketId: 'A', ticketType: type, claimantId: 'work', settlement: settlement(type) }))];
   for (const command of valid) {
-    expect(schemas.get('map_apply')!.input({ mapId: 'Acceptance.Alpha', expectedRevision: 1, commands: [command] })).toBe(true);
+    expect(schemas.get('map_apply')!.input(versioned('map_apply', { mapId: 'Acceptance.Alpha', expectedRevision: 1, commands: [command] }))).toBe(true);
     const malformed = { ...command, system: 'forged' };
-    expect(schemas.get('map_apply')!.input({ mapId: 'Acceptance.Alpha', expectedRevision: 1, commands: [malformed] })).toBe(false);
+    expect(schemas.get('map_apply')!.input(versioned('map_apply', { mapId: 'Acceptance.Alpha', expectedRevision: 1, commands: [malformed] }))).toBe(false);
     expect((await f.apply([{ kind: 'claim.acquire', ticketId: 'Missing', claimantId: 'work' }, malformed], 1)).structuredContent).toMatchObject({
       rejection: { stage: 'input', error: { path: ['commands', 1, 'system'] } },
     });
@@ -300,7 +324,7 @@ test('P01: every M1 command schema validates nested shape and the real whole-sha
   ];
   for (const [index, value] of badSettlements.entries()) {
     const command = { kind: 'ticket.settle', ticketId: 'A', ticketType: index === 2 ? 'research' : 'task', claimantId: 'work', settlement: value };
-    expect(schemas.get('map_apply')!.input({ mapId: 'Acceptance.Alpha', expectedRevision: 1, commands: [command] })).toBe(false);
+    expect(schemas.get('map_apply')!.input(versioned('map_apply', { mapId: 'Acceptance.Alpha', expectedRevision: 1, commands: [command] }))).toBe(false);
     expect((await f.apply([command], 1)).structuredContent).toMatchObject({ rejection: { stage: 'input', error: { code: 'invalid_input' } } });
     expect(await observe(f.storage, 1)).toEqual(before);
   }
@@ -467,7 +491,7 @@ test('P01: author configuration rejected before serving, captured against later 
   const client = new Client({ name: 'author-test', version: '0.1.0' });
   await server.connect(st); await client.connect(ct);
   try {
-    await client.callTool({ name: 'map_create', arguments: { mapId: 'Captured', title: 'T', destination: 'D' } });
+    await client.callTool({ name: 'map_create', arguments: versioned('map_create', { mapId: 'Captured', title: 'T', destination: 'D' }) });
     const read = await client.request({ method: 'tools/call', params: { name: 'map_read', arguments: { mapId: 'Captured' } } }, CallToolResultSchema);
     expect(snapshot(read).author).toMatchObject(configuration);
   } finally { await client.close(); await server.close(); }
@@ -483,7 +507,7 @@ test('V10: a configured local viewer origin adds viewerUrl to map_create and map
   const client = new Client({ name: 'viewer-link-test', version: '0.1.0' });
   await server.connect(st); await client.connect(ct);
   const call = async (name: string, args: Record<string, unknown>) => {
-    const result = await client.callTool({ name, arguments: args }) as CallToolResult;
+    const result = await client.callTool({ name, arguments: versioned(name, args) }) as CallToolResult;
     expect(schemas.get(name)!.output(result.structuredContent), JSON.stringify(schemas.get(name)!.output.errors)).toBe(true);
     return result.structuredContent!;
   };

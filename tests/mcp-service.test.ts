@@ -2,12 +2,15 @@ import { createHash } from 'node:crypto';
 import { createServer, request as httpRequest } from 'node:http';
 import type { Server as HttpServer } from 'node:http';
 import { execFileSync, fork } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { createHttpTestClient } from './helpers/mcp-http-client.mjs';
+import { versioned } from './helpers/write-version.js';
+// @ts-expect-error the canary helper is plain ESM outside the TypeScript source graph
+import { canaryVersion, replyRule, ticketRule, writeCanaryCheckout } from './helpers/canary-release.mjs';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Ajv } from 'ajv';
 import { afterEach, beforeAll, expect, test } from 'vitest';
@@ -65,7 +68,7 @@ async function connect(port: number, bearer = token) {
   const { client, transport, negotiatedProtocol } = await createHttpTestClient(port, bearer);
   cleanups.push(() => client.close());
   async function call(name: string, args: Record<string, unknown> = {}): Promise<CallToolResult> {
-    const result = await client.callTool({ name, arguments: args }) as CallToolResult;
+    const result = await client.callTool({ name, arguments: versioned(name, args) }) as CallToolResult;
     expect(result.content).toEqual([]);
     expect(outputs.get(name)!(result.structuredContent)).toBe(true);
     return result;
@@ -90,7 +93,7 @@ function raw(port: number, body: string | Buffer = '', headers: Record<string, s
   });
 }
 const message = (name = 'map_list', args: Record<string, unknown> = {}) =>
-  JSON.stringify({ jsonrpc: '2.0', id: 900, method: 'tools/call', params: { name, arguments: args } });
+  JSON.stringify({ jsonrpc: '2.0', id: 900, method: 'tools/call', params: { name, arguments: versioned(name, args) } });
 const sessionHeaders = (sessionId: string) => ({ 'mcp-session-id': sessionId, 'mcp-protocol-version': '2025-11-25' });
 const update = [{ kind: 'map.update', patch: { notes: 'HTTP advanced' } }];
 type Connection = Awaited<ReturnType<typeof connect>>;
@@ -285,7 +288,7 @@ test('W03: real Streamable HTTP initialization carries immutable workflow instru
     'wayfinder://workflow/exploration', `wayfinder://workflow/exploration/${version}`,
   ]);
   expect((await c.client.readResource({ uri: 'wayfinder://workflow/exploration' })).contents[0]).toMatchObject({
-    text: workflowContract.markdown, _meta: { 'wayfinder/version': version },
+    text: `version: ${version}\n\n${workflowContract.markdown}`, _meta: { 'wayfinder/version': version },
   });
   expect((await c.client.getPrompt({ name: 'start_wayfinder_exploration', arguments: { mode: 'resume', mapId: 'Stable.Map' } }))
     .messages[0]).toMatchObject({ role: 'user', content: { type: 'text', text: expect.stringContaining(`version: ${version}.`) } });
@@ -479,8 +482,8 @@ test('P08: session DELETE drains multiple admitted requests without reopening ad
   ] });
 });
 
-function childHost(path: string, port: number, mode: string) {
-  const child = fork(fileURLToPath(new URL('./helpers/mcp-http-host.mjs', import.meta.url)), [path, String(port), mode], {
+function childHost(path: string, port: number, mode: string, hostPath = fileURLToPath(new URL('./helpers/mcp-http-host.mjs', import.meta.url))) {
+  const child = fork(hostPath, [path, String(port), mode], {
     execArgv: [], stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   const messages: unknown[] = []; const waiting: ((message: unknown) => void)[] = [];
@@ -546,6 +549,43 @@ test('D10/P08: child SIGTERM stops HTTP admission, completes controlled active c
   expect((await next.read(4)).structuredContent!.revision).toEqual(receipt.structuredContent!.revision);
   expect((await next.read()).structuredContent!.frontier).toEqual(receipt.structuredContent!.frontier);
   expect((await next.read()).structuredContent!.revision).toEqual(receipt.structuredContent!.revision);
+});
+
+test('U01: a restart onto a new release ends old sessions; a reconnected caller gets the new definitions; a stale or resent write is refused unwritten', async () => {
+  const f = storageFixture(); f.storage.close(); const port = await freePort();
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'wayfinder-upgrade-'))); cleanups.push(() => rmSync(root, { recursive: true }));
+  const canaryRoot = join(root, 'canary');
+  const { before, after } = await writeCanaryCheckout(fileURLToPath(new URL('..', import.meta.url)), canaryRoot);
+  mkdirSync(join(canaryRoot, 'tests/helpers'), { recursive: true });
+  cpSync(fileURLToPath(new URL('./helpers/mcp-http-host.mjs', import.meta.url)), join(canaryRoot, 'tests/helpers/mcp-http-host.mjs'));
+
+  const current = childHost(f.path, port, 'idle'); expect(await current.next()).toEqual({ kind: 'ready' });
+  const c = await connect(port);
+  expect(c.client.getServerVersion()).toEqual({ name: 'wayfinder-map', version: before.version });
+  expect((await c.create()).structuredContent).toMatchObject({ kind: 'committed', revision: 1 });
+  current.child.kill('SIGTERM'); expect(await current.exit).toEqual({ code: 0, signal: null });
+  const upgraded = childHost(f.path, port, 'idle', join(canaryRoot, 'tests/helpers/mcp-http-host.mjs'));
+  expect(await upgraded.next()).toEqual({ kind: 'ready' });
+
+  // The old session serves neither old nor new definitions; MCP clients answer this 404 with a new initialize.
+  const write = (version: string, expectedRevision: number) => ({ name: 'map_apply', arguments: { version, mapId: 'Acceptance.Alpha', expectedRevision, commands: update } });
+  expect((await raw(port, message('map_apply', write(before.version, 1).arguments), sessionHeaders(c.transport.sessionId!))).status).toBe(404);
+  const d = await connect(port);
+  expect(d.client.getServerVersion()).toEqual({ name: 'wayfinder-map', version: canaryVersion });
+  expect(d.client.getInstructions()).toBe(after.instructions); expect(d.client.getInstructions()).toContain(replyRule);
+  expect((await d.client.listTools()).tools.find(tool => tool.name === 'map_apply')!.description).toContain(ticketRule);
+  const rules = (await d.client.readResource({ uri: 'wayfinder://workflow/exploration' })).contents[0] as { text: string };
+  expect(rules.text.startsWith(`version: ${canaryVersion}\n\n`)).toBe(true); expect(rules.text).toContain(replyRule); expect(rules.text).toContain(ticketRule);
+
+  // Codex and Claude Code resend the failed call once on the new session, still carrying the old rules' version.
+  expect((await d.client.callTool(write(before.version, 1))).structuredContent).toEqual(
+    { kind: 'rejected', code: 'version_mismatch', version: before.version, rules: 'wayfinder://workflow/exploration' });
+  expect((await d.client.callTool({ name: 'map_read', arguments: { mapId: 'Acceptance.Alpha' } })).structuredContent).toMatchObject({ revision: { revision: 1 } });
+  // With the new rules read, the write lands once; repeating it is a Conflict, not a second change.
+  expect((await d.client.callTool(write(canaryVersion, 1))).structuredContent).toMatchObject({ kind: 'committed', revision: 2 });
+  expect((await d.client.callTool(write(canaryVersion, 1))).structuredContent).toEqual(
+    { kind: 'conflict', conflict: { mapId: 'Acceptance.Alpha', expectedRevision: 1, currentRevision: 2 } });
+  upgraded.child.kill('SIGTERM'); expect(await upgraded.exit).toEqual({ code: 0, signal: null });
 });
 
 test('P08/P09: actual operator command startup failures return nonzero with fixed safe logs', async () => {

@@ -46,7 +46,7 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
     if (request.params.uri !== stableResourceUri && request.params.uri !== versionedResourceUri) {
       throw new McpError(ErrorCode.InvalidParams, 'Unknown workflow Resource');
     }
-    return { contents: [{ uri: request.params.uri, mimeType: 'text/markdown', text: workflowContract.markdown,
+    return { contents: [{ uri: request.params.uri, mimeType: 'text/markdown', text: `version: ${workflowContract.version}\n\n${workflowContract.markdown}`,
       _meta: { 'wayfinder/version': workflowContract.version } }] };
   });
   const prompt = { name: 'start_wayfinder_exploration', description: `Start or resume Wayfinder workflow ${workflowContract.version}`,
@@ -70,6 +70,16 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
     if (!tool) throw new McpError(ErrorCode.InvalidParams, 'Unknown Map tool');
     if (request.params.task !== undefined) throw new McpError(ErrorCode.InvalidParams, 'Task execution is not supported');
     const raw = request.params.arguments ?? {};
+    // A write names the release whose rules the caller follows. After an upgrade, a caller still holding the old
+    // rules (a client that reconnected without refreshing, or one resending its last call) is stopped before
+    // anything is validated or written, and pointed at the current rules.
+    if (tool.name === 'map_create' || tool.name === 'map_apply') {
+      const claimed = isPlainObject(raw) ? raw.version : undefined;
+      if (claimed !== workflowContract.version) {
+        return envelope({ kind: 'rejected', code: 'version_mismatch',
+          version: typeof claimed === 'string' && claimed.length <= 32 ? claimed : null, rules: stableResourceUri });
+      }
+    }
     const properties = tool.inputSchema.properties ?? {};
     const shape = validateObject(raw, [], Object.keys(properties));
     if (shape) return inputFailure(shape);
@@ -81,11 +91,11 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
     let create: ReturnType<typeof prepareCreate> | undefined;
     let apply: ReturnType<typeof decodeApplyRequest> | undefined;
     if (tool.name === 'map_create') {
-      const { mapId, includeSnapshot: _snapshot, ...fields } = raw;
+      const { mapId, includeSnapshot: _snapshot, version: _version, ...fields } = raw;
       create = prepareCreate({ ...fields, id: mapId, author: author() } as CreateMapInput);
       if (create.kind === 'error') return inputFailure({ ...create.error, path: create.error.path.map((part, i) => i === 0 && part === 'id' ? 'mapId' : part) });
     } else if (tool.name === 'map_apply') {
-      const { includeSnapshot: _snapshot, ...fields } = raw;
+      const { includeSnapshot: _snapshot, version: _version, ...fields } = raw;
       apply = decodeApplyRequest({ ...fields, author: author() });
       if (apply.kind === 'error') return inputFailure(apply.error);
       if (apply.value.commands.length > 100) return inputFailure(invalid(['commands'], 'At most 100 commands required'));

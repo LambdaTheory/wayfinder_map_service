@@ -11,6 +11,8 @@ const string: Schema = { type: 'string' };
 const text: Schema = { type: 'string', pattern: '\\S' };
 const id: Schema = { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$(?![\\s\\S])', maxLength: 128 };
 const revision: Schema = { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER };
+// Writes attest which release's rules the caller follows; the value comes from its instructions, not from here.
+const version: Schema = { type: 'string', maxLength: 32, description: 'The `version:` line of the Wayfinder instructions you are following.' };
 const json: Schema = { $ref: '#/$defs/json' };
 const jsonObject: Schema = { type: 'object', additionalProperties: json };
 const extensions: Schema = { ...jsonObject, propertyNames: { pattern: '^[a-z][a-z0-9_-]*\\.[a-z][a-z0-9_.-]*$(?![\\s\\S])' } };
@@ -74,6 +76,7 @@ const errors: Schema[] = [
   ] } }),
   object({ kind: literal('rejected'), error: inputError }),
   object({ kind: literal('rejected'), code: { enum: ['map_already_exists', 'map_not_found'] }, mapId: id }),
+  object({ kind: literal('rejected'), code: literal('version_mismatch'), version: { anyOf: [string, literal(null)] }, rules: literal('wayfinder://workflow/exploration') }),
   object({ kind: literal('not_found'), code: literal('map_not_found'), mapId: id }),
   object({ kind: literal('not_found'), code: literal('revision_not_found'), mapId: id, revision }),
   object({ kind: literal('conflict'), conflict: object({ mapId: id, expectedRevision: revision, currentRevision: revision }) }),
@@ -87,7 +90,7 @@ const writeOutput = (link: Record<string, Schema>) => [object({ kind: literal('c
   object({ kind: literal('committed'), revision: fullRevision, frontier: array(id), ...link }, ['kind', 'revision', 'frontier'])];
 const definitions: Tool[] = [
   { name: 'map_create', description: workflowContract.toolDescriptions.map_create,
-    inputSchema: root(object({ mapId: id, title: text, destination: text, notes: string, extensions, includeSnapshot: { type: 'boolean', default: false } }, ['mapId', 'title', 'destination'])),
+    inputSchema: root(object({ version, mapId: id, title: text, destination: text, notes: string, extensions, includeSnapshot: { type: 'boolean', default: false } }, ['version', 'mapId', 'title', 'destination'])),
     outputSchema: root({ oneOf: [...writeOutput({ viewerUrl }), ...errors] }) },
   { name: 'map_list', description: workflowContract.toolDescriptions.map_list,
     inputSchema: root(object({ limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 }, afterMapId: id }, [])),
@@ -97,7 +100,7 @@ const definitions: Tool[] = [
     inputSchema: root(object({ mapId: id, revision }, ['mapId'])),
     outputSchema: root({ oneOf: [object({ kind: literal('found'), revision: fullRevision, frontier: array(id), viewerUrl }, ['kind', 'revision', 'frontier']), ...errors] }) },
   { name: 'map_apply', description: workflowContract.toolDescriptions.map_apply,
-    inputSchema: root(object({ mapId: id, expectedRevision: revision, commands: array({ oneOf: commands }, { minItems: 1, maxItems: 100 }), includeSnapshot: { type: 'boolean', default: false } }, ['mapId', 'expectedRevision', 'commands'])),
+    inputSchema: root(object({ version, mapId: id, expectedRevision: revision, commands: array({ oneOf: commands }, { minItems: 1, maxItems: 100 }), includeSnapshot: { type: 'boolean', default: false } }, ['version', 'mapId', 'expectedRevision', 'commands'])),
     outputSchema: root({ oneOf: [...writeOutput({}), ...errors] }) },
 ];
 export const mapTools: readonly Tool[] = immutableClone(definitions);
