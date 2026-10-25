@@ -1,0 +1,45 @@
+# Behaviour Scenarios
+
+The Scenario library and evidence contract of the [behaviour testing requirements](../../docs/spec/behaviour-testing.md) (B01, Issue #64). Scenarios describe how an agent in a real client must behave on a Wayfinder Map; Drivers (B02 onwards) start clients against an isolated service and record what happened; verdicts (B03) judge the record.
+
+Nothing here starts a service or a model. Runs that spend model quota happen only inside a Batch Kun has approved. Raw conversations and run records stay in a private directory outside the repository.
+
+## Layout
+
+| Path | What it holds |
+| --- | --- |
+| `scenario.ts` | The Scenario format, structural validation and readiness |
+| `clients.ts` | Client profiles and the applicability matrix |
+| `evidence.ts` | The Attempt record every Driver produces (R3), write-result classes (R4) and redaction |
+| `checks.ts`, `common.ts` | Script checks over an Attempt record, and the common checks attached to many Scenarios |
+| `library.ts`, `scenarios/` | The 26 candidates of spec §3 |
+| `upgrade-checks.ts` | Upgrade compatibility checks, listed apart from the 26 |
+| `seeds/` | Seed Maps; `f11.json` is the redacted capture of a real Map |
+| `fixtures/` | Working-directory fixtures copied into the agent's directory |
+
+```sh
+node tests/behaviour/cli.ts list       # candidates, readiness, item counts
+node tests/behaviour/cli.ts matrix     # applicability per client and Entry
+node tests/behaviour/cli.ts upgrade    # upgrade compatibility checks
+node tests/behaviour/cli.ts validate   # structural validation
+```
+
+Use Node 26.3.0. `library.test.ts` runs in `npm test`; it validates the library and pins check semantics on small fixed evidence.
+
+## A Scenario
+
+- **Identity and source:** a stable ID, a `version` raised whenever a verdict item changes, and a source: real problem or design hazard, what happened, portable references (Map ID and Revision, date, Issue). Diagnostic probes are not Scenarios.
+- **Applicability:** the Entries (`mcp-only`, `dedicated`, `chatgpt`, `matt`) and client capabilities it needs. A cell stays "not onboarded" until that client's Driver passes the five onboarding checks of R2.
+- **Seed:** Maps rebuilt to their current visible state, or (`restores: 'history'`) replayed Revision by Revision with their original authors when the Scenario depends on history; plus fixtures. A seed taken from a real Map lists every conversion step, including Claims kept or cleared and redactions.
+- **Turns:** each `reply` names the proposal it answers and a runtime cue; the runner sends it only after that proposal appeared, and the precondition is judged again afterwards. `nudge` turns carry no answer.
+- **Controller actions:** conflicting writes, cut routes, restarts. Each action that should provoke a reaction needs a script-proven required event.
+- **Verdict items:** `requiredEvents` are proven first; any confirmed `mustNot` fails; every `expect` group needs evidence for one of its equivalent ways. Items are judged by script, or by a model or the human with a written criterion. An item whose correct behaviour is not yet decided is `paused` and goes to the human.
+
+Script checks answer `holds`, `violated` or `unknown`. Missing records (the `missing` markers of `evidence.ts`) or a write without a receipt never become `holds`; only a receipt places a write in a session and turn.
+
+## Adding a Scenario
+
+1. Write it in the matching file under `scenarios/` and add it to `library.ts`; a new real problem also gets its ID in `candidateIds`.
+2. Write must-not items as the wrong action itself and expectations as the right action, each with the evidence that proves it.
+3. Run `node tests/behaviour/cli.ts validate` and `npm test`.
+4. A real problem starts from the Revision before the incident and the human's own words (R6); record the conversion in `seed.derivedFrom` and redact private paths and credentials.

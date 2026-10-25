@@ -1,0 +1,471 @@
+{
+ "mapId": "DistributedAgents.Feishu.20261023",
+ "title": "分布式 Agent 的飞书侧：能力与搭建地图",
+ "destination": "为既有分布式 Agent 系统梳理飞书侧的完整接入方案：明确所用飞书能力、机器人与用户交互方式、权限与人工确认、信息归属及分阶段搭建与验收路线。Agent 系统自身另行设计。",
+ "notes": "2026-10-23 用户约束：只设计飞书侧，Agent 系统另行设计并视为具备任务接收、执行与结果回传。\n\n推荐的能力组合：一个企业自建应用机器人 + 消息事件 + 交互卡片为首期；文档/知识库放交付，飞书任务放人需跟进的事项，多维表格在需要汇总看板时接入，正式审批/日历/会议按业务追加。任务智能体接口存在，租户适用性单列研究。\n\n搭建顺序：① 应用身份、测试用户与权限范围；② 请求—回执—人工决定—结果回传；③ 文档、任务、按需看板；④ 故障回放并扩大能力。各步骤具体问题与依赖见 Tickets。\n\n证据页：<private-evidence>/20261023_A_feishu.html\n该页为研究说明与交互示意，不维护当前地图状态。建议未代替人作决定；未创建飞书应用、开权限、部署或发消息。\n\n已确认决策（D01）：Kun 在本会话选择一个统一助手；任务统一提交，卡片标明处理 Agent/角色；个人事项私聊，协作事项在项目群 @，同一任务沿原线程跟进。首条业务流程及规模仍保留在 F01；身份与布局选择不构成部署、开权或发消息授权。\n\n已确认决策（D02）：共享资源的敏感操作由对应项目负责人分别批准。用户此前表达从个人走向团队（1 → 2）的方向；助手建议团队能力从首版设计、试用人数渐进，此为设计建议。未完成的资料范围与自动执行策略已拆到 D03；P01 的验收需等待 D03 结案。",
+ "tickets": [
+  {
+   "id": "R01",
+   "title": "核实飞书能力并形成接入方案",
+   "question": "在既有 Agent 系统提供任务接收、状态回传、结果查询和人工决策接口的前提下，飞书各能力分别承担什么职责，必需项和按需项如何划分，如何分阶段搭建？产出能力矩阵、交互流程、权限边界、接入顺序及官方依据。",
+   "type": "research",
+   "settlement": {
+    "outcome": {
+     "kind": "finding",
+     "statement": "飞书侧应围绕统一入口、人工决定与交付组织：首期接企业自建应用机器人、消息订阅与交互卡片；长期内容交给文档/知识库，人需跟进的事项交给飞书任务，跨项目看板按需用多维表格。应用身份与用户身份、接口权限与资源权限、业务授权分开检查。先在测试空间走通一条请求—确认—交付链路，再追加协作对象及原生审批/日历/会议。飞书接入只需与既有 Agent 系统约定发起、补充/取消、决定提交、状态/交付回传四类接口。",
+     "limitations": "仅完成方案与文档/schema 核验。租户权限、任务智能体资格、额度、真实事件回调与资源可见性均未实测；部分官方页面只有标题可读，具体任务智能体和卡片结构以本机 CLI schema 补证。机器人身份布局与动作授权仍需用户决定。"
+    },
+    "evidence": [
+     {
+      "statement": "能力分工建议：一个企业自建应用机器人作入口；消息与卡片承载发起、补充、决定和回执；Docx/云盘/知识库承载长期交付；飞书任务承载人需跟进的事项；多维表格按跨项目汇总需要接入；原生审批、日历和会议按业务追加。应用数量按身份与权限边界决定，不按后台 Agent 数量决定。",
+      "references": [
+       {
+        "locator": "<private-evidence>/20261023_A_feishu.html",
+        "label": "飞书侧能力、搭建路线与设计评审（2026-10-23）"
+       },
+       {
+        "locator": "https://open.feishu.cn/document/client-docs/intro?from=op_develop_app",
+        "label": "官方：开放平台能力"
+       }
+      ],
+      "provenance": {
+       "method": "2026-10-23 阅读飞书官方文档并读取本机 lark-cli 1.0.83 帮助与 schema；按 agent-workflow-principles 的设计评审检查飞书接入。建议由需求和接口约束推导；没有访问租户配置或发送飞书消息。",
+       "sources": [
+        {
+         "locator": "https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-subscription-configure-",
+         "label": "官方：长连接接收事件"
+        },
+        {
+         "locator": "https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/authentication-management/access-token/tenant_access_token",
+         "label": "官方：应用访问凭证"
+        },
+        {
+         "locator": "https://open.feishu.cn/document/client-docs/h5/development-guide/step-3",
+         "label": "官方：用户身份授权"
+        },
+        {
+         "locator": "https://open.feishu.cn/document/docs/bitable-v1/faq?lang=zh-CN",
+         "label": "官方：多维表格资源权限"
+        },
+        {
+         "locator": "https://open.feishu.cn/document/client-docs/intro?from=op_develop_app",
+         "label": "官方：开放平台能力"
+        },
+        {
+         "locator": "<private-evidence>/evidence/task-agent-register.json",
+         "label": "本机 CLI：任务智能体注册 schema"
+        },
+        {
+         "locator": "<private-evidence>/evidence/card-callback.json",
+         "label": "本机 CLI：卡片回调 schema"
+        },
+        {
+         "locator": "<private-evidence>/evidence/receive-message.json",
+         "label": "本机 CLI：接收消息 schema"
+        }
+       ]
+      },
+      "extensions": {}
+     },
+     {
+      "statement": "官方长连接仅支持企业自建应用，接收处理有 3 秒限制；同一应用多个客户端分摊事件而非广播。建议飞书接入统一接收后调用既有 Agent 接口，不让每个 Agent 依赖收到相同飞书事件。",
+      "references": [
+       {
+        "locator": "https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-subscription-configure-",
+        "label": "官方：长连接接收事件"
+       }
+      ],
+      "extensions": {}
+     },
+     {
+      "statement": "身份分为应用身份和用户身份；调用 API 的权限与资源可见性需分别验证。多维表格高级权限不足可导致查询成功但数据为空。卡片点击只形成具体业务决定，不扩大平台权限；需绑定操作者、动作对象与版本。",
+      "references": [
+       {
+        "locator": "https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/authentication-management/access-token/tenant_access_token",
+        "label": "官方：应用访问凭证"
+       },
+       {
+        "locator": "https://open.feishu.cn/document/client-docs/h5/development-guide/step-3",
+        "label": "官方：用户身份授权"
+       },
+       {
+        "locator": "https://open.feishu.cn/document/docs/bitable-v1/faq?lang=zh-CN",
+        "label": "官方：多维表格资源权限"
+       },
+       {
+        "locator": "<private-evidence>/evidence/card-callback.json",
+        "label": "本机 CLI：卡片回调 schema"
+       }
+      ],
+      "provenance": {
+       "method": "2026-10-23 阅读飞书官方文档并读取本机 lark-cli 1.0.83 帮助与 schema；按 agent-workflow-principles 的设计评审检查飞书接入。建议由需求和接口约束推导；没有访问租户配置或发送飞书消息。",
+       "sources": [
+        {
+         "locator": "https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-subscription-configure-",
+         "label": "官方：长连接接收事件"
+        },
+        {
+         "locator": "https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/authentication-management/access-token/tenant_access_token",
+         "label": "官方：应用访问凭证"
+        },
+        {
+         "locator": "https://open.feishu.cn/document/client-docs/h5/development-guide/step-3",
+         "label": "官方：用户身份授权"
+        },
+        {
+         "locator": "https://open.feishu.cn/document/docs/bitable-v1/faq?lang=zh-CN",
+         "label": "官方：多维表格资源权限"
+        },
+        {
+         "locator": "https://open.feishu.cn/document/client-docs/intro?from=op_develop_app",
+         "label": "官方：开放平台能力"
+        },
+        {
+         "locator": "<private-evidence>/evidence/task-agent-register.json",
+         "label": "本机 CLI：任务智能体注册 schema"
+        },
+        {
+         "locator": "<private-evidence>/evidence/card-callback.json",
+         "label": "本机 CLI：卡片回调 schema"
+        },
+        {
+         "locator": "<private-evidence>/evidence/receive-message.json",
+         "label": "本机 CLI：接收消息 schema"
+        }
+       ]
+      },
+      "extensions": {}
+     },
+     {
+      "statement": "本机 CLI schema 确认任务智能体注册、主页更新、执行记录接口存在，支持应用身份；这只能证明接口目录存在，不能证明租户已开放、注册成功或用户可按预期分派任务。单列后续研究，不作为最小闭环的前提。",
+      "references": [
+       {
+        "locator": "<private-evidence>/evidence/task-agent-register.json",
+        "label": "本机 CLI：任务智能体注册 schema"
+       },
+       {
+        "locator": "<private-evidence>/evidence/task-agent-profile.json",
+        "label": "主页更新 schema"
+       },
+       {
+        "locator": "<private-evidence>/evidence/task-agent-steps.json",
+        "label": "任务记录 schema"
+       }
+      ],
+      "extensions": {}
+     },
+     {
+      "statement": "接入可靠性建议：消息按 message_id 结合应用/租户去重；卡片决定按决策标识与版本处理；回传沿原会话；等待、重试、令牌刷新与通知由代码执行。开发前验证权限和链接可见性，外部动作结果不明时先查证，不盲目重放。",
+      "references": [
+       {
+        "locator": "<private-evidence>/evidence/receive-message.json",
+        "label": "本机 CLI：接收消息 schema"
+       },
+       {
+        "locator": "<private-evidence>/20261023_A_feishu.html",
+        "label": "飞书侧能力、搭建路线与设计评审（2026-10-23）"
+       }
+      ],
+      "provenance": {
+       "method": "2026-10-23 阅读飞书官方文档并读取本机 lark-cli 1.0.83 帮助与 schema；按 agent-workflow-principles 的设计评审检查飞书接入。建议由需求和接口约束推导；没有访问租户配置或发送飞书消息。",
+       "sources": [
+        {
+         "locator": "https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-subscription-configure-",
+         "label": "官方：长连接接收事件"
+        },
+        {
+         "locator": "https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/authentication-management/access-token/tenant_access_token",
+         "label": "官方：应用访问凭证"
+        },
+        {
+         "locator": "https://open.feishu.cn/document/client-docs/h5/development-guide/step-3",
+         "label": "官方：用户身份授权"
+        },
+        {
+         "locator": "https://open.feishu.cn/document/docs/bitable-v1/faq?lang=zh-CN",
+         "label": "官方：多维表格资源权限"
+        },
+        {
+         "locator": "https://open.feishu.cn/document/client-docs/intro?from=op_develop_app",
+         "label": "官方：开放平台能力"
+        },
+        {
+         "locator": "<private-evidence>/evidence/task-agent-register.json",
+         "label": "本机 CLI：任务智能体注册 schema"
+        },
+        {
+         "locator": "<private-evidence>/evidence/card-callback.json",
+         "label": "本机 CLI：卡片回调 schema"
+        },
+        {
+         "locator": "<private-evidence>/evidence/receive-message.json",
+         "label": "本机 CLI：接收消息 schema"
+        }
+       ]
+      },
+      "extensions": {}
+     },
+     {
+      "statement": "配套说明页已完成亮/暗桌面与手机布局检查，无横向溢出和图形版面问题；阶段切换、决策演示、证据浮窗通过本地交互核验。未进行飞书真实端到端验收。",
+      "references": [],
+      "provenance": {
+       "method": "本地运行 align-requirements/scripts/shot.mjs，并用 Playwright 检查演示按钮与证据浮窗，检查无 pageerror；截图位于当前工作区 screenshots/。",
+       "sources": [
+        {
+         "locator": "<private-evidence>/20261023_A_feishu.html",
+         "label": "飞书侧能力、搭建路线与设计评审（2026-10-23）"
+        }
+       ]
+      },
+      "extensions": {}
+     }
+    ],
+    "references": [
+     {
+      "locator": "<private-evidence>/20261023_A_feishu.html",
+      "label": "飞书侧能力、搭建路线与设计评审（2026-10-23）"
+     },
+     {
+      "locator": "https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-subscription-configure-",
+      "label": "官方：长连接接收事件"
+     },
+     {
+      "locator": "https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/authentication-management/access-token/tenant_access_token",
+      "label": "官方：应用访问凭证"
+     },
+     {
+      "locator": "https://open.feishu.cn/document/client-docs/h5/development-guide/step-3",
+      "label": "官方：用户身份授权"
+     },
+     {
+      "locator": "https://open.feishu.cn/document/docs/bitable-v1/faq?lang=zh-CN",
+      "label": "官方：多维表格资源权限"
+     },
+     {
+      "locator": "https://open.feishu.cn/document/client-docs/intro?from=op_develop_app",
+      "label": "官方：开放平台能力"
+     },
+     {
+      "locator": "<private-evidence>/evidence/task-agent-register.json",
+      "label": "本机 CLI：任务智能体注册 schema"
+     },
+     {
+      "locator": "<private-evidence>/evidence/card-callback.json",
+      "label": "本机 CLI：卡片回调 schema"
+     },
+     {
+      "locator": "<private-evidence>/evidence/receive-message.json",
+      "label": "本机 CLI：接收消息 schema"
+     }
+    ],
+    "provenance": {
+     "method": "2026-10-23 阅读飞书官方文档并读取本机 lark-cli 1.0.83 帮助与 schema；按 agent-workflow-principles 的设计评审检查飞书接入。建议由需求和接口约束推导；没有访问租户配置或发送飞书消息。",
+     "sources": [
+      {
+       "locator": "https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-subscription-configure-",
+       "label": "官方：长连接接收事件"
+      },
+      {
+       "locator": "https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/authentication-management/access-token/tenant_access_token",
+       "label": "官方：应用访问凭证"
+      },
+      {
+       "locator": "https://open.feishu.cn/document/client-docs/h5/development-guide/step-3",
+       "label": "官方：用户身份授权"
+      },
+      {
+       "locator": "https://open.feishu.cn/document/docs/bitable-v1/faq?lang=zh-CN",
+       "label": "官方：多维表格资源权限"
+      },
+      {
+       "locator": "https://open.feishu.cn/document/client-docs/intro?from=op_develop_app",
+       "label": "官方：开放平台能力"
+      },
+      {
+       "locator": "<private-evidence>/evidence/task-agent-register.json",
+       "label": "本机 CLI：任务智能体注册 schema"
+      },
+      {
+       "locator": "<private-evidence>/evidence/card-callback.json",
+       "label": "本机 CLI：卡片回调 schema"
+      },
+      {
+       "locator": "<private-evidence>/evidence/receive-message.json",
+       "label": "本机 CLI：接收消息 schema"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "D01",
+   "title": "确定机器人身份与飞书信息布局",
+   "question": "飞书侧采用一个统一助手入口还是多个独立 Agent 机器人？同时确定个人事项、协作事项与同一任务后续回复的会话布局。首条业务流程和使用规模另外保留在 F01，不随此节点结案。",
+   "type": "grilling",
+   "prerequisites": [
+    "R01"
+   ],
+   "settlement": {
+    "outcome": {
+     "kind": "decision",
+     "statement": "采用一个统一助手作为飞书入口。任务统一提交给它，卡片显示具体处理的 Agent/角色；个人事项私聊，协作事项在项目群 @该助手，同一任务沿原线程跟进。本阶段不为每个后台 Agent 建立独立机器人身份。",
+     "rationale": "Kun 在两个明确选项中回复“1”，接受上述统一入口及其配套会话布局。该决定仅涉及飞书交互身份与信息布局；使用者范围、动作授权、首条业务流程与租户实际配置尚未决定。"
+    },
+    "evidence": [
+     {
+      "statement": "用户在本会话对统一助手与多个独立机器人二选一问题，明确回复“1”。选项 1 已同时列出卡片角色、私聊、项目群 @ 与原线程跟进。",
+      "references": [],
+      "provenance": {
+       "method": "本会话人工决策：助手向 Kun 展示两个方案，选项 1 为统一助手（任务统一提交、卡片标注处理角色、个人事项私聊、协作事项在项目群 @、同一任务沿原线程跟进）；Kun 随后明确回复“1”。仅据此记录入口与布局，不推断后续权限或业务选择。",
+       "sources": []
+      },
+      "extensions": {}
+     }
+    ],
+    "references": [],
+    "provenance": {
+     "method": "本会话人工决策：助手向 Kun 展示两个方案，选项 1 为统一助手（任务统一提交、卡片标注处理角色、个人事项私聊、协作事项在项目群 @、同一任务沿原线程跟进）；Kun 随后明确回复“1”。仅据此记录入口与布局，不推断后续权限或业务选择。",
+     "sources": []
+    }
+   }
+  },
+  {
+   "id": "D02",
+   "title": "确定共享资源敏感动作的审批负责人",
+   "question": "团队使用统一助手时，共享资源的敏感操作是统一由 Kun 批准，还是各项目负责人分别批准？只在此节点决定审批责任主体。资源访问范围、自动执行边界与实际权限在 D03 / R02 继续，不因本节点结案而视为已授权。",
+   "type": "grilling",
+   "prerequisites": [
+    "R01"
+   ],
+   "settlement": {
+    "outcome": {
+     "kind": "decision",
+     "statement": "团队使用时，共享资源的敏感操作由对应项目负责人分别批准，不统一汇总到 Kun。该决定规定审批责任主体；各负责人的项目资源范围和具体动作权限仍需在后续设计与租户核验中明确。",
+     "rationale": "Kun 对“统一由你批准 / 各项目负责人分别批准”的二选一问题明确选择后者。未把此答复扩展为对所有自动动作、资料访问或实际飞书操作的授权。"
+    },
+    "evidence": [
+     {
+      "statement": "本会话中，用户对共享资源敏感动作的审批人问题回复“后者”，对应各项目负责人分别批准。",
+      "references": [],
+      "provenance": {
+       "method": "本会话真人判断：助手询问共享资源敏感操作是统一由 Kun 批准，还是由各项目负责人分别批准；Kun 明确回复“后者”。仅结案审批责任主体，尚未回答的资源边界和自动执行策略转入 D03。",
+       "sources": []
+      },
+      "extensions": {}
+     }
+    ],
+    "references": [],
+    "provenance": {
+     "method": "本会话真人判断：助手询问共享资源敏感操作是统一由 Kun 批准，还是由各项目负责人分别批准；Kun 明确回复“后者”。仅结案审批责任主体，尚未回答的资源边界和自动执行策略转入 D03。",
+     "sources": []
+    }
+   }
+  },
+  {
+   "id": "R02",
+   "title": "核验租户、应用权限和资源可见性",
+   "question": "在选定飞书企业和自建应用后，以只读检查和获准的测试空间验证：应用发布与可用范围、机器人入群、消息事件和卡片回调、应用身份/用户身份差异、文档与任务资源权限、API 配额。记录允许/拒绝矩阵；当前未查询任何租户配置。",
+   "type": "research",
+   "prerequisites": [
+    "D01"
+   ]
+  },
+  {
+   "id": "P01",
+   "title": "验收一条飞书交互流程",
+   "question": "用可点击或测试群原型走通：发起任务 → 收到带任务编号的回执 → 补充信息/批准或拒绝 → 完成卡片和交付链接。验证旧卡片、重复点击、无权限用户点击、失败提示，以及用户不在线时仍能稍后答复；由 Kun 给出真实体验验收结论。",
+   "type": "prototype",
+   "prerequisites": [
+    "D01",
+    "D02",
+    "D03"
+   ]
+  },
+  {
+   "id": "T01",
+   "title": "搭建飞书最小接入闭环",
+   "question": "配置企业自建应用和机器人，接入接收消息事件与发送/更新消息卡片，对接既有 Agent 接口，限定测试用户/群；将请求与飞书 chat_id/message_id/thread 标识绑定。验收：一次发起有一份回执，结果回到原位置，失败有可理解的提示。这里只规划，后续实施另行开展。",
+   "type": "task",
+   "prerequisites": [
+    "R02",
+    "P01"
+   ]
+  },
+  {
+   "id": "T02",
+   "title": "接入任务、文档和按需看板",
+   "question": "用飞书任务承载人需要跟进的事项，用 Docx/知识库承载交付物和长期知识；若需要跨项目筛选，再用多维表格做派生看板。验收：每个展示对象可追溯到既有 Agent 任务编号，明确每类字段的唯一维护方，人工修改有明确同步规则。",
+   "type": "task",
+   "prerequisites": [
+    "T01"
+   ]
+  },
+  {
+   "id": "T03",
+   "title": "验证飞书接入的可靠性并扩大范围",
+   "question": "在测试空间验证事件重投、卡片过期、令牌过期、撤销权限、限流、发送成功但回执丢失、应用重启等情况；消息不循环触发，授权不串任务，外部动作不盲目重放。通过后按业务需要扩展原生审批、日历、会议等能力，不提前全部开权。",
+   "type": "task",
+   "prerequisites": [
+    "T01",
+    "T02"
+   ]
+  },
+  {
+   "id": "R03",
+   "title": "验证飞书任务智能体的接入价值",
+   "question": "本机 CLI 已有注册智能体、更新主页和追加任务记录接口。需在选定租户核实：是否开放、应用注册资格、用户如何分派任务、有什么事件可触发、任务成员与结果展示如何工作。把体验与普通机器人+任务清单比较，决定是否纳入后续方案；不阻塞基础消息闭环。",
+   "type": "research",
+   "prerequisites": [
+    "D01"
+   ]
+  },
+  {
+   "id": "D03",
+   "title": "确定资料访问范围与自动执行边界",
+   "question": "在统一助手、团队使用方向及各项目负责人负责共享资源敏感动作审批的前提下，确定资料访问与动作边界。首先选择：支持项目共享资料与成员本人授权的个人资料，还是只处理登记的项目资料？推荐支持两者，个人资料默认仅在本人会话交付，向项目群分享须具备明确授权与相应资源权限。随后确定项目共享范围如何登记、范围内哪些读写/草稿/进度操作可自动执行，以及哪些扩散、删除、共享变更或正式审批动作需要逐次授权。该节点承接原 D02 中尚未决定的资源范围与自动执行策略；具体租户和资源标识由 R02 核验，不向用户索取可查到的事实。",
+   "type": "grilling",
+   "prerequisites": [
+    "D02"
+   ]
+  }
+ ],
+ "fog": [
+  {
+   "id": "F01",
+   "text": "首条飞书业务流程、使用人数与并发量尚未确定；这决定是否需要任务清单、多维表格、日历和会议扩展。",
+   "references": []
+  },
+  {
+   "id": "F02",
+   "text": "当前企业、可复用应用、现有机器人与应用管理员权限尚未核验；本轮仅查文档，不创建应用、不发消息。",
+   "references": []
+  },
+  {
+   "id": "F03",
+   "text": "用户身份授权的可用性、租户套餐/API 配额、资源权限和外部联系人场景需要在所选租户实测。",
+   "references": []
+  },
+  {
+   "id": "F04",
+   "text": "已有飞书桥接工具可以复用到哪一层，需根据其支持的身份、事件、回调和部署方式核实；不默认把桌面 CLI 当作生产服务。",
+   "references": []
+  },
+  {
+   "id": "F05",
+   "text": "原生审批、日历、会议/妙记与外部群是否需要接入，取决于首条业务及后续痛点；当前只列用途，不申请权限，不承诺跨企业资源可见性。",
+   "references": []
+  }
+ ],
+ "scopeExclusions": [
+  {
+   "id": "X01",
+   "text": "Agent 系统本身另行设计：调度、任务队列、运行状态存储、节点管理、模型路由和 Agent 间通信均不在本地图范围。仅约定飞书所需的输入输出接口。",
+   "references": []
+  },
+  {
+   "id": "X02",
+   "text": "本轮交付是飞书能力与搭建决策地图及说明材料；不部署服务、不变更全局配置、不修改租户权限、不向任何人发送消息。",
+   "references": []
+  }
+ ]
+}
