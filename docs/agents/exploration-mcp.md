@@ -1,7 +1,3 @@
----
-workflowVersion: 3.0.0
----
-
 # New exploration Maps through Wayfinder MCP
 
 <!-- wayfinder:safety-core:start -->
@@ -37,7 +33,7 @@ Atomically apply complete ordered commands only against the latest observed `exp
 ## Optional Prompt entry
 
 <!-- wayfinder:prompt:start -->
-Start or resume a Wayfinder exploration using only the server instructions and the four Map tools. For create mode, first page the complete catalog and create only if the intended stable Map is absent. For resume mode, locate the stable Map ID when needed and read its current Revision. Report the observed `workflowVersion` and proceed from the returned Frontier; an optional Map ID is a handle, not a title search.
+Start or resume a Wayfinder exploration using only the server instructions and the four Map tools. For create mode, first page the complete catalog and create only if the intended stable Map is absent. For resume mode, locate the stable Map ID when needed and read its current Revision. Report the observed `version` and proceed from the returned Frontier; an optional Map ID is a handle, not a title search.
 <!-- wayfinder:prompt:end -->
 
 After the accepted local MCP/SQLite workflow adoption, every **new exploration Map** uses the product MCP service as its sole state authority. This applies to Wayfinder planning started after adoption. GitHub remains authoritative for implementation Issues and PRs. The existing Revision rollback and Ticket/Map deletion planning Maps remain on GitHub until a separately accepted migration; never copy or dual-write them.

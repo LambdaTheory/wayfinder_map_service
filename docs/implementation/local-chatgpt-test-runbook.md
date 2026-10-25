@@ -22,7 +22,7 @@ The existing backup can be checked by reopening it with `openSQLite` and listing
 
 ## Isolated self-contained-workflow acceptance
 
-The current workflow acceptance is separate from ordinary testing above. Initialize a fresh private database at a new absolute path, then start this foreground runner against that database. The terminal must report the expected `workflowVersion` (currently `2.2.0`); retain that fixed readiness line without recording the database path or token.
+The current workflow acceptance is separate from ordinary testing above. Initialize a fresh private database at a new absolute path, then start this foreground runner against that database. The terminal must report the expected version, the one in `package.json`; retain that fixed readiness line without recording the database path or token.
 
 In ChatGPT Web developer mode, create or refresh the MCP connection and rescan tools after the runner is ready. Do not install or inject the Wayfinder Skill, `AGENTS.md`, `docs/agents/exploration-mcp.md`, or copied workflow/safety text. Preserve the native initialize response when the client exposes it, the exact tool calls/results, client version and failed attempts. Report Resources and Prompts separately as `available`, `unavailable` or `undocumented`; their absence does not fail the core instructions/tool-metadata gate.
 

@@ -72,6 +72,10 @@ _Avoid_: Transcript, activity log, audit log, revision metadata
 An immutable record of one accepted map change, including its authoring client, prior revision, and semantic summary.
 _Avoid_: Save, version, snapshot
 
+**Release Version**:
+The single SemVer that names one build of the Map service together with the exploration workflow it carries. It describes the software, never a Map.
+_Avoid_: workflowVersion, server version, Revision
+
 **Grilling Session**:
 A bounded interview that works through a decision tree in frontier order and periodically checks for convergence.
 _Avoid_: Brainstorm, questionnaire

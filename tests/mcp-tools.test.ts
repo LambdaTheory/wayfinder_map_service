@@ -15,6 +15,8 @@ import { calculateFrontier, parseId, prepareApply } from '../src/index.js';
 import type { Command, NonEmpty, Revision, TicketType } from '../src/index.js';
 import { rejectionSeed, rejectionCases } from './helpers/mcp-rejection-cases.js';
 
+const version: string = JSON.parse(readFileSync('package.json', 'utf8')).version;
+
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 function id(value: string) {
@@ -131,27 +133,27 @@ test('W01/W02: initialization, generated tool guidance, Resources and side-effec
 
   const listed = await f.client.listResources();
   expect(listed.resources.map(resource => resource.uri)).toEqual([
-    'wayfinder://workflow/exploration', 'wayfinder://workflow/exploration/3.0.0',
+    'wayfinder://workflow/exploration', `wayfinder://workflow/exploration/${version}`,
   ]);
   for (const resource of listed.resources) {
-    expect(resource).toMatchObject({ mimeType: 'text/markdown', _meta: { 'wayfinder/workflowVersion': '3.0.0' } });
+    expect(resource).toMatchObject({ mimeType: 'text/markdown', _meta: { 'wayfinder/version': version } });
     expect(await f.client.readResource({ uri: resource.uri })).toEqual({ contents: [{ uri: resource.uri,
       mimeType: 'text/markdown', text: readFileSync('docs/agents/exploration-mcp.md', 'utf8'),
-      _meta: { 'wayfinder/workflowVersion': '3.0.0' } }] });
+      _meta: { 'wayfinder/version': version } }] });
   }
 
   expect(await f.client.listPrompts()).toEqual({ prompts: [{ name: 'start_wayfinder_exploration',
-    description: 'Start or resume Wayfinder workflow 3.0.0', arguments: [
+    description: `Start or resume Wayfinder workflow ${version}`, arguments: [
       { name: 'mode', description: 'create or resume', required: true },
       { name: 'mapId', description: 'Optional stable Map ID', required: false },
-    ], _meta: { 'wayfinder/workflowVersion': '3.0.0' } }] });
+    ], _meta: { 'wayfinder/version': version } }] });
   const before = await f.storage.listMaps({});
   for (const arguments_ of [{ mode: 'create' }, { mode: 'resume', mapId: 'Stable.Map' }]) {
     const result = await f.client.getPrompt({ name: 'start_wayfinder_exploration', arguments: arguments_ });
     expect(result.messages).toHaveLength(1);
     expect(result.messages[0]).toMatchObject({ role: 'user', content: { type: 'text' } });
     expect((result.messages[0]!.content as { text: string }).text).toContain(`Mode: ${arguments_.mode}`);
-    expect((result.messages[0]!.content as { text: string }).text).toContain('workflowVersion: 3.0.0');
+    expect((result.messages[0]!.content as { text: string }).text).toContain(`version: ${version}.`);
   }
   expect(await f.storage.listMaps({})).toEqual(before);
   await expect(f.client.getPrompt({ name: 'start_wayfinder_exploration', arguments: { mode: 'invalid' } })).rejects.toThrow();

@@ -2,7 +2,13 @@
 
 All notable project changes are recorded here. Historical implementation evidence remains in `docs/implementation/` and is not rewritten into this log.
 
-## Unreleased
+Each section is one release. Since `3.0.1` one SemVer in `package.json` covers the service and the workflow it carries, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion`, and the server reported a fixed `0.1.0`.
+
+## 3.0.1 (2026-10-25)
+
+- One version for the service and its workflow. `package.json` holds it, and the workflow source no longer carries a number. The server reports it in MCP `serverInfo.version`, which was a fixed `0.1.0`. Initialization instructions and the Prompt now say `version: 3.0.1` instead of `workflowVersion: 3.0.0`, Resource metadata uses `wayfinder/version`, and the readiness line reads `ready version=`. Every change to the service or its workflow raises the version, and a test compares shipped files with the last `v*` tag. Patch, because the workflow rules and the tools are unchanged; only names and metadata moved.
+
+## Before 3.0.1
 
 ### Workflow
 
