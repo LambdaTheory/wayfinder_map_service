@@ -10,7 +10,7 @@ Use the domain language in `GLOSSARY.md`. Record a newly settled domain term the
 
 When a change touches shipped code or the workflow, raise the one SemVer in `package.json` and `package-lock.json` in the same PR and add its `CHANGELOG.md` section; after merging, tag `main` with `v<version>`. `docs/spec/mcp-sqlite.md` §14.3 says which part to raise and what counts as shipped; `tests/release.test.ts` fails a shipped change that keeps the last tag's version.
 
-Test a major release in ChatGPT with the user before merging it; minor releases wait and are tested together at the next ChatGPT run, and patch releases need none. The run is semi-manual and follows `docs/implementation/local-chatgpt-test-runbook.md`; ask the user before starting it, and record the evidence under `docs/implementation/`.
+Decide the ChatGPT run by behavior impact, not by which version part rises. A change to a mandatory rule or to how clients use the tools is tested in ChatGPT with the user before merging; any other behavior change, including a behavior fix released as a patch, waits and is tested together at the next ChatGPT run; only changes that leave behavior unchanged need none. The run is semi-manual and follows `docs/implementation/local-chatgpt-test-runbook.md`; ask the user before starting it, and record the evidence under `docs/implementation/`.
 
 ## Agent skills
 
