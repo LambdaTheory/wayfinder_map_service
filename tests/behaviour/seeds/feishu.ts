@@ -19,7 +19,7 @@ export const T = {
   retry: { id: 'agent-retry', type: 'grilling', title: 'Agent 执行重试', question: 'Agent 执行失败后如何重试与恢复？' },
 } satisfies Record<string, SeedTicket>;
 
-export const verdict = (statement: string, rationale: string) => decision(statement, rationale, '2026-10-22 与 Kun 的 grilling 会话');
+export const settledDecision = (statement: string, rationale: string) => decision(statement, rationale, '2026-10-22 与 Kun 的 grilling 会话');
 
 export function feishuMap(tickets: SeedTicket[], extra: Partial<SeedMap> = {}): SeedMap {
   return { mapId: 'feishu-access-20261022', title: '飞书接入规划', destination, notes, tickets, ...extra };

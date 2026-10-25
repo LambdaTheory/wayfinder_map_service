@@ -1,7 +1,8 @@
 // node tests/behaviour/cli.ts <list|matrix|upgrade|validate>
 // Lists the library, its applicability matrix and the upgrade checks. Starts no service and no model.
 import { library } from './library.ts';
-import { cell, readiness, validateScenario } from './scenario.ts';
+import { cell } from './clients.ts';
+import { itemsOf, readiness, validateScenario } from './scenario.ts';
 import type { Entry, Harness } from './evidence.ts';
 import { upgradeChecks } from './upgrade-checks.ts';
 
@@ -11,7 +12,7 @@ const mark = { applicable: '✓', unverified: '?', 'not-applicable': '–', 'not
 
 function list() {
   for (const s of library) {
-    const items = [...s.requiredEvents, ...s.mustNot, ...s.expect.flatMap(g => g.anyOf)];
+    const items = itemsOf(s);
     const script = items.filter(i => i.judge === 'script').length;
     const notReady = readiness(s);
     console.log([s.id.padEnd(4), `v${s.version}`, s.source.kind.padEnd(13), notReady.length ? `not ready (${notReady.join('; ')})` : 'ready',

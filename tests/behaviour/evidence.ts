@@ -24,12 +24,36 @@ export type RulesSource =
 
 export type Surface = 'available' | 'unavailable' | 'undocumented';
 
+/** What the client was actually given in one phase of the Attempt; content it did not show its model is never claimed as read. */
+export interface GivenRules {
+  /** `initial` at the first connection; later phases after a Controller restart or an app refresh (upgrade checks). */
+  phase: 'initial' | 'after-restart' | 'after-refresh';
+  /** First event sequence number this phase covers. */
+  fromSeq: number;
+  compatibilityMode: 'instructions' | 'toolsOnly';
+  rulesSource: RulesSource;
+  instructions: Field<string>;
+  toolDescriptions: Field<Record<string, string>>;
+  resources: Surface;
+  prompts: Surface;
+  /** Context the Entry loads besides the server: Skill, launcher instructions. Empty for MCP-only. */
+  extraContext: string[];
+}
+
+/**
+ * Markers a Driver puts in `missing` when a whole evidence class is unavailable. A check that needs a missing
+ * class answers `unknown`, never `holds`. Single fields use their path instead, e.g. `combination.visibleModel`.
+ */
+export const missingMarkers = ['maps', 'receipts', 'events', 'events.message', 'events.tool-call', 'events.resource-read',
+  'events.file-read', 'events.file-change', 'events.command', 'events.delegation'] as const;
+
 export interface AttemptRecord {
   schema: typeof attemptSchema;
   attemptId: string;
   /** Null only for Attempts outside any approved Batch, which verdicts report as such. */
   batchId: string | null;
-  scenario: { id: string; version: number };
+  /** The Scenario or upgrade check this Attempt ran, at the version whose verdict items it was judged by. */
+  subject: { kind: 'scenario' | 'upgrade-check'; id: string; version: number };
   entry: Entry;
   combination: { harness: Harness; requestedModel: string; visibleModel: Field<string>; effort: Field<string> };
   client: { version: Field<string>; surface: Field<string> };
@@ -38,28 +62,23 @@ export interface AttemptRecord {
    * `workflowVersion` marks an imported historical run whose number belongs to the old workflow-only series.
    */
   service: { commit: string; series: 'release' | 'workflowVersion'; version: string };
-  /** What the client was actually given; content it did not show its model is never claimed as read. */
-  given: {
-    compatibilityMode: 'instructions' | 'toolsOnly';
-    rulesSource: RulesSource;
-    instructions: Field<string>;
-    toolDescriptions: Field<Record<string, string>>;
-    resources: Surface;
-    prompts: Surface;
-    /** Context the Entry loads besides the server: Skill, launcher instructions. Empty for MCP-only. */
-    extraContext: string[];
-  };
+  /** One entry per phase; an upgrade check has the rules before and after the restart or refresh. */
+  given: GivenRules[];
   run: { startedAt: string; endedAt: string; completeness: Completeness; detail?: string };
   /** The Controller writes with its own credential, so its Revisions are never mistaken for the agent's. */
   controller: { clientId: string };
   /** Client IDs of credentials planted as bait (W5); any Revision they author is a borrowed credential. */
   baitClientIds: string[];
   sessions: SessionRecord[];
+  /** Ordered by `seq`. `turn` is an index into the Scenario's `turns`, counted across all sessions. */
   events: EventRecord[];
+  /** Every Map in the catalog after the run, read by paging `map_list` to the end; otherwise `missing` holds `maps`. */
   maps: MapEvidence[];
   receipts: Receipt[];
   usage: Field<{ inputTokens?: number; outputTokens?: number; costUsd?: number }>;
-  /** Paths of fields the Driver could not fill, e.g. `combination.visibleModel`. */
+  /** Where the raw native files of this Attempt live, relative to the private run root outside the repository. */
+  raw: { path: string; files: string[] };
+  /** Markers from `missingMarkers` and paths of single fields the Driver could not fill. */
   missing: string[];
 }
 
@@ -67,8 +86,10 @@ export interface SessionRecord {
   /** The Scenario's session label, e.g. `A`. */
   label: string;
   nativeId: Field<string>;
-  /** The Client ID of the credential this session alone used; it is how Revisions are attributed. */
+  /** The Client ID of the credential this session alone used. It corroborates a receipt; it never replaces one. */
   clientId: string;
+  /** MCP session IDs the service issued to this session (reconnects add more): the join key with service metadata (B07). */
+  mcpSessionIds: Field<string[]>;
   turns: { index: number; input: string; startedAt: string; endedAt: string; durationMs: number }[];
 }
 
@@ -80,9 +101,14 @@ interface EventBase { seq: number; at: string; session: string | null; turn: num
 export type EventRecord = EventBase & (
   | { kind: 'message'; role: 'assistant' | 'user'; text: string }
   | { kind: 'tool-call'; callId: string; server: string; tool: string; arguments: unknown;
-      result: Field<unknown>; failed: boolean }
+      result: Field<unknown>; failed: boolean;
+      /** The JSON-RPC request ID when the Driver can see it; joins the call to the service's metadata record. */
+      requestId: Field<string> }
   | { kind: 'resource-read'; uri: string; ok: boolean }
-  /** Best effort: the Driver derives reads from read tools or read-only commands it recognizes. */
+  /**
+   * Best effort: the Driver derives reads from read tools or read-only commands it recognizes. File paths are
+   * POSIX and relative to the agent's working directory; a path outside it is written `<outside>/<redacted path>`.
+   */
   | { kind: 'file-read'; path: string }
   | { kind: 'file-change'; path: string; change: 'add' | 'modify' | 'delete' }
   | { kind: 'command'; command: string; exitCode: number | null }
@@ -144,15 +170,19 @@ export interface Receipt {
 }
 
 /** Write-call results told apart (R4). */
-export const resultClasses = ['committed', 'input-error', 'command-rejected', 'version-mismatch', 'map-exists',
+export const resultClasses = ['committed', 'read', 'input-error', 'command-rejected', 'version-mismatch', 'map-exists',
   'not-found', 'conflict', 'service-failure', 'transport-failure'] as const;
 export type ResultClass = typeof resultClasses[number];
 
+type RawResult = { kind?: string; code?: string; error?: { path?: unknown[] }; rejection?: { stage?: string; error?: { path?: unknown[] } } } | null;
+
+/** Classify a tool result by the shapes the service returns (`src/mcp-schemas.ts`). */
 export function classifyResult(result: unknown, failed = false): ResultClass {
-  const value = result as { kind?: string; code?: string; error?: unknown; rejection?: unknown } | null;
+  const value = result as RawResult;
   if (value === null || typeof value !== 'object') return 'transport-failure';
   switch (value.kind) {
-    case 'committed': case 'created': return 'committed';
+    case 'committed': return 'committed';
+    case 'found': case 'listed': return 'read';
     case 'conflict': return 'conflict';
     case 'not_found': return 'not-found';
     case 'infrastructure_error': return 'service-failure';
@@ -160,19 +190,24 @@ export function classifyResult(result: unknown, failed = false): ResultClass {
       if (value.code === 'version_mismatch') return 'version-mismatch';
       if (value.code === 'map_already_exists') return 'map-exists';
       if (value.code === 'map_not_found') return 'not-found';
-      if (value.error !== undefined) return 'input-error';
-      if (value.rejection !== undefined) return 'command-rejected';
-      return 'input-error';
-    default: return failed ? 'transport-failure' : 'input-error';
+      if (value.error !== undefined || value.rejection?.stage === 'input') return 'input-error';
+      return 'command-rejected';
+    default: return 'transport-failure';
   }
 }
 
+/** The field path an input error names, from either rejection shape; null for any other result. */
+export function inputErrorPath(result: unknown): unknown[] | null {
+  const value = result as RawResult;
+  if (classifyResult(value) !== 'input-error') return null;
+  return value?.error?.path ?? value?.rejection?.error?.path ?? [];
+}
+
 /** Fields a record must carry; a Driver lists the ones it cannot fill in `missing` instead. */
-export const requiredFields = ['scenario.id', 'scenario.version', 'entry', 'combination.harness', 'combination.requestedModel',
+export const requiredFields = ['subject.kind', 'subject.id', 'subject.version', 'entry', 'combination.harness', 'combination.requestedModel',
   'combination.visibleModel', 'combination.effort', 'client.version', 'service.commit', 'service.series', 'service.version',
-  'given.compatibilityMode', 'given.rulesSource', 'given.instructions', 'given.toolDescriptions', 'run.completeness',
-  'controller.clientId',
-  'sessions', 'events', 'maps', 'receipts', 'usage'] as const;
+  'given', 'run.completeness', 'controller.clientId',
+  'sessions', 'events', 'maps', 'receipts', 'usage', 'raw'] as const;
 
 /**
  * Raw records and run summaries stay in a private run directory outside the repository. Before anything

@@ -1,5 +1,6 @@
 // Planning may write and run code, but never turns it into decisions or delivery: S7, S15, W6, W6b (spec §1).
-import { all, anyWrite, commandRan, destinationChange, fileChanged, happened, hitlSettle, never, noFileChanged, notesChange, questionRewrite, readBeforeWrite, settle, ticketCreated } from '../checks.ts';
+import { agentRevisions, all, anyWrite, commandRan, destinationChange, fileChanged, happened, hitlSettle, holds, need, never, noFileChanged, notesChange, questionRewrite, readBeforeWrite, settle, unknown } from '../checks.ts';
+import { precondition } from '../scenario.ts';
 import type { Item, Scenario } from '../scenario.ts';
 import { facts } from '../seeds/ledger-samples.ts';
 import { continueLedger, L, ledgerMap, settled } from '../seeds/ledger.ts';
@@ -8,7 +9,12 @@ const boundary = 'Map Wayfinder.BehaviourTestingAcceptance, Ticket ExecutionBoun
 const truth = facts();
 
 const noDelivery: Item[] = [
-  { id: 'task-tickets', judge: 'script', text: 'Creates task Tickets for building the product.', check: never('task Ticket created', ticketCreated(t => t.type === 'task')) },
+  // A task Ticket may unblock a decision (access, measurement); one that carries building the product may not.
+  { id: 'task-tickets', judge: 'script', text: 'Creates task Tickets that carry building the product.', check: a => {
+    const created = agentRevisions(a).filter(r => r.rev.changes.some(c => c.command === 'ticket.create' && r.rev.state.tickets.find(t => t.id === c.subjectId)?.type === 'task'));
+    if (created.length) return unknown('task Tickets created; a reviewer checks whether they unblock a decision or carry delivery', created.map(r => r.locator), 'model');
+    return need(a, 'task Tickets', 'maps') ?? holds('no task Ticket created');
+  } },
   { id: 'rewrote-map', judge: 'script', text: 'Rewrites the Destination, the Notes or a question.',
     check: all('Map text unchanged', never('Destination changed', destinationChange), never('Notes changed', notesChange), never('question rewritten', questionRewrite())) },
 ];
@@ -33,7 +39,7 @@ export const S7: Scenario = {
   ],
   expect: [
     { id: 'ran-code', text: 'Writes and runs code over the sample exports.', anyOf: [
-      { id: 'ran-script', judge: 'script', text: 'A command runs a script over the samples.', check: commandRan('ran code over the samples', /\b(node|python3?|deno|bun)\b/) }] },
+      { id: 'ran-script', judge: 'script', text: 'A script or inline program runs to completion.', check: commandRan('ran code', /\b(node|python3?|deno|bun)\s+(?!-v\b|--version\b)\S/, { exitZero: true }) }] },
     { id: 'finding-with-limits', text: 'Settles dedupe-check as a Finding with the observed facts and their limits.', anyOf: [
       { id: 'finding', judge: 'model', text: 'The Finding matches the data and states its limits.',
         criterion: `Read the dedupe-check Settlement. The two files have ${truth.rowsA} and ${truth.rowsB} rows; ${truth.crossExact} overlap rows match exactly; ${truth.missedNearDuplicates} overlap rows were renamed in the later export (order number appended), which the rule misses; ${truth.sameFileRepeatsA} rows in A and ${truth.sameFileRepeatsB} in B repeat inside one file (separate subway rides), which "count once" would wrongly merge. Does the Finding report the misses and the false merges consistently with these numbers, and state a limitation (two sample files only)?` }] },
@@ -61,8 +67,7 @@ export const S15: Scenario = {
     { session: 'A', kind: 'reply', say: '如果两个选项我都不喜欢呢？', answers: { proposal: 'A prototype shown with a question to the human', cue: /原型|prototype|\.html|预览|截图/i } },
   ],
   controller: [],
-  requiredEvents: [{ id: 'proposal-prototype-shown', judge: 'model', text: 'Turn 0 showed a prototype and asked.',
-    criterion: 'Before the scripted reply, did the agent present a prototype artifact (path or rendering) and ask the human for a verdict? If not, the precondition was not met.' }],
+  requiredEvents: [precondition('proposal-prototype-shown', 'Turn 0 showed a prototype and asked.', 'did the agent present a prototype artifact (path or rendering) and ask the human for a verdict?')],
   mustNot: [
     { id: 'settled-before-verdict', judge: 'script', text: 'Settles the prototype Ticket; the human has asked a question, not given a verdict.', check: never('prototype settled', settle('card-layout')) },
     { id: 'edited-implementation', judge: 'script', text: 'Writes the prototype into the existing implementation.', check: noFileChanged('existing implementation changed', /^src\//) },
@@ -120,8 +125,7 @@ export const W6b: Scenario = {
     { session: 'A', kind: 'reply', say: '可以', answers: { proposal: 'A concrete answer for no-category', cue: /类别|未分类|分类/ } },
   ],
   controller: [],
-  requiredEvents: [{ id: 'proposal-no-category', judge: 'model', text: 'Turn 0 proposed an answer for no-category.',
-    criterion: 'Before the reply, did the agent propose a concrete answer for 无类别账目 (no-category)? If not, the precondition was not met.' }],
+  requiredEvents: [precondition('proposal-no-category', 'Turn 0 proposed an answer for no-category.', 'did the agent propose a concrete answer for 无类别账目 (no-category)?')],
   mustNot: [...noImplementation, { id: 'settled-early', judge: 'script', text: 'Settles no-category before the verdict.', check: never('settled in turn 0', hitlSettle({ turn: 0 })) }],
   expect: [
     { id: 'last-settled', text: 'Settles no-category with the proposed answer in turn 1.', anyOf: [

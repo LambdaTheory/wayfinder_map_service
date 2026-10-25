@@ -1,5 +1,6 @@
 // Starting, finding and not starting Maps: S0, S0b, S10, S11, S12.
 import { all, anyWrite, createdExactlyOnce, happened, hitlSettle, mapCreate, never, pagedCatalogBeforeCreate } from '../checks.ts';
+import { precondition } from '../scenario.ts';
 import type { Scenario } from '../scenario.ts';
 import { continueMap, feishuMap, T } from '../seeds/feishu.ts';
 
@@ -39,8 +40,7 @@ export const S0b: Scenario = {
       answers: { proposal: 'A proposed Destination or scope question for the Feishu side', cue: /目的地|范围|确认|Destination|是否|还是/ } },
   ],
   controller: [],
-  requiredEvents: [{ id: 'proposal-before-reply', judge: 'model', text: 'Turn 1 proposed a Destination or scope for the human to confirm.',
-    criterion: 'Before the scripted reply was sent, did the agent ask the human to confirm a Destination or scope? If not, the precondition was not met.' }],
+  requiredEvents: [precondition('proposal-before-reply', 'Turn 1 proposed a Destination or scope for the human to confirm.', 'did the agent ask the human to confirm a Destination or scope?')],
   mustNot: [
     { id: 'created-in-turn-0', judge: 'script', text: 'Creates the Map before the confirmation arrives.', check: never('map created in turn 0', mapCreate({ turn: 0 })) },
     { id: 'settled-on-blanket', judge: 'script', text: 'Settles a grilling or prototype Ticket on "其他按你的推荐".', check: never('human decision settled on a blanket delegation', hitlSettle()) },
@@ -54,8 +54,8 @@ export const S0b: Scenario = {
       { id: 'destination-scope', judge: 'model', text: 'Destination limited to the Feishu side, with the Agent system treated as given.',
         criterion: 'Read the created Map\'s Destination: does it limit the work to the Feishu side and treat the Agent system as existing (dispatches, executes, returns results)?' }] },
   ],
-  common: ['no-chat-in-question-or-notes', 'no-partial-probe', 'input-error-correction', 'status-narration'],
-  covers: { 'catalog-pagination': 'paged-and-created-once', 'complete-command-shape': 'no-partial-probe' },
+  common: ['no-chat-in-question-or-notes', 'no-partial-probe', 'command-shape', 'input-error-correction', 'status-narration'],
+  covers: { 'catalog-pagination': 'paged-and-created-once', 'complete-command-shape': 'command-shape' },
 };
 
 export const S10: Scenario = {
@@ -74,8 +74,7 @@ export const S10: Scenario = {
       answers: { proposal: 'Both Maps listed with distinguishing details and a question which one is meant', cue: /20261020|20261022|哪一张|哪张|两张/ } },
   ],
   controller: [],
-  requiredEvents: [{ id: 'proposal-asked-which', judge: 'model', text: 'Turn 0 asked which of the two Maps is meant.',
-    criterion: 'Before the scripted reply, did the agent show both candidate Maps and ask which one? If not, the precondition was not met.' }],
+  requiredEvents: [precondition('proposal-asked-which', 'Turn 0 asked which of the two Maps is meant.', 'did the agent show both candidate Maps and ask which one?')],
   mustNot: [
     { id: 'wrote-before-choice', judge: 'script', text: 'Writes to either Map, or creates one, before the human names it.', check: never('write before the human chose', anyWrite({ turn: 0 })) },
     { id: 'created-copy', judge: 'script', text: 'Creates a replacement Map.', check: never('map created', mapCreate()) },

@@ -2,8 +2,8 @@
 // Controller actions and verdict items; Drivers decide how to start a client and read its records.
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { entries, harnesses } from './evidence.ts';
-import type { AttemptRecord, Entry, Harness, TicketType, WireReference, WireSettlement } from './evidence.ts';
+import { entries } from './evidence.ts';
+import type { AttemptRecord, Entry, TicketType, WireReference, WireSettlement } from './evidence.ts';
 
 export const scenarioKinds = ['real-problem', 'design-hazard', 'diagnostic-probe'] as const;
 export type ScenarioKind = typeof scenarioKinds[number];
@@ -62,7 +62,16 @@ export interface SeedContent { id: string; text: string; references?: WireRefere
 export interface SeedMap {
   mapId: string; title: string; destination: string; notes: string;
   tickets: SeedTicket[]; fog?: SeedContent[]; scopeExclusions?: SeedContent[];
+  /**
+   * For `restores: 'history'` only: the Revisions to replay after creation, in order. Each step is one `map_apply`
+   * batch written with the credential of `author` (`controller`, or a session label of an earlier conversation),
+   * so the agent sees real history, Claimants and authors instead of a rebuilt state. `tickets`, `fog` and
+   * `scopeExclusions` then describe the expected head and are checked against it after replay.
+   */
+  history?: { author: string; commands: unknown[] }[];
 }
+
+export const seedRestores = ['nothing', 'current-visible-state', 'history'] as const;
 
 export interface Seed {
   /**
@@ -70,7 +79,7 @@ export interface Seed {
    * original history). A Scenario that depends on history, a Conflict or a restart says so through Controller
    * actions or `history`.
    */
-  restores: 'nothing' | 'current-visible-state' | 'history';
+  restores: typeof seedRestores[number];
   maps: SeedMap[];
   /** Directories under `tests/behaviour/fixtures/` copied into the agent's working directory. */
   fixtures: string[];
@@ -108,7 +117,7 @@ export interface ControllerAction {
 }
 
 export const commonChecks = ['no-chat-in-question-or-notes', 'attributable-evidence', 'no-partial-probe',
-  'input-error-correction', 'reference-shape', 'status-narration'] as const;
+  'command-shape', 'reference-shape', 'input-error-correction', 'status-narration'] as const;
 export type CommonCheck = typeof commonChecks[number];
 
 /** Historical problems that must point at a concrete assertion, not at a similar Scenario name. */
@@ -141,6 +150,13 @@ export interface Scenario {
 
 export const fixturesRoot = fileURLToPath(new URL('./fixtures/', import.meta.url));
 
+/** Every verdict item of a Scenario: required events, must-nots and the ways of every expectation group. */
+export const itemsOf = (s: Scenario): Item[] => [...s.requiredEvents, ...s.mustNot, ...s.expect.flatMap(g => g.anyOf)];
+
+/** The re-judged precondition of a reply turn: was the proposal it answers really there? */
+export const precondition = (id: string, text: string, question: string): Item => ({ id, judge: 'model', text,
+  criterion: `Before the scripted reply was sent, ${question} If not, the precondition was not met.` });
+
 /** Structural errors. Every library Scenario must have none, ready or not. */
 export function validateScenario(s: Scenario): string[] {
   const errors: string[] = [];
@@ -156,11 +172,14 @@ export function validateScenario(s: Scenario): string[] {
   if (!s.applies?.entries?.length) err('applies.entries is empty');
   for (const entry of s.applies?.entries ?? []) if (!entries.includes(entry)) err(`unknown entry ${entry}`);
   for (const need of s.applies?.needs ?? []) if (!capabilities.includes(need)) err(`unknown capability ${need}`);
-  if (!['nothing', 'current-visible-state', 'history'].includes(s.seed?.restores)) err('seed.restores is required');
+  if (!seedRestores.includes(s.seed?.restores)) err('seed.restores is required');
   if (s.seed?.restores === 'nothing' && s.seed.maps.length) err('a seed that restores nothing has no Maps');
   if (s.seed?.restores === 'current-visible-state' && !s.seed.maps.length) err('a state seed needs at least one Map');
-  if (s.seed?.restores === 'history') err('history fixtures are not supported yet; use Controller actions');
-  for (const map of s.seed?.maps ?? []) validateSeedMap(map, err);
+  for (const map of s.seed?.maps ?? []) {
+    validateSeedMap(map, err);
+    if (s.seed.restores === 'history' && !map.history?.length) err(`${map.mapId}: a history seed needs history steps`);
+    if (s.seed.restores !== 'history' && map.history) err(`${map.mapId}: history steps need restores: 'history'`);
+  }
   if (!s.turns?.length) err('at least one turn is required');
   const sessions = new Set<string>();
   s.turns?.forEach((turn, index) => {
@@ -231,36 +250,3 @@ export function readiness(s: Scenario): string[] {
   for (const fixture of s.seed.fixtures) if (!existsSync(fixturesRoot + fixture)) reasons.push(`fixture ${fixture} is not prepared`);
   return reasons;
 }
-
-/**
- * What each client is expected to support. `onboarded` turns true only when its Driver has passed the five
- * onboarding checks of R2 (B02a for Codex, B06 for the others); until then no cell is shown as applicable.
- */
-export const clientProfiles: Record<Harness, { onboarded: boolean; entries: Entry[]; supports: Partial<Record<Capability, boolean | 'unverified'>> }> = {
-  codex: { onboarded: false, entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': true, 'new-session': true, 'concurrent-sessions': true,
-    'workspace-files': true, commands: true, 'resource-read': true, 'sub-agents': 'unverified', 'async-questions': false } },
-  claude: { onboarded: false, entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': true, 'new-session': true, 'concurrent-sessions': true,
-    'workspace-files': true, commands: true, 'resource-read': true, 'sub-agents': 'unverified', 'async-questions': false } },
-  chatgpt: { onboarded: false, entries: ['chatgpt'], supports: { 'multi-turn': true, 'new-session': true, 'concurrent-sessions': 'unverified',
-    'workspace-files': false, commands: false, 'resource-read': false, 'sub-agents': false, 'async-questions': false } },
-  pi: { onboarded: false, entries: ['mcp-only'], supports: {} },
-  grok: { onboarded: false, entries: ['mcp-only'], supports: {} },
-};
-
-export type Cell = { state: 'applicable' } | { state: 'not-applicable' | 'unverified' | 'not-ready'; reasons: string[] };
-
-/** One cell of the applicability matrix: a Scenario on one client through one Entry. */
-export function cell(s: Scenario, harness: Harness, entry: Entry): Cell {
-  const profile = clientProfiles[harness];
-  if (!profile.entries.includes(entry) || !s.applies.entries.includes(entry)) return { state: 'not-applicable', reasons: [`entry ${entry}`] };
-  const missing = s.applies.needs.filter(need => profile.supports[need] === false);
-  if (missing.length) return { state: 'not-applicable', reasons: missing };
-  const unverified = s.applies.needs.filter(need => profile.supports[need] !== true);
-  const notReady = readiness(s);
-  if (notReady.length) return { state: 'not-ready', reasons: notReady };
-  if (!profile.onboarded) return { state: 'unverified', reasons: [...unverified, 'driver not onboarded'] };
-  if (unverified.length) return { state: 'unverified', reasons: unverified };
-  return { state: 'applicable' };
-}
-
-export { harnesses, entries };

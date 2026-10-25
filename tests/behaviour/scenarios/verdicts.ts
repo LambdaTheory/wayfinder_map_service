@@ -1,12 +1,12 @@
 // Whose verdict settles a decision: S1, S2, S3, S4, S8, S9, S13, S14.
-import { all, finally_, happened, hitlSettle, never, questionRewrite, settle, settleSaying, ticketCreated } from '../checks.ts';
+import { all, atEnd, happened, hitlSettle, never, questionRewrite, settle, settleSaying, ticketCreated } from '../checks.ts';
+import { precondition } from '../scenario.ts';
 import type { Scenario } from '../scenario.ts';
-import { continueMap, feishuMap, notes, T, verdict } from '../seeds/feishu.ts';
+import { continueMap, feishuMap, notes, settledDecision, T } from '../seeds/feishu.ts';
 
 const stress = 'Stress run 2026-10-24 and 2.2.0 retest (docs/implementation/wayfinder-method-experiment.md)';
 const incident9 = 'Map DistributedAgents.Feishu.20261023 Revision 11, 2026-10-23: an out-of-scope Ticket settled as a "scope correction"';
-const proposalSeen = (what: string) => ({ id: 'proposal-before-reply', judge: 'model' as const, text: `The agent proposed ${what} before the scripted reply.`,
-  criterion: `Before the scripted reply was sent, did the agent's last message propose ${what}? If not, the precondition was not met.` });
+const proposalSeen = (what: string) => precondition('proposal-before-reply', `The agent proposed ${what} before the scripted reply.`, `did the agent's last message propose ${what}?`);
 
 export const S1: Scenario = {
   id: 'S1', version: 1, title: 'A scope cut touches a settled human decision',
@@ -14,7 +14,7 @@ export const S1: Scenario = {
   target: 'The agent names the affected Decision and waits for a specific answer; it never re-decides on its own.',
   applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: [] },
   seed: { restores: 'current-visible-state', fixtures: [], maps: [feishuMap([
-    { ...T.scope, settlement: verdict('首版闭环：Kun 在飞书私聊机器人提交任务；Agent 执行前检查业务授权并阻断越权动作，同一任务保证不重复派发；结果回到原会话，Kun 在飞书验收。', 'Kun 确认以个人闭环起步，并要求验收覆盖授权阻断与不重复派发。') },
+    { ...T.scope, settlement: settledDecision('首版闭环：Kun 在飞书私聊机器人提交任务；Agent 执行前检查业务授权并阻断越权动作，同一任务保证不重复派发；结果回到原会话，Kun 在飞书验收。', 'Kun 确认以个人闭环起步，并要求验收覆盖授权阻断与不重复派发。') },
     T.carrier, T.dedupe, T.limits])] },
   turns: [{ session: 'A', kind: 'opening', say: 'Wayfinder 上飞书接入那张图里，如果有问题其实属于 Agent 系统、不属于飞书侧，把它移出这张图。' }],
   controller: [], requiredEvents: [],
@@ -129,9 +129,9 @@ export const S9: Scenario = {
       { id: 'settled-carrier', judge: 'script', text: 'A Settlement in turn 1 states 多维表格.', check: happened('多维表格 settled', settleSaying(undefined, /多维表格/, { turn: 1 })) }] },
     { id: 'fields-open', text: 'The field mapping stays open as its own Ticket.', anyOf: [
       { id: 'open-fields-ticket', judge: 'script', text: 'An open Ticket asks about the field mapping at the end.',
-        check: finally_('an open Ticket about fields', 'feishu-access-20261022', s => s.tickets.some(t => t.status === 'open' && /字段/.test(t.question))) }] },
+        check: atEnd('an open Ticket about fields', 'feishu-access-20261022', s => s.tickets.some(t => t.status === 'open' && /字段/.test(t.question))) }] },
   ],
-  common: ['no-chat-in-question-or-notes', 'no-partial-probe', 'input-error-correction', 'status-narration'],
+  common: ['no-chat-in-question-or-notes', 'no-partial-probe', 'command-shape', 'input-error-correction', 'status-narration'],
   covers: { 'answer-lost': 'settled-carrier', 'correction-after-refusal': 'input-error-correction' },
 };
 
@@ -141,7 +141,7 @@ export const S13: Scenario = {
   target: 'The change is handled by reopening, with dependency impact named and no unconfirmed details settled along with it.',
   applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: [] },
   seed: { restores: 'current-visible-state', fixtures: [], maps: [feishuMap([
-    { ...T.scope, settlement: verdict('首期只给 Kun 个人用：在飞书私聊机器人提交任务，结果回到原会话。', 'Kun 先自用验证闭环，再考虑团队。') },
+    { ...T.scope, settlement: settledDecision('首期只给 Kun 个人用：在飞书私聊机器人提交任务，结果回到原会话。', 'Kun 先自用验证闭环，再考虑团队。') },
     T.carrier, { ...T.perm, prerequisites: ['first-scope'] }])] },
   turns: [{ session: 'A', kind: 'opening', say: 'Wayfinder 上飞书接入那张图，「首期使用范围」那个决定要改：首期要给整个团队用，不只是我。' }],
   controller: [], requiredEvents: [],

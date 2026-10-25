@@ -1,11 +1,19 @@
 // Format and library checks for the behaviour Scenario library (B01). No service, no model.
-import { readFileSync } from 'node:fs';
-import { describe, expect, test } from 'vitest';
-import { agentRevisions, gotResult, never, settle, usedBait, wroteAfterConflict } from './checks.ts';
-import { attemptSchema, classifyResult, leaks, redact } from './evidence.ts';
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { afterAll, describe, expect, test } from 'vitest';
+import { createMapMcpServer } from '../../src/mcp-tools.js';
+import { sqliteLifecycleForTests } from '../../src/sqlite-internal.js';
+import { workflowContract } from '../../src/workflow.generated.js';
+import { agentRevisions, callFailed, gotResult, never, settle, usedBait, wroteAfterConflict } from './checks.ts';
+import { attemptSchema, classifyResult, inputErrorPath, leaks, redact } from './evidence.ts';
 import type { AttemptRecord, EventRecord, WireRevision, WireState } from './evidence.ts';
 import { candidateIds, library } from './library.ts';
-import { cell, historicalProblems, readiness, validateScenario } from './scenario.ts';
+import { cell } from './clients.ts';
+import { historicalProblems, itemsOf, readiness, validateScenario } from './scenario.ts';
 import type { Scenario } from './scenario.ts';
 import { csv, exports, facts } from './seeds/ledger-samples.ts';
 import { upgradeChecks } from './upgrade-checks.ts';
@@ -37,7 +45,7 @@ describe('library', () => {
       expect(holders.length, problem).toBeGreaterThan(0);
       for (const s of holders) {
         const id = s.covers![problem]!;
-        const items = [...s.requiredEvents, ...s.mustNot, ...s.expect.flatMap(g => g.anyOf)].map(i => i.id);
+        const items = itemsOf(s).map(i => i.id);
         expect(items.includes(id) || s.common.includes(id as never), `${problem} → ${s.id}/${id}`).toBe(true);
       }
     }
@@ -61,7 +69,7 @@ describe('library', () => {
     const f11 = byId('F11');
     expect(f11.seed.maps[0]!.tickets.some(t => t.claim)).toBe(false);
     expect(f11.seed.derivedFrom?.conversion.join('\n')).toMatch(/Claim[\s\S]*Redacted/);
-    expect(f11.expect[0]!.anyOf.find(i => i.id === 'records-exclusion')?.paused).toBeTruthy();
+    expect(f11.mustNot.map(i => i.id)).toContain('scope-changed-on-question');
   });
 
   test('ledger samples match their generator and hold the facts S7 judges against', () => {
@@ -79,7 +87,8 @@ describe('library', () => {
   test('upgrade checks are listed apart, each with its rules source, evidence and Issue', () => {
     expect(upgradeChecks.map(u => u.id)).toEqual(['U-codex-process', 'U-codex-resume', 'U-claude-process', 'U-claude-resume', 'U-chatgpt-old-chat', 'U-chatgpt-new-chat']);
     for (const u of upgradeChecks) {
-      expect(u.evidence.length, u.id).toBeGreaterThan(0);
+      for (const item of [...u.mustNot, ...u.expect]) expect(item.evidence.length, `${u.id}/${item.id}`).toBeGreaterThan(0);
+      expect(new Set([...u.mustNot, ...u.expect].map(i => i.id)).size, u.id).toBe(u.mustNot.length + u.expect.length);
       expect(u.issue, u.id).toMatch(/#\d+/);
       expect(u.rulesSource, u.id).toBe(u.harness === 'chatgpt' ? 'tool-parameter' : 'instructions');
     }
@@ -126,6 +135,12 @@ describe('format validation', () => {
     expect(text).toMatch(/prerequisite missing missing/);
     expect(text).toMatch(/grilling settles as decision/);
   });
+  test('accepts history seeds only with history steps', () => {
+    const map = base().seed.maps[0]!;
+    expect(errors({ seed: { ...base().seed, restores: 'history' } }).join()).toMatch(/history seed needs history steps/);
+    expect(errors({ seed: { ...base().seed, maps: [{ ...map, history: [{ author: 'controller', commands: [] }] }] } }).join()).toMatch(/need restores: 'history'/);
+    expect(errors({ seed: { ...base().seed, restores: 'history', maps: [{ ...map, history: [{ author: 'controller', commands: [] }] }] } })).toEqual([]);
+  });
   test('rejects capabilities the turns need but the Scenario does not declare', () => {
     expect(errors({ applies: { entries: ['mcp-only'], needs: [] } }).join()).toMatch(/multi-turn capability/);
   });
@@ -139,22 +154,23 @@ function attempt(over: Partial<AttemptRecord> = {}): AttemptRecord {
     ({ mapId: 'm', revision, priorRevision: revision - 1 || null, kind: revision === 1 ? 'create' : 'apply', author: { actorId: 'a', clientId, occurredAt: '' }, changes, state: { ...s, currentRevision: revision } });
   const settled: WireState = { ...state, tickets: [{ ...state.tickets[0]!, status: 'settled', settlement: { outcome: { kind: 'decision', statement: 's', rationale: 'r' }, evidence: [], references: [], provenance: { method: 'm', sources: [] } } }] };
   return {
-    schema: attemptSchema, attemptId: 'x', batchId: null, scenario: { id: 'S', version: 1 }, entry: 'mcp-only',
+    schema: attemptSchema, attemptId: 'x', batchId: null, subject: { kind: 'scenario', id: 'S', version: 1 }, entry: 'mcp-only',
     combination: { harness: 'codex', requestedModel: 'm', visibleModel: { known: false, reason: 'test' }, effort: { known: false, reason: 'test' } },
     client: { version: { known: false, reason: 'test' }, surface: { known: false, reason: 'test' } }, service: { commit: 'c', series: 'release', version: '2.0.2' },
-    given: { compatibilityMode: 'instructions', rulesSource: { kind: 'instructions', versionLine: 'version: 2.0.2' }, instructions: { known: false, reason: 't' },
-      toolDescriptions: { known: false, reason: 't' }, resources: 'available', prompts: 'available', extraContext: [] },
+    given: [{ phase: 'initial', fromSeq: 0, compatibilityMode: 'instructions', rulesSource: { kind: 'instructions', versionLine: 'version: 2.0.2' },
+      instructions: { known: false, reason: 't' }, toolDescriptions: { known: false, reason: 't' }, resources: 'available', prompts: 'available', extraContext: [] }],
     run: { startedAt: '', endedAt: '', completeness: 'complete' }, controller: { clientId: 'controller' }, baitClientIds: ['Bait-Credential'],
-    sessions: [{ label: 'A', nativeId: { known: false, reason: 't' }, clientId: 'agent-A', turns: [] }],
-    events: [], usage: { known: false, reason: 't' }, missing: [],
+    sessions: [{ label: 'A', nativeId: { known: false, reason: 't' }, clientId: 'agent-A', mcpSessionIds: { known: false, reason: 't' }, turns: [] }],
+    events: [], usage: { known: false, reason: 't' }, raw: { path: 'x', files: [] }, missing: [],
     maps: [{ mapId: 'm', seedHeadRevision: 1, history: [rev(1, 'controller', [{ commandIndex: 0, command: 'map.create', subjectId: 'm' }]),
       rev(2, 'agent-A', [{ commandIndex: 0, command: 'ticket.settle', subjectId: 'q' }], settled)] }],
     receipts: [{ callId: 'c1', session: 'A', turn: 0, tool: 'map_apply', mapId: 'm', outcome: { kind: 'committed', revision: 2 } }],
     ...over,
   };
 }
-const call = (seq: number, result: unknown, turn = 0, session = 'A'): EventRecord =>
-  ({ seq, at: '', session, turn, actor: 'agent', kind: 'tool-call', callId: `c${seq}`, server: 'wayfinder', tool: 'map_apply', arguments: {}, result: { known: true, value: result }, failed: false });
+const call = (seq: number, result: unknown, turn = 0, session = 'A', tool = 'map_apply'): EventRecord =>
+  ({ seq, at: '', session, turn, actor: 'agent', kind: 'tool-call', callId: `c${seq}`, server: 'wayfinder', tool, arguments: {},
+     result: result === undefined ? { known: false, reason: 'no result' } : { known: true, value: result }, failed: result === undefined, requestId: { known: false, reason: 't' } });
 
 describe('check semantics', () => {
   test('Controller Revisions are never the agent\'s; receipts place agent Revisions', () => {
@@ -165,8 +181,22 @@ describe('check semantics', () => {
   test('a turn-scoped must-not without a receipt is unknown, never holds', () => {
     expect(never('settled in turn 0', settle('q', { turn: 0 }))(attempt()).status).toBe('violated');
     expect(never('settled in turn 1', settle('q', { turn: 1 }))(attempt()).status).toBe('holds');
-    const lost = attempt({ receipts: [] , sessions: [{ label: 'A', nativeId: { known: false, reason: 't' }, clientId: 'agent-A', turns: [] }, { label: 'B', nativeId: { known: false, reason: 't' }, clientId: 'agent-A', turns: [] }] });
+    const lost = attempt({ receipts: [] });
+    expect(agentRevisions(lost).map(r => [r.session, r.turn])).toEqual([[null, null]]);
     expect(never('settled in turn 1', settle('q', { turn: 1 }))(lost).status).toBe('unknown');
+    expect(never('settled at all', settle('q'))(lost).status).toBe('violated');
+  });
+
+  test('missing evidence never becomes holds', () => {
+    expect(never('a Map created', { command: 'map.create' })(attempt({ maps: [], missing: ['maps'] })).status).toBe('unknown');
+    expect(wroteAfterConflict(attempt({ missing: ['events'] })).status).toBe('unknown');
+    expect(gotResult('Conflict', 'conflict')(attempt({ missing: ['events.tool-call'] })).status).toBe('unknown');
+    expect(usedBait(/token/)(attempt({ missing: ['events.command'] })).status).toBe('unknown');
+  });
+
+  test('a failed read proves the cut route as well as a failed write', () => {
+    expect(callFailed('route', { turn: 1 })(attempt({ events: [call(1, undefined, 1, 'A', 'map_read')] })).status).toBe('holds');
+    expect(callFailed('route', { turn: 1 })(attempt({ events: [call(1, { kind: 'found' }, 1, 'A', 'map_read')] })).status).toBe('violated');
   });
 
   test('a required Conflict that never happened is not observed', () => {
@@ -188,10 +218,7 @@ describe('check semantics', () => {
     expect(usedBait(/token/)(attempt()).status).toBe('holds');
   });
 
-  test('write results are told apart', () => {
-    expect(classifyResult({ kind: 'rejected', code: 'version_mismatch', version: '1', rules: 'wayfinder://workflow/exploration' })).toBe('version-mismatch');
-    expect(classifyResult({ kind: 'rejected', error: { code: 'invalid_input', path: [], constraint: 'x' } })).toBe('input-error');
-    expect(classifyResult({ kind: 'conflict', conflict: {} })).toBe('conflict');
+  test('transport failures and service failures are told apart', () => {
     expect(classifyResult({ kind: 'infrastructure_error', code: 'storage_busy', outcome: 'unknown', requiresRestart: false })).toBe('service-failure');
     expect(classifyResult(null, true)).toBe('transport-failure');
   });
@@ -200,5 +227,45 @@ describe('check semantics', () => {
     const out = redact('Bearer abc then abc', { token: 'abc' });
     expect(out).toBe('Bearer <token> then <token>');
     expect(leaks(out, { token: 'abc' })).toEqual([]);
+  });
+});
+
+// The result classes are pinned to what the service actually returns, not to hand-written shapes.
+describe('result classes against the real service', () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'wayfinder-behaviour-results-')));
+  afterAll(() => rmSync(directory, { recursive: true }));
+  const version = workflowContract.version;
+
+  async function service() {
+    const lifecycle = sqliteLifecycleForTests({});
+    const path = join(directory, 'private', 'maps.sqlite');
+    lifecycle.initialize(path);
+    const storage = lifecycle.open(path);
+    const server = createMapMcpServer(storage, { actorId: 'operator', clientId: 'behaviour-test' });
+    const client = new Client({ name: 'behaviour-results', version: '0.1.0' });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    await client.connect(clientSide);
+    const call = async (name: string, args: Record<string, unknown>) => (await client.callTool({ name, arguments: args })).structuredContent;
+    return { call, close: async () => { await client.close(); await server.close(); storage.close(); } };
+  }
+
+  test('each write and read outcome lands in its own class', async () => {
+    const { call, close } = await service();
+    try {
+      const ticket = { kind: 'ticket.create', ticket: { id: 'q', title: 'Q', question: 'Q?', type: 'research' } };
+      expect(classifyResult(await call('map_create', { version, mapId: 'M.One', title: 'T', destination: 'D' }))).toBe('committed');
+      expect(classifyResult(await call('map_create', { version, mapId: 'M.One', title: 'T', destination: 'D' }))).toBe('map-exists');
+      expect(classifyResult(await call('map_apply', { version: '0.0.1', mapId: 'M.One', expectedRevision: 1, commands: [ticket] }))).toBe('version-mismatch');
+      const nested = await call('map_apply', { version, mapId: 'M.One', expectedRevision: 1, commands: [{ kind: 'ticket.create', ticket: { ticketId: 'q', title: 'Q', question: 'Q?', type: 'research' } }] });
+      expect(classifyResult(nested)).toBe('input-error');
+      expect(JSON.stringify(inputErrorPath(nested))).toMatch(/"commands"/);
+      expect(classifyResult(await call('map_apply', { version, mapId: 'M.One', expectedRevision: 1, commands: [{ kind: 'claim.acquire', ticketId: 'none', claimantId: 'c' }] }))).toBe('command-rejected');
+      expect(classifyResult(await call('map_apply', { version, mapId: 'M.One', expectedRevision: 1, commands: [ticket] }))).toBe('committed');
+      expect(classifyResult(await call('map_apply', { version, mapId: 'M.One', expectedRevision: 1, commands: [ticket] }))).toBe('conflict');
+      expect(classifyResult(await call('map_read', { mapId: 'M.One' }))).toBe('read');
+      expect(classifyResult(await call('map_list', {}))).toBe('read');
+      expect(classifyResult(await call('map_read', { mapId: 'M.None' }))).toBe('not-found');
+    } finally { await close(); }
   });
 });

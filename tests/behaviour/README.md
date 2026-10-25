@@ -8,7 +8,8 @@ Nothing here starts a service or a model. Runs that spend model quota happen onl
 
 | Path | What it holds |
 | --- | --- |
-| `scenario.ts` | The Scenario format, structural validation, readiness and the applicability matrix |
+| `scenario.ts` | The Scenario format, structural validation and readiness |
+| `clients.ts` | Client profiles and the applicability matrix |
 | `evidence.ts` | The Attempt record every Driver produces (R3), write-result classes (R4) and redaction |
 | `checks.ts`, `common.ts` | Script checks over an Attempt record, and the common checks attached to many Scenarios |
 | `library.ts`, `scenarios/` | The 26 candidates of spec §3 |
@@ -29,12 +30,12 @@ Use Node 26.3.0. `library.test.ts` runs in `npm test`; it validates the library 
 
 - **Identity and source:** a stable ID, a `version` raised whenever a verdict item changes, and a source: real problem or design hazard, what happened, portable references (Map ID and Revision, date, Issue). Diagnostic probes are not Scenarios.
 - **Applicability:** the Entries (`mcp-only`, `dedicated`, `chatgpt`, `matt`) and client capabilities it needs. A cell stays "not onboarded" until that client's Driver passes the five onboarding checks of R2.
-- **Seed:** Maps rebuilt to their current visible state, and fixtures. A seed taken from a real Map lists every conversion step, including Claims kept or cleared and redactions.
+- **Seed:** Maps rebuilt to their current visible state, or (`restores: 'history'`) replayed Revision by Revision with their original authors when the Scenario depends on history; plus fixtures. A seed taken from a real Map lists every conversion step, including Claims kept or cleared and redactions.
 - **Turns:** each `reply` names the proposal it answers and a runtime cue; the runner sends it only after that proposal appeared, and the precondition is judged again afterwards. `nudge` turns carry no answer.
 - **Controller actions:** conflicting writes, cut routes, restarts. Each action that should provoke a reaction needs a script-proven required event.
 - **Verdict items:** `requiredEvents` are proven first; any confirmed `mustNot` fails; every `expect` group needs evidence for one of its equivalent ways. Items are judged by script, or by a model or the human with a written criterion. An item whose correct behaviour is not yet decided is `paused` and goes to the human.
 
-Script checks answer `holds`, `violated` or `unknown`. Missing records or a write without a receipt never become `holds`.
+Script checks answer `holds`, `violated` or `unknown`. Missing records (the `missing` markers of `evidence.ts`) or a write without a receipt never become `holds`; only a receipt places a write in a session and turn.
 
 ## Adding a Scenario
 
@@ -42,7 +43,3 @@ Script checks answer `holds`, `violated` or `unknown`. Missing records or a writ
 2. Write must-not items as the wrong action itself and expectations as the right action, each with the evidence that proves it.
 3. Run `node tests/behaviour/cli.ts validate` and `npm test`.
 4. A real problem starts from the Revision before the incident and the human's own words (R6); record the conversion in `seed.derivedFrom` and redact private paths and credentials.
-
-## Status
-
-All 26 candidates are defined and pass validation, with their fixtures. Script checks have only the small fixed-evidence tests here; B03a adds the full evidence branches. F11's "record a Scope Exclusion" way is paused until Kun rules on it.

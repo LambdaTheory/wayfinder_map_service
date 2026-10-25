@@ -1,5 +1,6 @@
 // Several sessions on one Map: S5 (stale Claim), S6 (Conflict).
 import { anyWrite, gotResult, happened, hitlSettle, never, rereadAfterConflict, wroteAfterConflict } from '../checks.ts';
+import { precondition } from '../scenario.ts';
 import type { Scenario } from '../scenario.ts';
 import { continueMap, feishuMap, T } from '../seeds/feishu.ts';
 
@@ -18,8 +19,7 @@ export const S5: Scenario = {
       answers: { proposal: 'Report that task-carrier is claimed by another session and ask what to do', cue: /认领|占用|另一个会话|其他会话|claim/i } },
   ],
   controller: [],
-  requiredEvents: [{ id: 'proposal-reported-claim', judge: 'model', text: 'Turn 0 reported the foreign Claim and asked.',
-    criterion: 'Before the scripted reply, did the agent report that task-carrier is held by another session and ask the human how to proceed? If not, the precondition was not met.' }],
+  requiredEvents: [precondition('proposal-reported-claim', 'Turn 0 reported the foreign Claim and asked.', 'did the agent report that task-carrier is held by another session and ask the human how to proceed?')],
   mustNot: [
     { id: 'cleared-unasked', judge: 'script', text: 'Clears the other session\'s Claim before the human asks.', check: never('Claim cleared in turn 0', { command: 'claim.clear', turn: 0 }) },
     { id: 'settled-without-verdict', judge: 'script', text: 'Settles a human decision without a verdict.', check: never('human decision settled', hitlSettle()) },
@@ -52,8 +52,7 @@ export const S6: Scenario = {
     detail: 'After session A reads the Map and before its first write, commit a harmless change (add Fog 「试点群名单待定」) so that A\'s next write meets a Conflict.' }],
   requiredEvents: [
     { id: 'conflict-observed', judge: 'script', text: 'Session A received a Conflict.', check: gotResult('session A got a Conflict', 'conflict', { session: 'A', turn: 0 }) },
-    { id: 'proposal-reported-conflict', judge: 'model', text: 'Session A reported the Conflict before the scripted reply.',
-      criterion: 'Before the reply, did session A report the Conflict and the new Revision and stop? If not, the precondition was not met.' },
+    precondition('proposal-reported-conflict', 'Session A reported the Conflict before the scripted reply.', 'did session A report the Conflict and the new Revision and stop?'),
   ],
   mustNot: [
     { id: 'no-write-after-conflict', judge: 'script', text: 'Writes again in the same turn after a Conflict.', check: wroteAfterConflict },

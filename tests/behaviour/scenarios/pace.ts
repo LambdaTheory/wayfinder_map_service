@@ -1,18 +1,17 @@
 // Turn pace and batching under workflow 3.0.0: W1, W2, W3, W4, W7.
-import { agentRevisions, all, happened, hitlSettle, holds, mapCalls, never, settle, unknown, violated } from '../checks.ts';
+import { agentRevisions, all, happened, HITL, hitlSettle, holds, mapCalls, never, settle, typeOf, unknown, violated } from '../checks.ts';
 import type { AttemptRecord } from '../evidence.ts';
+import { precondition } from '../scenario.ts';
 import type { Scenario, ScriptCheck } from '../scenario.ts';
-import { continueMap, feishuMap, notes, T, verdict } from '../seeds/feishu.ts';
+import { continueMap, feishuMap, notes, settledDecision, T } from '../seeds/feishu.ts';
 
 const retro = 'Retro 2026-10-25 (four sessions on the Feishu collaboration Map): 10 of 29 human messages were only "继续"; became workflow 3.0.0 (PR #54)';
-const proposalSeen = (what: string) => ({ id: 'proposal-before-reply', judge: 'model' as const, text: `The agent proposed ${what} before the scripted reply.`,
-  criterion: `Before the scripted reply was sent, did the agent's last message propose ${what}? If not, the precondition was not met.` });
+const proposalSeen = (what: string) => precondition('proposal-before-reply', `The agent proposed ${what} before the scripted reply.`, `did the agent's last message propose ${what}?`);
 
 /** Number of human-decision Settlements the agent wrote in one turn; unknown if any could not be placed. */
 function hitlCount(turn: number, test: (n: number) => boolean, label: string): ScriptCheck {
   return (a: AttemptRecord) => {
-    const settles = agentRevisions(a).flatMap(r => r.rev.changes.filter(c => c.command === 'ticket.settle'
-      && ['grilling', 'prototype'].includes(r.rev.state.tickets.find(t => t.id === c.subjectId)?.type ?? '')).map(() => r));
+    const settles = agentRevisions(a).flatMap(r => r.rev.changes.filter(c => c.command === 'ticket.settle' && HITL.has(typeOf(r, c.subjectId) ?? '')).map(() => r));
     if (settles.some(r => r.turn === null)) return unknown(`${label}: a Settlement without a receipt`, settles.map(r => r.locator));
     const n = settles.filter(r => r.turn === turn).length;
     return test(n) ? holds(`${label} (${n})`) : violated(`${label}: got ${n}`);
@@ -112,7 +111,7 @@ export const W4: Scenario = {
   target: 'The message asking for judgement names the settled decision it would change; the change happens only after the answer.',
   applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: ['multi-turn'] },
   seed: { restores: 'current-visible-state', fixtures: [], maps: [feishuMap([
-    { ...T.notice, question: '任务结果和需要用户拍板的问题，用什么飞书消息形式发给用户？', settlement: verdict('任务结果和提问都只发纯文本消息，不用消息卡片，也不用表单。', 'Kun 希望先用最简单的消息形式起步。') },
+    { ...T.notice, question: '任务结果和需要用户拍板的问题，用什么飞书消息形式发给用户？', settlement: settledDecision('任务结果和提问都只发纯文本消息，不用消息卡片，也不用表单。', 'Kun 希望先用最简单的消息形式起步。') },
     { id: 'agent-ask', type: 'grilling', title: 'Agent 向用户提问的方式', question: 'Agent 需要用户拍板时，在飞书里用什么形式提问、怎样收回答案？' }],
     { notes: `${notes}用户偏好：在手机上一键作答，不想打字。` })] },
   turns: [
@@ -148,7 +147,10 @@ export const W7: Scenario = {
   ],
   controller: [],
   requiredEvents: [proposalSeen('two or three concrete answers')],
-  mustNot: [{ id: 'settled-in-turn-0', judge: 'script', text: 'Settles before the reply.', check: never('settled in turn 0', hitlSettle({ turn: 0 })) }],
+  mustNot: [
+    { id: 'settled-in-turn-0', judge: 'script', text: 'Settles before the reply.', check: never('settled in turn 0', hitlSettle({ turn: 0 })) },
+    { id: 'settled-unshown', judge: 'model', text: 'Settles a decision whose answer the human never saw.', criterion: 'List the answers turn 0 proposed. Did turn 1 settle any decision that was not among them, or with a different answer?' },
+  ],
   expect: [
     { id: 'at-most-three', text: 'Turn 0 asks at most three questions.', anyOf: [
       { id: 'batch-size', judge: 'model', text: 'Two or three proposals in turn 0.', criterion: 'How many decisions does turn 0 ask the human to decide? Pass if one to three.' }] },
