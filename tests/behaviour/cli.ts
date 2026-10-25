@@ -3,9 +3,10 @@
 import { library } from './library.ts';
 import { cell } from './clients.ts';
 import { readFileSync } from 'node:fs';
-import { common } from './common.ts';
 import type { AttemptRecord, Entry, Harness } from './evidence.ts';
 import { itemsOf, readiness, validateScenario } from './scenario.ts';
+import { judgeAttempt } from './verdict.ts';
+import type { ItemResult } from './verdict.ts';
 import { upgradeChecks } from './upgrade-checks.ts';
 
 const columns: [Harness, Entry][] = [['codex', 'mcp-only'], ['codex', 'dedicated'], ['claude', 'mcp-only'], ['claude', 'dedicated'],
@@ -44,19 +45,18 @@ function validate() {
   if (errors.length) process.exitCode = 1;
 }
 
-/** Script items of an Attempt's Scenario against its record. Model and human items stay open until B03. */
+/** The verdict of each Attempt record, item by item; model and human items stay pending until reviewed (B03b). */
 function check() {
   for (const path of process.argv.slice(3)) {
     const record = JSON.parse(readFileSync(path, 'utf8')) as AttemptRecord;
     const s = library.find(x => x.id === record.subject.id);
-    console.log(`${record.attemptId}  ${record.run.completeness}${record.run.detail ? ` (${record.run.detail})` : ''}`);
-    if (!s) { console.log('  unknown Scenario'); continue; }
-    const kinds: [string, string[]][] = [['common', s.common], ['required', s.requiredEvents.map(i => i.id)], ['must-not', s.mustNot.map(i => i.id)]];
-    const kind = (id: string) => kinds.find(([, ids]) => ids.includes(id))?.[0] ?? 'expect';
-    for (const item of [...itemsOf(s), ...s.common.map(c => common[c])]) {
-      const result = item.judge === 'script' ? item.check(record) : { status: `${item.judge} review`, reason: '' };
-      console.log(`  ${kind(item.id).padEnd(8)} ${item.id.padEnd(30)} ${result.status.padEnd(12)} ${result.reason}`);
-    }
+    if (!s) { console.log(`${record.attemptId}  unknown Scenario ${record.subject.id}`); continue; }
+    const v = judgeAttempt(s, record);
+    console.log(`${record.attemptId}  run ${v.completeness}  verdict ${v.outcome}${v.reasons.length ? `: ${v.reasons.join('; ')}` : ''}`);
+    const show = (kind: string, items: ItemResult[]) => items.forEach(i => console.log(`  ${kind.padEnd(8)} ${i.id.padEnd(30)} ${i.status.padEnd(14)} ${i.reason}`));
+    show('required', v.required); show('must-not', v.mustNot);
+    v.expect.forEach(g => show(`expect`, g.items.map(i => ({ ...i, id: `${g.id}/${i.id}` }))));
+    show('quality', v.quality);
   }
 }
 
