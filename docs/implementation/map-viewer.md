@@ -1,6 +1,6 @@
 # Local read-only Map viewer
 
-Status: implemented. Automated gates and one installed-Codex journey passed on 2026-10-23. Still open: the live user's own use and verdict, and the ChatGPT check of workflow `2.1.0` at the next live tunnel test.
+Status: implemented. Automated gates and one installed-Codex journey passed on 2026-10-23. On 2026-10-25 the user used it and found nothing to change for now. Still open: the ChatGPT check of workflow `2.1.0` at the next live tunnel test.
 
 Requirements and accepted design: [docs/spec/map-viewer.md](../spec/map-viewer.md). The implementation plan and requirement pages were reviewed outside the repository; they are not product Map state.
 
@@ -75,6 +75,5 @@ An independent read-only review of the diff found no way for a non-`/mcp` reques
 
 ## Not delivered here
 
-- The live user's own use of the viewer and verdict.
 - ChatGPT acceptance of workflow `2.1.0`; run it at the next `npm run serv` and record the result here.
 - MCP Apps, zoom and filtering, older Revisions, sharing, public access and authentication remain out of scope.

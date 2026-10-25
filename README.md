@@ -17,7 +17,7 @@ Wayfinder Map Service 是一套与客户端无关的决策地图系统，供 Cha
 
 本地 MCP 服务同时提供只读的地图查看页，只能从本机打开：`http://127.0.0.1:<port>/` 列出所有地图，`/maps/<mapId>` 画出一张地图，新 Revision 提交后几秒内自动更新。`map_create` 和 `map_read` 的结果带着这个链接（`viewerUrl`）。查看页不写地图，ChatGPT 测试隧道也不转发它。见[查看页规格](docs/spec/map-viewer.md)和[实现记录](docs/implementation/map-viewer.md)。
 
-回滚和删除仍在规划，规格尚未接受。实现跟踪见 [GitHub Issues](https://github.com/kun-g/wayfinder_map_service/issues)，规划入口见 [GitHub 规划地图](docs/planning/README.md)。v1 契约中网页渲染的缩放和过滤、MCP Apps UI、OAuth 和 PostgreSQL 尚未进入这个本地切片。
+删除仍在规划，规格尚未接受；回滚 2026-10-25 起不做了。实现跟踪见 [GitHub Issues](https://github.com/kun-g/wayfinder_map_service/issues)，规划入口见 [GitHub 规划地图](docs/planning/README.md)。v1 契约中网页渲染的缩放和过滤、MCP Apps UI、OAuth 和 PostgreSQL 尚未进入这个本地切片。
 
 ## 启动
 
