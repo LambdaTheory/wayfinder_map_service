@@ -19,7 +19,15 @@ const relayPort = 18765;
 const servicePort = 18766;
 const backupEveryMs = 30 * 60 * 1000;
 const tunnelConfig = join(homedir(), '.cloudflared', 'config.yml');
-const token = randomBytes(48).toString('hex');
+// With WAYFINDER_ATTACH_TOKEN the runner relays to the service already running on
+// the service port (started by the wayfinder launcher), which authors this
+// token's writes under its own Client ID; otherwise it starts and owns one.
+const attachToken = process.env.WAYFINDER_ATTACH_TOKEN;
+if (attachToken !== undefined && !/^[A-Za-z0-9._~-]{32,256}$/.test(attachToken)) {
+  console.error('WAYFINDER_ATTACH_TOKEN is not a valid local token.');
+  process.exit(1);
+}
+const token = attachToken ?? randomBytes(48).toString('hex');
 const requestHeaders = [
   'accept', 'content-type', 'content-length', 'mcp-session-id', 'mcp-protocol-version',
 ];
@@ -40,7 +48,26 @@ function backup() {
   console.log('Consistent SQLite backup completed.');
 }
 
-const service = await startLocalMcpService({
+async function attached() {
+  const headers = {
+    authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json',
+  };
+  try {
+    const reply = await fetch(`http://127.0.0.1:${servicePort}/mcp`, { method: 'POST', headers, body: JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'chatgpt-test-runner', version: '1' } },
+    }) });
+    const session = reply.headers.get('mcp-session-id');
+    if (session) await fetch(`http://127.0.0.1:${servicePort}/mcp`, { method: 'DELETE', headers: { ...headers, 'mcp-session-id': session } });
+    return reply.ok;
+  } catch { return false; }
+}
+
+if (attachToken !== undefined && !await attached()) {
+  console.error('No running local service accepted the attach token; start it with `wayfinder serve`.');
+  process.exit(1);
+}
+const service = attachToken !== undefined ? undefined : await startLocalMcpService({
   databasePath,
   port: servicePort,
   token,
@@ -53,7 +80,7 @@ try {
   // Refuse to publish the relay when the first backup cannot be confirmed.
   backup();
 } catch {
-  await service.stop();
+  await service?.stop();
   console.error('Initial backup failed; the public test connection was not started.');
   process.exit(1);
 }
@@ -106,7 +133,7 @@ try {
     });
   });
 } catch {
-  await service.stop();
+  await service?.stop();
   console.error('Local relay could not listen; the existing session may still be running.');
   process.exit(1);
 }
@@ -147,7 +174,7 @@ async function stop() {
   if (tunnel && tunnel.exitCode === null) tunnel.kill('SIGTERM');
   try {
     await new Promise(resolve => relay.close(resolve));
-    await service.stop();
+    await service?.stop();
     backup();
   } catch {
     process.exitCode = 1;
@@ -161,4 +188,5 @@ process.once('SIGTERM', () => { void stop(); });
 process.once('SIGHUP', () => { void stop(); });
 startTunnel();
 console.log(`Local ChatGPT test session running; workflowVersion=${workflowContract.workflowVersion}; press Ctrl-C to stop.`);
+if (service === undefined) console.log('Attached to the running local service; stopping this session leaves that service running.');
 console.log('This on-demand Cloudflare endpoint has no user authentication; close it when not testing.');
