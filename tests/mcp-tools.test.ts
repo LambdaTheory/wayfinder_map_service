@@ -8,7 +8,7 @@ import { CallToolResultSchema, ErrorCode, LATEST_PROTOCOL_VERSION } from '@model
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Ajv } from 'ajv';
 import { afterEach, expect, test } from 'vitest';
-import { createMapMcpServer, mapTools, workflowContract } from '../src/mcp-tools.js';
+import { createMapMcpServer, mapTools, toolsOnlyMapTools, workflowContract } from '../src/mcp-tools.js';
 import { sqliteLifecycleForTests } from '../src/sqlite-internal.js';
 import type { SQLiteStorage } from '../src/sqlite-storage.js';
 import { calculateFrontier, parseId, prepareApply } from '../src/index.js';
@@ -141,7 +141,13 @@ test('U00: writes name the release whose rules they follow; a missing or other v
     const schema = mapTools.find(tool => tool.name === name)!.inputSchema as { required: string[]; properties: Record<string, { description: string }> };
     expect(schema.required).toContain('version');
     expect(schema.properties.version!.description).not.toContain(workflowContract.version);
+    // Compatibility mode differs only in the version help, which states the release.
+    const compat = toolsOnlyMapTools.find(tool => tool.name === name)!;
+    expect((compat.inputSchema.properties!.version as { description: string }).description).toContain(`"${workflowContract.version}"`);
+    expect({ ...compat, inputSchema: { ...compat.inputSchema, properties: { ...compat.inputSchema.properties, version: null } } })
+      .toEqual({ ...mapTools.find(tool => tool.name === name)!, inputSchema: { ...schema, properties: { ...schema.properties, version: null } } });
   }
+  expect(() => createMapMcpServer(f.storage, { ...configuration, toolsOnly: 'yes' } as never)).toThrow('Invalid MCP author configuration');
 });
 
 test('W01/W02: initialization, generated tool guidance, Resources and side-effect-free Prompt expose the current release', async () => {

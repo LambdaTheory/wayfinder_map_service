@@ -13,6 +13,9 @@ const id: Schema = { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127
 const revision: Schema = { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER };
 // Writes attest which release's rules the caller follows; the value comes from its instructions, not from here.
 const version: Schema = { type: 'string', maxLength: 32, description: 'The `version:` line of the Wayfinder instructions you are following.' };
+// Compatibility mode, for clients that show their model no server instructions (ChatGPT): the tool definition states the release.
+const statedVersion: Schema = { type: 'string', maxLength: 32,
+  description: `The Wayfinder release of this tool definition. This client shows you no Wayfinder instructions, so set it to "${workflowContract.version}".` };
 const json: Schema = { $ref: '#/$defs/json' };
 const jsonObject: Schema = { type: 'object', additionalProperties: json };
 const extensions: Schema = { ...jsonObject, propertyNames: { pattern: '^[a-z][a-z0-9_-]*\\.[a-z][a-z0-9_.-]*$(?![\\s\\S])' } };
@@ -88,7 +91,7 @@ const viewerUrl: Schema = { type: 'string', pattern: '^http://127\\.0\\.0\\.1:[0
 // Only map_create carries the viewer link; map_apply results keep their shape.
 const writeOutput = (link: Record<string, Schema>) => [object({ kind: literal('committed'), mapId: id, revision, changes, ...link }, ['kind', 'mapId', 'revision', 'changes']),
   object({ kind: literal('committed'), revision: fullRevision, frontier: array(id), ...link }, ['kind', 'revision', 'frontier'])];
-const definitions: Tool[] = [
+const definitions = (version: Schema): Tool[] => [
   { name: 'map_create', description: workflowContract.toolDescriptions.map_create,
     inputSchema: root(object({ version, mapId: id, title: text, destination: text, notes: string, extensions, includeSnapshot: { type: 'boolean', default: false } }, ['version', 'mapId', 'title', 'destination'])),
     outputSchema: root({ oneOf: [...writeOutput({ viewerUrl }), ...errors] }) },
@@ -103,4 +106,5 @@ const definitions: Tool[] = [
     inputSchema: root(object({ version, mapId: id, expectedRevision: revision, commands: array({ oneOf: commands }, { minItems: 1, maxItems: 100 }), includeSnapshot: { type: 'boolean', default: false } }, ['version', 'mapId', 'expectedRevision', 'commands'])),
     outputSchema: root({ oneOf: [...writeOutput({}), ...errors] }) },
 ];
-export const mapTools: readonly Tool[] = immutableClone(definitions);
+export const mapTools: readonly Tool[] = immutableClone(definitions(version));
+export const toolsOnlyMapTools: readonly Tool[] = immutableClone(definitions(statedVersion));

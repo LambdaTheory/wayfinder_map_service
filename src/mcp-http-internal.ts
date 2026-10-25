@@ -22,6 +22,8 @@ export interface LocalServiceConfiguration {
   readonly allowedOrigins?: readonly string[];
   // Optional operator-written file of further credentials, each with its own Client ID.
   readonly credentialsPath?: string;
+  // The primary credential's client shows its model no server instructions (compatibility mode).
+  readonly toolsOnly?: boolean;
 }
 export interface LocalMcpService { stop(): Promise<void> }
 export class LocalServiceFailure extends Error {
@@ -32,7 +34,8 @@ export class LocalServiceFailure extends Error {
 }
 
 export function captureConfiguration(input: LocalServiceConfiguration): LocalServiceConfiguration {
-  if (validateObject(input, [], ['databasePath', 'port', 'token', 'actorId', 'clientId', 'allowedOrigins', 'credentialsPath'])
+  if (validateObject(input, [], ['databasePath', 'port', 'token', 'actorId', 'clientId', 'allowedOrigins', 'credentialsPath', 'toolsOnly'])
+    || (input.toolsOnly !== undefined && typeof input.toolsOnly !== 'boolean')
     || typeof input.databasePath !== 'string' || !input.databasePath
     || !Number.isInteger(input.port) || input.port < 1 || input.port > 65535
     || typeof input.token !== 'string' || !/^[A-Za-z0-9._~-]{32,256}$/.test(input.token)
@@ -64,7 +67,7 @@ function refusal(code: 'service_busy' | 'service_stopping'): CallToolResult {
   } };
 }
 const digest = (value: string) => createHash('sha256').update(value).digest();
-interface Credential { readonly key: Buffer; readonly clientId: string }
+interface Credential { readonly key: Buffer; readonly clientId: string; readonly toolsOnly: boolean }
 // The file is re-read on every attempt, so an entry added or removed by the
 // operator applies to the next request. Any invalid content admits no one.
 function readCredentials(path: string | undefined): readonly Credential[] {
@@ -74,9 +77,10 @@ function readCredentials(path: string | undefined): readonly Credential[] {
   if (validateObject(file, [], ['credentials']) || !isPlainObject(file) || !Array.isArray(file.credentials)) return [];
   const credentials: Credential[] = [];
   for (const entry of file.credentials) {
-    if (validateObject(entry, [], ['clientId', 'tokenSha256']) || !isPlainObject(entry)
-      || validateId(entry.clientId, []) || typeof entry.tokenSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(entry.tokenSha256)) return [];
-    credentials.push({ key: Buffer.from(entry.tokenSha256, 'hex'), clientId: entry.clientId as string });
+    if (validateObject(entry, [], ['clientId', 'tokenSha256', 'toolsOnly']) || !isPlainObject(entry)
+      || validateId(entry.clientId, []) || typeof entry.tokenSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(entry.tokenSha256)
+      || (entry.toolsOnly !== undefined && typeof entry.toolsOnly !== 'boolean')) return [];
+    credentials.push({ key: Buffer.from(entry.tokenSha256, 'hex'), clientId: entry.clientId as string, toolsOnly: entry.toolsOnly === true });
   }
   return credentials;
 }
@@ -106,7 +110,7 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
   const tokenHash = digest(`Bearer ${config.token}`);
   function authenticate(authorization: string | undefined): Credential | undefined {
     const presented = digest(authorization ?? '');
-    if (timingSafeEqual(tokenHash, presented)) return { key: presented, clientId: config.clientId };
+    if (timingSafeEqual(tokenHash, presented)) return { key: presented, clientId: config.clientId, toolsOnly: config.toolsOnly === true };
     const bearer = /^Bearer ([A-Za-z0-9._~-]{32,256})$/.exec(authorization ?? '');
     if (!bearer) return undefined;
     const key = digest(bearer[1]!);
@@ -174,7 +178,7 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
         onsessioninitialized(id) { sessions.set(id, created); },
       });
       const server = createMapMcpServer(storage,
-        { actorId: config.actorId, clientId: credential.clientId, viewerOrigin: `http://${host}` }, control);
+        { actorId: config.actorId, clientId: credential.clientId, viewerOrigin: `http://${host}`, toolsOnly: credential.toolsOnly }, control);
       const created: Session = { credential: credential.key, server, transport, pending: new Set(), closing: false };
       await server.connect(transport);
       session = created;

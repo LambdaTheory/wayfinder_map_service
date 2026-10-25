@@ -74,6 +74,8 @@ const service = attachToken !== undefined ? undefined : await startLocalMcpServi
   actorId: 'ChatGPT-Test-Operator',
   clientId: 'ChatGPT-Test',
   allowedOrigins: [],
+  // ChatGPT shows its model the tool definitions, never the server instructions.
+  toolsOnly: true,
 });
 
 try {
