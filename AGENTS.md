@@ -6,6 +6,10 @@ M1 and the local MCP/SQLite service are accepted. `docs/agents/exploration-mcp.m
 
 Use the domain language in `GLOSSARY.md`. Record a newly settled domain term there. Add an ADR only for a hard-to-reverse, surprising trade-off with meaningful alternatives.
 
+## Versioning
+
+When a change touches shipped code or the workflow, raise the one SemVer in `package.json` and `package-lock.json` in the same PR and add its `CHANGELOG.md` section; after merging, tag `main` with `v<version>`. `docs/spec/mcp-sqlite.md` §14.3 says which part to raise and what counts as shipped; `tests/release.test.ts` fails a shipped change that keeps the last tag's version.
+
 ## Agent skills
 
 ### Issue tracker
