@@ -15,4 +15,4 @@ An open conversation must follow a new release's rules after the service is upgr
 
 ## Consequences
 
-Every write carries one more field, and a caller whose instructions lack the line pays one refusal and one Resource read. After an upgrade, a client that cannot read Resources (ChatGPT custom connectors) cannot write until the human refreshes the connector. Reads stay ungated, because they change nothing. Adding a required input is incompatible, so this release is `2.0.0`.
+Every write carries one more field, and a caller whose instructions lack the line pays one refusal and one Resource read. After an upgrade, a client that cannot read Resources (ChatGPT custom connectors) cannot write until the human refreshes the connector. Reads stay ungated, because they change nothing. The gate cannot see a tool definition that a client kept while its instructions refreshed (Claude Code with tool search), so spec section 14.2 keeps every cross-tool rule in the instructions, not only in a tool description. Adding a required input is incompatible, so this release is `2.0.0`.

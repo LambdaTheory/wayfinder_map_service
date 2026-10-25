@@ -19,7 +19,7 @@ What happens to a chat that stays open while the service is upgraded, as of rele
 | Claude Code 2.1.310, conversation resumed (`--resume`, `wayfinder resume`) | New tools; the resumed conversation keeps the old instructions | Old version, refused | Read the Resource, retried with the new version; followed both new rules | Real run |
 | ChatGPT custom connector | Nothing until the human refreshes the connector. OpenAI documents a tool snapshot that only a manual Refresh updates, and no `listChanged` handling. | Old version, refused | Cannot read Resources, so it cannot recover by itself | Not run; OpenAI docs as of 2026-10-25 |
 
-**Known gap:** when Claude Code's instructions refresh but a tool definition it already loaded does not, the gate cannot tell. The caller attests the instructions it holds, and those are current. A rule that a release puts only in a tool description can then be missed until the conversation is resumed. Rules that matter across tools belong in the instructions summary or the safety core.
+**Known gap:** when Claude Code's instructions refresh but a tool definition it already loaded does not, the gate cannot tell. The caller attests the instructions it holds, and those are current. A rule that a release puts only in a tool description can then be missed until the conversation is resumed. So, by the authoring rule in spec section 14.2 (Kun, 2026-10-25), a cross-tool rule or one that changes what a caller writes always lives in the instructions summary or the safety core; tool descriptions own how to call their tool.
 
 ## Recovery when a client does not refresh
 

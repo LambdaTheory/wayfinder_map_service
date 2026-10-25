@@ -297,6 +297,8 @@ This follow-on slice includes an isolated ChatGPT Desktop acceptance through the
 - The optional `start_wayfinder_exploration` Prompt accepts `mode=create|resume` and an optional stable Map ID. It only produces an entry message, has no storage side effect and contains no safety rule absent from instructions/tool metadata.
 - An optional external Wayfinder Skill is an invocation/method adapter only. It must not require a repository-relative file, duplicate the workflow body or become necessary for correct operation.
 
+A rule that applies across tools, or that changes what a caller writes, lives in the safety core or the instructions summary. A tool description may restate it, but is never its only home: after an upgrade some clients keep a tool definition they loaded earlier while showing the new instructions ([Open conversations across an upgrade](../implementation/client-upgrade.md)). Tool descriptions own how to call their tool.
+
 Protocol-level text is English; clients may answer users in their language. Resource and Prompt support never substitutes for initialization instructions and locally sufficient tool metadata.
 
 ### 14.3 Versioning, build and release
