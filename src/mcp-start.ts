@@ -12,7 +12,7 @@ async function main() {
     allowedOrigins: allowedOrigins as string[],
     ...(process.env.WAYFINDER_CREDENTIALS_FILE === undefined ? {} : { credentialsPath: process.env.WAYFINDER_CREDENTIALS_FILE }),
   });
-  console.log(`Wayfinder local MCP ready workflowVersion=${workflowContract.workflowVersion}`);
+  console.log(`Wayfinder local MCP ready version=${workflowContract.version}`);
   let stopping = false;
   const stop = () => {
     if (stopping) return;

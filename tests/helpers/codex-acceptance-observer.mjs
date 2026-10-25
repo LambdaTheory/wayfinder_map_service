@@ -9,9 +9,9 @@ ServerResponse.prototype.end = function (chunk, ...args) {
       const message = JSON.parse(String(chunk));
       if (message.result?.protocolVersion && process.env.WAYFINDER_PROTOCOL_REPORT) {
         const result = message.result;
-        const workflowVersion = /^workflowVersion: ([^\s]+)$/m.exec(result.instructions ?? '')?.[1];
+        const version = /^version: ([^\s]+)$/m.exec(result.instructions ?? '')?.[1];
         appendFileSync(process.env.WAYFINDER_PROTOCOL_REPORT, JSON.stringify({ protocolVersion: result.protocolVersion,
-          serverInfo: result.serverInfo, capabilities: result.capabilities, instructions: result.instructions, workflowVersion }) + '\n', { mode: 0o600 });
+          serverInfo: result.serverInfo, capabilities: result.capabilities, instructions: result.instructions, version }) + '\n', { mode: 0o600 });
       }
     } catch { /* Ordinary non-initialize responses are ignored. */ }
   }

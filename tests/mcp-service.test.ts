@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { createServer, request as httpRequest } from 'node:http';
 import type { Server as HttpServer } from 'node:http';
 import { execFileSync, fork } from 'node:child_process';
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +24,7 @@ const cleanups: (() => void | Promise<void>)[] = [];
 beforeAll(() => { execFileSync('npm', ['run', 'build'], { stdio: 'pipe' }); });
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const token = 'isolated-test-token-not-a-live-credential';
+const version: string = JSON.parse(readFileSync('package.json', 'utf8')).version;
 const author = { actorId: 'operator', clientId: 'http-acceptance' };
 const ajv = new Ajv({ strict: false });
 const outputs = new Map(mapTools.map(tool => [tool.name, ajv.compile(tool.outputSchema!)]));
@@ -216,7 +217,7 @@ test('P07/P09: token, exact Host and explicit local Origin guard every method; c
   expect((await raw(f.port, message(), headers)).status).toBe(200);
   expect((await raw(f.port, message(), { ...headers, Origin: 'http://localhost:9999' })).status).toBe(403);
   expect(await observe(c)).toEqual(before);
-  expect(c.client.getServerVersion()).toEqual({ name: 'wayfinder-map', version: '0.1.0' });
+  expect(c.client.getServerVersion()).toEqual({ name: 'wayfinder-map', version });
   expect(c.negotiatedProtocol).toBe('2025-11-25');
   expect((await c.read()).structuredContent).toMatchObject({ revision: { author } });
 });
@@ -281,13 +282,13 @@ test('W03: real Streamable HTTP initialization carries immutable workflow instru
   expect(c.client.getInstructions()).toBe(workflowContract.instructions);
   expect(c.client.getServerCapabilities()).toMatchObject({ tools: {}, resources: {}, prompts: {} });
   expect((await c.client.listResources()).resources.map(resource => resource.uri)).toEqual([
-    'wayfinder://workflow/exploration', 'wayfinder://workflow/exploration/3.0.0',
+    'wayfinder://workflow/exploration', `wayfinder://workflow/exploration/${version}`,
   ]);
   expect((await c.client.readResource({ uri: 'wayfinder://workflow/exploration' })).contents[0]).toMatchObject({
-    text: workflowContract.markdown, _meta: { 'wayfinder/workflowVersion': '3.0.0' },
+    text: workflowContract.markdown, _meta: { 'wayfinder/version': version },
   });
   expect((await c.client.getPrompt({ name: 'start_wayfinder_exploration', arguments: { mode: 'resume', mapId: 'Stable.Map' } }))
-    .messages[0]).toMatchObject({ role: 'user', content: { type: 'text', text: expect.stringContaining('workflowVersion: 3.0.0') } });
+    .messages[0]).toMatchObject({ role: 'user', content: { type: 'text', text: expect.stringContaining(`version: ${version}.`) } });
   expect((await c.call('map_list')).structuredContent).toEqual({ kind: 'listed', maps: [], nextAfterMapId: null });
 });
 

@@ -31,15 +31,15 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
   const { viewerOrigin } = configuration;
   const viewerLink = (mapId: string) => viewerOrigin === undefined ? {} : { viewerUrl: viewerUrl(viewerOrigin, mapId) };
   const author = (): MutationAuthor => ({ ...identity, occurredAt: new Date().toISOString() } as MutationAuthor);
-  const server = new Server({ name: 'wayfinder-map', version: '0.1.0' }, {
+  const server = new Server({ name: 'wayfinder-map', version: workflowContract.version }, {
     capabilities: { tools: {}, resources: {}, prompts: {} }, instructions: workflowContract.instructions,
   });
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: structuredClone(mapTools) }));
   const stableResourceUri = 'wayfinder://workflow/exploration';
-  const versionedResourceUri = `${stableResourceUri}/${workflowContract.workflowVersion}`;
+  const versionedResourceUri = `${stableResourceUri}/${workflowContract.version}`;
   const resources = [stableResourceUri, versionedResourceUri].map(uri => ({
-    uri, name: 'Wayfinder exploration workflow', description: `Complete Wayfinder exploration workflow ${workflowContract.workflowVersion}`,
-    mimeType: 'text/markdown', _meta: { 'wayfinder/workflowVersion': workflowContract.workflowVersion },
+    uri, name: 'Wayfinder exploration workflow', description: `Complete Wayfinder exploration workflow ${workflowContract.version}`,
+    mimeType: 'text/markdown', _meta: { 'wayfinder/version': workflowContract.version },
   }));
   server.setRequestHandler(ListResourcesRequestSchema, () => ({ resources: structuredClone(resources) }));
   server.setRequestHandler(ReadResourceRequestSchema, request => {
@@ -47,12 +47,12 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
       throw new McpError(ErrorCode.InvalidParams, 'Unknown workflow Resource');
     }
     return { contents: [{ uri: request.params.uri, mimeType: 'text/markdown', text: workflowContract.markdown,
-      _meta: { 'wayfinder/workflowVersion': workflowContract.workflowVersion } }] };
+      _meta: { 'wayfinder/version': workflowContract.version } }] };
   });
-  const prompt = { name: 'start_wayfinder_exploration', description: `Start or resume Wayfinder workflow ${workflowContract.workflowVersion}`,
+  const prompt = { name: 'start_wayfinder_exploration', description: `Start or resume Wayfinder workflow ${workflowContract.version}`,
     arguments: [{ name: 'mode', description: 'create or resume', required: true },
       { name: 'mapId', description: 'Optional stable Map ID', required: false }],
-    _meta: { 'wayfinder/workflowVersion': workflowContract.workflowVersion } };
+    _meta: { 'wayfinder/version': workflowContract.version } };
   server.setRequestHandler(ListPromptsRequestSchema, () => ({ prompts: [structuredClone(prompt)] }));
   server.setRequestHandler(GetPromptRequestSchema, request => {
     if (request.params.name !== prompt.name) throw new McpError(ErrorCode.InvalidParams, 'Unknown workflow Prompt');
@@ -63,7 +63,7 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
     if (args.mapId !== undefined && validateId(args.mapId, ['mapId'])) throw new McpError(ErrorCode.InvalidParams, 'Invalid stable Map ID');
     const selection = args.mapId === undefined ? '' : ` Stable Map ID: ${args.mapId}.`;
     return { description: prompt.description, messages: [{ role: 'user' as const, content: { type: 'text' as const,
-      text: `${workflowContract.prompt}\n\nworkflowVersion: ${workflowContract.workflowVersion}. Mode: ${args.mode}.${selection}` } }] };
+      text: `${workflowContract.prompt}\n\nversion: ${workflowContract.version}. Mode: ${args.mode}.${selection}` } }] };
   });
   const callTool = async (request: CallToolRequest): Promise<CallToolResult> => {
     const tool = mapTools.find(tool => tool.name === request.params.name);

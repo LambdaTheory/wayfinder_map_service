@@ -187,6 +187,6 @@ process.once('SIGINT', () => { void stop(); });
 process.once('SIGTERM', () => { void stop(); });
 process.once('SIGHUP', () => { void stop(); });
 startTunnel();
-console.log(`Local ChatGPT test session running; workflowVersion=${workflowContract.workflowVersion}; press Ctrl-C to stop.`);
+console.log(`Local ChatGPT test session running; version=${workflowContract.version}; press Ctrl-C to stop.`);
 if (service === undefined) console.log('Attached to the running local service; stopping this session leaves that service running.');
 console.log('This on-demand Cloudflare endpoint has no user authentication; close it when not testing.');

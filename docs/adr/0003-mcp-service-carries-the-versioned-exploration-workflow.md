@@ -4,7 +4,7 @@ status: accepted
 
 # MCP service carries the versioned exploration workflow
 
-The MCP service carries the cross-tool exploration workflow in initialization instructions and locally sufficient descriptions for its four business tools. The complete workflow is authored once in repository Markdown, independently versioned with SemVer, and deterministically built into optional Resource and Prompt projections plus the mandatory runtime guidance. A connected compatible client therefore does not depend on a copied Skill, repository-relative file or conversation prompt for correct Map operation.
+The MCP service carries the cross-tool exploration workflow in initialization instructions and locally sufficient descriptions for its four business tools. The complete workflow is authored once in repository Markdown, versioned with SemVer (since 2026-10-25 the service's single Release Version, see [ADR 0004](0004-one-release-version.md)), and deterministically built into optional Resource and Prompt projections plus the mandatory runtime guidance. A connected compatible client therefore does not depend on a copied Skill, repository-relative file or conversation prompt for correct Map operation.
 
 ## Considered options
 
