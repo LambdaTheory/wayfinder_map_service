@@ -1,0 +1,6 @@
+{
+  "name": "ledger-cli",
+  "type": "module",
+  "bin": { "ledger": "src/cli.js" },
+  "scripts": { "test": "node --test" }
+}
