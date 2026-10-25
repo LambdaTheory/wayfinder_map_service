@@ -9,9 +9,8 @@ import type { Capability, Scenario } from './scenario.ts';
  * means proven in a run, `false` known unsupported, `'unverified'` expected but not yet shown.
  */
 export const clientProfiles: Record<Harness, { onboarded: Entry[]; entries: Entry[]; supports: Partial<Record<Capability, boolean | 'unverified'>> }> = {
-  // Batch B1-20261025 proved multi-turn resumption, but ran before the sandbox became an allowlist; onboarding
-  // waits for a run under the current profile (#65).
-  codex: { onboarded: [], entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': true, 'workspace-files': 'unverified', commands: 'unverified',
+  // MCP-only onboarded by Batch B2-20261025 under the allowlist sandbox (#65): resumed sessions, commands, complete records.
+  codex: { onboarded: ['mcp-only'], entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': true, commands: true, 'workspace-files': 'unverified',
     'new-session': 'unverified', 'concurrent-sessions': 'unverified', 'resource-read': 'unverified', 'sub-agents': 'unverified', 'async-questions': false } },
   claude: { onboarded: [], entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': 'unverified', 'new-session': 'unverified', 'concurrent-sessions': 'unverified',
     'workspace-files': 'unverified', commands: 'unverified', 'resource-read': 'unverified', 'sub-agents': 'unverified', 'async-questions': false } },

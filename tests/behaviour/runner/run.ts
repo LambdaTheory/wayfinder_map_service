@@ -233,9 +233,12 @@ export async function runBatch(o: BatchOptions): Promise<{ outcomes: AttemptOutc
     }
   } finally { process.off('SIGINT', onSignal); process.off('SIGTERM', onSignal); }
   const after = isolationSnapshot();
+  // Other clients may edit personal configuration during a Batch; what matters is that none of it names this run.
+  const mentionsRun = Object.keys(after.files).filter(f => { const path = f.replace(/^~/, homedir());
+    return existsSync(path) && /wf-behave-|behaviour-runs|Behaviour[.-]/.test(readFileSync(path, 'utf8')); });
   writeFileSync(join(o.out, 'batch.json'), JSON.stringify({ batchId: o.batchId, combination: `codex:${o.codex.model}:${o.codex.effort}`, entry: 'mcp-only',
     sandbox: o.codex.sandbox, plan: plan.map(p => p.attemptId), ceiling: o.ceiling, outcomes,
-    isolation: { before, after, unchanged: JSON.stringify(before) === JSON.stringify(after) } }, null, 1), { mode: 0o600 });
+    isolation: { before, after, unchanged: JSON.stringify(before) === JSON.stringify(after), personalConfigNamingThisRun: mentionsRun } }, null, 1), { mode: 0o600 });
   return { outcomes, refusals: [] };
 }
 

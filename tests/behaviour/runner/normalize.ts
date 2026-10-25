@@ -125,10 +125,14 @@ export function readRollout(path: string): RolloutFacts {
   return { visibleModel, effort, cliVersion, text };
 }
 
-/** Content counts as shown only if every non-blank line of it appears in what the client sent its model. */
+/**
+ * Content counts as shown only if every non-blank line of it appears in what the client sent its model. Codex logs
+ * the server instructions as a string inside another JSON string, so a line may appear escaped once or twice.
+ */
 export function shown(rolloutText: string, content: string): boolean {
+  const escape = (text: string) => JSON.stringify(text).slice(1, -1);
   const lines = content.split('\n').map(l => l.trim()).filter(Boolean);
-  return lines.length > 0 && lines.every(line => rolloutText.includes(JSON.stringify(line).slice(1, -1)));
+  return lines.length > 0 && lines.every(line => rolloutText.includes(escape(line)) || rolloutText.includes(escape(escape(line))));
 }
 
 /** The rules the client was given in its first phase, claimed as read only where the session log shows them. */
