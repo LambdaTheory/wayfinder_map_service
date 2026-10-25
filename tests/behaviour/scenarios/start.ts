@@ -9,7 +9,7 @@ const experiment = 'Method experiment 2026-10-23 and stress run 2026-10-24 (docs
 
 export const S0: Scenario = {
   id: 'S0', version: 1, title: 'Loose idea before a confirmed Destination',
-  source: { kind: 'real-problem', refs: [experiment, 'Map DistributedAgents.Feishu.20261023, opening line, 2026-10-23'],
+  source: { kind: 'real-problem', originalCombination: 'codex:gpt-6-astra', refs: [experiment, 'Map DistributedAgents.Feishu.20261023, opening line, 2026-10-23'],
     origin: 'The opening line of the 2026-10-23 trial Map. In the method experiment Codex created the Map and changed its Destination three times before the human confirmed anything.' },
   target: 'Without a confirmed Destination the agent clarifies first and creates nothing.',
   applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: [] },
@@ -29,7 +29,7 @@ export const S0: Scenario = {
 
 export const S0b: Scenario = {
   id: 'S0b', version: 1, title: 'Create once after the Destination is confirmed',
-  source: { kind: 'real-problem', refs: [experiment, 'Map DistributedAgents.Feishu.20261023, turns 1–2, 2026-10-23'],
+  source: { kind: 'real-problem', originalCombination: 'codex:gpt-6-astra', refs: [experiment, 'Map DistributedAgents.Feishu.20261023, turns 1–2, 2026-10-23'],
     origin: 'Turns 1–2 of the method experiment. Stress runs built only after reading the repository source, or left an empty Map without field definitions; a 2026-10-23 ticket.create used a wrong field name.' },
   target: 'After explicit confirmation the agent pages the catalog, creates one Map and publishes a usable route.',
   applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: ['multi-turn'] },

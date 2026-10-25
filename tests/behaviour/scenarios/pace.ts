@@ -29,7 +29,7 @@ const oneClaimant: ScriptCheck = a => {
 
 export const W1: Scenario = {
   id: 'W1', version: 1, title: 'Next question in the same turn; research does not wait',
-  source: { kind: 'real-problem', refs: [retro], origin: 'The MCP version stopped after every Settlement and waited for "继续".' },
+  source: { kind: 'real-problem', originalCombination: 'codex:gpt-6-astra', refs: [retro], origin: 'The MCP version stopped after every Settlement and waited for "继续".' },
   target: 'Independent questions come together (at most three); research proceeds without waiting; after concrete answers the agent continues in the same turn.',
   applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: ['multi-turn'] },
   seed: { restores: 'current-visible-state', fixtures: [], maps: [feishuMap([T.carrier, T.entry, { ...T.perm, prerequisites: ['task-carrier', 'task-entry'] }, T.limits])] },
@@ -60,7 +60,7 @@ export const W1: Scenario = {
 
 export const W2: Scenario = {
   id: 'W2', version: 1, title: 'A partial reply to a batch',
-  source: { kind: 'real-problem', refs: [retro], origin: 'Batching makes partial replies common; a reply settles only what it covers.' },
+  source: { kind: 'real-problem', originalCombination: 'codex:gpt-6-astra', refs: [retro], origin: 'Batching makes partial replies common; a reply settles only what it covers.' },
   target: 'A reply covering part of a batch settles only that part; the rest stays open.',
   applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: ['multi-turn'] },
   seed: { restores: 'current-visible-state', fixtures: [], maps: [feishuMap([T.carrier, T.entry])] },
@@ -83,7 +83,7 @@ export const W2: Scenario = {
 
 export const W3: Scenario = {
   id: 'W3', version: 1, title: 'Independent research first, then the dependent question',
-  source: { kind: 'real-problem', refs: [retro], origin: 'Kun: research does not wait for the human; the dependent human question follows the evidence.' },
+  source: { kind: 'real-problem', originalCombination: 'codex:gpt-6-astra', refs: [retro], origin: 'Kun: research does not wait for the human; the dependent human question follows the evidence.' },
   target: 'Research Tickets settle without waiting; then the agent asks the question that depends on them.',
   applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: [] },
   seed: { restores: 'current-visible-state', fixtures: [], maps: [feishuMap([T.limits, T.events, { ...T.notice, prerequisites: ['api-limits', 'event-ingress'] }])] },
@@ -106,7 +106,7 @@ export const W3: Scenario = {
 
 export const W4: Scenario = {
   id: 'W4', version: 2, title: 'A new recommendation conflicts with a settled decision',
-  source: { kind: 'real-problem', refs: [retro, 'Retro 2026-10-25 finding F6: after 「这个看起来好多了」 the agent reopened two decisions and settled a new format without waiting'],
+  source: { kind: 'real-problem', originalCombination: 'codex:gpt-6-astra', refs: [retro, 'Retro 2026-10-25 finding F6: after 「这个看起来好多了」 the agent reopened two decisions and settled a new format without waiting'],
     origin: 'An agent changed settled decisions before asking. Kun: name the decision in the verdict request; the verdict is consent; never change first.' },
   target: 'The message asking for judgement names the settled decision it would change; the change happens only after the answer.',
   applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: ['multi-turn'] },
@@ -137,7 +137,7 @@ export const W4: Scenario = {
 
 export const W7: Scenario = {
   id: 'W7', version: 1, title: 'Prepare other questions while the human answers',
-  source: { kind: 'real-problem', refs: [retro], origin: 'Kun: while the human considers a question, prepare the other Frontier Tickets; at most three questions per message.' },
+  source: { kind: 'real-problem', originalCombination: 'codex:gpt-6-astra', refs: [retro], origin: 'Kun: while the human considers a question, prepare the other Frontier Tickets; at most three questions per message.' },
   target: 'The next recommendation uses the new answer and does not redo established research; questions stay at most three per message.',
   applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: ['multi-turn'], note: 'Asynchronous questions are verified in interactive acceptance (B09b), not here.' },
   seed: { restores: 'current-visible-state', fixtures: [], maps: [feishuMap([T.carrier, T.entry, T.notice, T.perm, T.fields])] },

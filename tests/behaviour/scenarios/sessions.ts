@@ -36,7 +36,7 @@ export const S5: Scenario = {
 
 export const S6: Scenario = {
   id: 'S6', version: 1, title: 'A Conflict during work',
-  source: { kind: 'real-problem', refs: ['ChatGPT run 2026-09-20: after a Conflict it reread and resubmitted the stale intention, which led to the workflow 2.0.0 Conflict rule', 'Stress run 2026-10-24'],
+  source: { kind: 'real-problem', originalCombination: 'chatgpt', refs: ['ChatGPT run 2026-09-20: after a Conflict it reread and resubmitted the stale intention, which led to the workflow 2.0.0 Conflict rule', 'Stress run 2026-10-24'],
     origin: 'After a Conflict, a ChatGPT session reread the Map and automatically resubmitted the old intention. The old S6 relied on a natural race and passed when no Conflict happened.' },
   target: 'On a real Conflict the agent rereads, reports and stops; it writes again only after a new human request.',
   applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: ['multi-turn', 'concurrent-sessions'],
