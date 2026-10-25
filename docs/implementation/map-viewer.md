@@ -77,5 +77,4 @@ An independent read-only review of the diff found no way for a non-`/mcp` reques
 
 - The live user's own use of the viewer and verdict.
 - ChatGPT acceptance of workflow `2.1.0`; run it at the next `npm run serv` and record the result here.
-- `README.md` changes, which wait for the user's pending translation commit.
 - MCP Apps, zoom and filtering, older Revisions, sharing, public access and authentication remain out of scope.
