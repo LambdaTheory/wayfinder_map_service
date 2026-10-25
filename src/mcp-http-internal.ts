@@ -1,5 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { isAbsolute } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
@@ -7,7 +9,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { createMapMcpServer } from './mcp-tools.js';
 import type { SQLiteStorage } from './sqlite-storage.js';
-import { validateAuthor, validateObject } from './values.js';
+import { isPlainObject, validateAuthor, validateId, validateObject } from './values.js';
 import { handleViewer, requestTarget } from './viewer-http.js';
 
 export const MAX_REQUEST_BYTES = 1_048_576;
@@ -18,6 +20,8 @@ export interface LocalServiceConfiguration {
   readonly actorId: string;
   readonly clientId: string;
   readonly allowedOrigins?: readonly string[];
+  // Optional operator-written file of further credentials, each with its own Client ID.
+  readonly credentialsPath?: string;
 }
 export interface LocalMcpService { stop(): Promise<void> }
 export class LocalServiceFailure extends Error {
@@ -28,12 +32,13 @@ export class LocalServiceFailure extends Error {
 }
 
 export function captureConfiguration(input: LocalServiceConfiguration): LocalServiceConfiguration {
-  if (validateObject(input, [], ['databasePath', 'port', 'token', 'actorId', 'clientId', 'allowedOrigins'])
+  if (validateObject(input, [], ['databasePath', 'port', 'token', 'actorId', 'clientId', 'allowedOrigins', 'credentialsPath'])
     || typeof input.databasePath !== 'string' || !input.databasePath
     || !Number.isInteger(input.port) || input.port < 1 || input.port > 65535
     || typeof input.token !== 'string' || !/^[A-Za-z0-9._~-]{32,256}$/.test(input.token)
     || validateAuthor({ actorId: input.actorId, clientId: input.clientId, occurredAt: new Date().toISOString() })
-    || (input.allowedOrigins !== undefined && (!Array.isArray(input.allowedOrigins) || !input.allowedOrigins.every(localOrigin)))) {
+    || (input.allowedOrigins !== undefined && (!Array.isArray(input.allowedOrigins) || !input.allowedOrigins.every(localOrigin)))
+    || (input.credentialsPath !== undefined && (typeof input.credentialsPath !== 'string' || !isAbsolute(input.credentialsPath)))) {
     throw new LocalServiceFailure('invalid_configuration');
   }
   return structuredClone(input);
@@ -59,6 +64,22 @@ function refusal(code: 'service_busy' | 'service_stopping'): CallToolResult {
   } };
 }
 const digest = (value: string) => createHash('sha256').update(value).digest();
+interface Credential { readonly key: Buffer; readonly clientId: string }
+// The file is re-read on every attempt, so an entry added or removed by the
+// operator applies to the next request. Any invalid content admits no one.
+function readCredentials(path: string | undefined): readonly Credential[] {
+  if (path === undefined) return [];
+  let file: unknown;
+  try { file = JSON.parse(readFileSync(path, 'utf8')); } catch { return []; }
+  if (validateObject(file, [], ['credentials']) || !isPlainObject(file) || !Array.isArray(file.credentials)) return [];
+  const credentials: Credential[] = [];
+  for (const entry of file.credentials) {
+    if (validateObject(entry, [], ['clientId', 'tokenSha256']) || !isPlainObject(entry)
+      || validateId(entry.clientId, []) || typeof entry.tokenSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(entry.tokenSha256)) return [];
+    credentials.push({ key: Buffer.from(entry.tokenSha256, 'hex'), clientId: entry.clientId as string });
+  }
+  return credentials;
+}
 async function requestTooLarge(request: IncomingMessage, response: ServerResponse) {
   // Discard, never accumulate/parse, the excess body. Do not reset an uploading
   // socket before its explicit 413 can be consumed by the client.
@@ -70,6 +91,8 @@ async function requestTooLarge(request: IncomingMessage, response: ServerRespons
   if (!response.destroyed) response.end(errorBody('Request too large'));
 }
 interface Session {
+  // Requests within a session must present the credential that opened it.
+  readonly credential: Buffer;
   readonly server: Server;
   readonly transport: WebStandardStreamableHTTPServerTransport;
   readonly pending: Set<Promise<void>>;
@@ -81,6 +104,14 @@ interface Session {
 export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceConfiguration): Promise<LocalMcpService> {
   const config = captureConfiguration(input);
   const tokenHash = digest(`Bearer ${config.token}`);
+  function authenticate(authorization: string | undefined): Credential | undefined {
+    const presented = digest(authorization ?? '');
+    if (timingSafeEqual(tokenHash, presented)) return { key: presented, clientId: config.clientId };
+    const bearer = /^Bearer ([A-Za-z0-9._~-]{32,256})$/.exec(authorization ?? '');
+    if (!bearer) return undefined;
+    const key = digest(bearer[1]!);
+    return readCredentials(config.credentialsPath).find(credential => timingSafeEqual(credential.key, key));
+  }
   const host = `127.0.0.1:${config.port}`;
   const origins = new Set(config.allowedOrigins ?? []);
   const sessions = new Map<string, Session>();
@@ -102,9 +133,8 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
     if (request.headers.host !== host) { httpFailure(response, 403, 'Host forbidden'); return; }
     // The read-only viewer needs no token; routing by pathname keeps /mcp?query on the 404 below.
     if (requestTarget(request.url, host)?.pathname !== '/mcp') { await handleViewer(request, response, storage, host); return; }
-    if (!timingSafeEqual(tokenHash, digest(request.headers.authorization ?? ''))) {
-      httpFailure(response, 401, 'Local token required'); return;
-    }
+    const credential = authenticate(request.headers.authorization);
+    if (!credential) { httpFailure(response, 401, 'Local token required'); return; }
     const origin = request.headers.origin;
     if (origin !== undefined && !origins.has(origin)) { httpFailure(response, 403, 'Origin forbidden'); return; }
     if (request.url !== '/mcp') { httpFailure(response, 404, 'Endpoint not found'); return; }
@@ -143,8 +173,9 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
       const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: randomUUID, enableJsonResponse: true,
         onsessioninitialized(id) { sessions.set(id, created); },
       });
-      const server = createMapMcpServer(storage, { ...configAuthor(config), viewerOrigin: `http://${host}` }, control);
-      const created: Session = { server, transport, pending: new Set(), closing: false };
+      const server = createMapMcpServer(storage,
+        { actorId: config.actorId, clientId: credential.clientId, viewerOrigin: `http://${host}` }, control);
+      const created: Session = { credential: credential.key, server, transport, pending: new Set(), closing: false };
       await server.connect(transport);
       session = created;
       const closed = transport.onclose;
@@ -152,6 +183,7 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
       // Never print SDK errors, which may contain submitted protocol data.
       server.onerror = () => {};
     }
+    if (!timingSafeEqual(session.credential, credential.key)) { httpFailure(response, 403, 'Session belongs to another credential'); return; }
     if (session.closing) { httpFailure(response, 404, 'Session closing'); return; }
     let finish: (() => void) | undefined;
     let pending: Promise<void> | undefined;
@@ -219,4 +251,3 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
     return stopped;
   } };
 }
-function configAuthor(config: LocalServiceConfiguration) { return { actorId: config.actorId, clientId: config.clientId }; }

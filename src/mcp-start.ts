@@ -10,6 +10,7 @@ async function main() {
   const service = await startLocalMcpService({ databasePath: process.env.WAYFINDER_DATABASE_PATH!, port: Number(port),
     token: process.env.WAYFINDER_TOKEN!, actorId: process.env.WAYFINDER_ACTOR_ID!, clientId: process.env.WAYFINDER_CLIENT_ID!,
     allowedOrigins: allowedOrigins as string[],
+    ...(process.env.WAYFINDER_CREDENTIALS_FILE === undefined ? {} : { credentialsPath: process.env.WAYFINDER_CREDENTIALS_FILE }),
   });
   console.log(`Wayfinder local MCP ready workflowVersion=${workflowContract.workflowVersion}`);
   let stopping = false;

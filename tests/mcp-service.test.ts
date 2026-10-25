@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import { createServer, request as httpRequest } from 'node:http';
 import type { Server as HttpServer } from 'node:http';
 import { execFileSync, fork } from 'node:child_process';
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -59,8 +60,8 @@ async function fixture(storage?: SQLiteStorage) {
   const service = await serveLocalMcp(f.storage, config); cleanups.push(() => service.stop());
   return { ...f, port, config, service };
 }
-async function connect(port: number) {
-  const { client, transport, negotiatedProtocol } = await createHttpTestClient(port, token);
+async function connect(port: number, bearer = token) {
+  const { client, transport, negotiatedProtocol } = await createHttpTestClient(port, bearer);
   cleanups.push(() => client.close());
   async function call(name: string, args: Record<string, unknown> = {}): Promise<CallToolResult> {
     const result = await client.callTool({ name, arguments: args }) as CallToolResult;
@@ -218,6 +219,38 @@ test('P07/P09: token, exact Host and explicit local Origin guard every method; c
   expect(c.client.getServerVersion()).toEqual({ name: 'wayfinder-map', version: '0.1.0' });
   expect(c.negotiatedProtocol).toBe('2025-11-25');
   expect((await c.read()).structuredContent).toMatchObject({ revision: { author } });
+});
+
+test('P07: an operator credentials file admits further tokens, each authoring as its own Client ID; sessions stay bound and edits apply per request', async () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'wayfinder-credentials-')));
+  cleanups.push(() => rmSync(directory, { recursive: true }));
+  const credentialsPath = join(directory, 'credentials.json');
+  const agentToken = 'agent-credential-token-not-a-live-secret-01';
+  const otherToken = 'other-credential-token-not-a-live-secret-02';
+  const sha = (value: string) => createHash('sha256').update(value).digest('hex');
+  const write = (content: unknown) => writeFileSync(credentialsPath, typeof content === 'string' ? content : JSON.stringify(content));
+  write({ credentials: [{ clientId: 'Codex:gpt-6-astra:xhigh', tokenSha256: sha(agentToken) }] });
+  const f = storageFixture(); const port = await freePort();
+  const service = await serveLocalMcp(f.storage, { ...configuration(f.path, port), credentialsPath }); cleanups.push(() => service.stop());
+  const agent = await connect(port, agentToken); await agent.create();
+  expect((await agent.read()).structuredContent).toMatchObject({ revision: { author: { actorId: 'operator', clientId: 'Codex:gpt-6-astra:xhigh' } } });
+  const operator = await connect(port); await operator.apply(update, 1);
+  expect((await operator.read()).structuredContent).toMatchObject({ revision: { revision: 2, author } });
+  const agentSession = sessionHeaders(agent.transport.sessionId!);
+  expect((await raw(port, message(), { ...agentSession, Authorization: `Bearer ${token}` })).status).toBe(403);
+  expect((await raw(port, message(), { ...agentSession, Authorization: `Bearer ${otherToken}` })).status).toBe(401);
+  expect((await raw(port, message(), { ...agentSession, Authorization: `Bearer ${agentToken}` })).status).toBe(200);
+  write({ credentials: [] });
+  expect((await raw(port, message(), { ...agentSession, Authorization: `Bearer ${agentToken}` })).status).toBe(401);
+  for (const content of ['not json', { credentials: [{ clientId: 'Bad Id', tokenSha256: sha(agentToken) }] },
+    { credentials: [{ clientId: 'Codex', tokenSha256: sha(agentToken), extra: true }] }, { credentials: {} }]) {
+    write(content);
+    expect((await raw(port, message(), { Authorization: `Bearer ${agentToken}` })).status).toBe(401);
+  }
+  rmSync(credentialsPath);
+  expect((await raw(port, message(), { Authorization: `Bearer ${agentToken}` })).status).toBe(401);
+  expect((await raw(port, message(), sessionHeaders(operator.transport.sessionId!))).status).toBe(200);
+  expect(() => captureConfiguration({ ...configuration(f.path, port), credentialsPath: 'relative.json' })).toThrow();
 });
 
 test('P06: whole UTF-8 request 1 MiB inclusive, Content-Length and chunked excess refused with no publication', async () => {

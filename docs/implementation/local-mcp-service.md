@@ -20,8 +20,19 @@ The command reads operator environment configuration, never caller-selected path
 | `WAYFINDER_ACTOR_ID` | Valid M1 Actor ID, captured from operator configuration |
 | `WAYFINDER_CLIENT_ID` | Valid M1 Client ID, captured from operator configuration |
 | `WAYFINDER_ALLOWED_ORIGINS` | Optional JSON array, default `[]`; each entry must be an exact canonical HTTP/HTTPS origin with hostname `127.0.0.1` or `localhost`, no path/credentials/wildcard |
+| `WAYFINDER_CREDENTIALS_FILE` | Optional absolute path to an operator-written credentials file; see below |
 
 Explicit first-use initialization remains the separate `initializeSQLite(path)` API from `src/sqlite-storage.ts` (built `dist/sqlite-storage.js`), at a nonexistent fresh private target only. The service never initializes, repairs, migrates, resets or substitutes storage. Missing/wrong/unsupported storage and ordinary open failures produce safe `storage_not_ready` startup failure before listening. Invalid configuration produces `invalid_configuration`; bind/occupied-port failures produce `port_unavailable`. Exit is nonzero, with no private path, raw cause or token. An occupied port is never replaced with a random one.
+
+### Further credentials
+
+`WAYFINDER_TOKEN` authors as `WAYFINDER_CLIENT_ID`. An operator who runs several clients against one service, such as the dedicated Wayfinder agents and the ChatGPT test relay, gives each its own token in the credentials file so that each Revision records which one wrote it:
+
+```json
+{ "credentials": [ { "clientId": "Codex:gpt-6-astra:xhigh", "tokenSha256": "<64 lowercase hex: SHA-256 of the raw token>" } ] }
+```
+
+The service re-reads the file whenever a request presents a token other than `WAYFINDER_TOKEN`, so adding an entry admits that token on the next request and removing one revokes it there. A missing file, invalid JSON, an unknown field, an invalid Client ID or a malformed hash admits no file credential at all; `WAYFINDER_TOKEN` keeps working. The file holds only hashes; the launcher that writes it keeps it private (0600). A session authors with the Client ID of the credential that initialized it, and a later request in that session with any other credential is refused with 403. Authorship stays operator-configured as the [handoff](../spec/mcp-sqlite.md) section 6 requires; clients cannot name their own Client ID.
 
 Every MCP request must use `/mcp`, exact Host `127.0.0.1:<configured-port>` and `Authorization: Bearer <operator-token>`. Since the [read-only Map viewer](map-viewer.md), other paths with the exact Host go to that viewer before the token check. A valid token with absent Origin is allowed. A present Origin must exactly match the explicitly configured local allowlist; arbitrary websites, `null`, trailing paths and unlisted local origins are forbidden. There is no CORS wildcard or public listener. Authentication is checked for POST/GET/DELETE, not just initialization. Revision author/time fields remain server-derived and unknown/system fields are rejected by the unchanged M1/tool validation.
 
