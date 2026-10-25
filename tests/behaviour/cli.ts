@@ -1,9 +1,11 @@
-// node tests/behaviour/cli.ts <list|matrix|upgrade|validate>
+// node tests/behaviour/cli.ts <list|matrix|upgrade|validate|check <attempt.json>…>
 // Lists the library, its applicability matrix and the upgrade checks. Starts no service and no model.
 import { library } from './library.ts';
 import { cell } from './clients.ts';
+import { readFileSync } from 'node:fs';
+import { common } from './common.ts';
+import type { AttemptRecord, Entry, Harness } from './evidence.ts';
 import { itemsOf, readiness, validateScenario } from './scenario.ts';
-import type { Entry, Harness } from './evidence.ts';
 import { upgradeChecks } from './upgrade-checks.ts';
 
 const columns: [Harness, Entry][] = [['codex', 'mcp-only'], ['codex', 'dedicated'], ['claude', 'mcp-only'], ['claude', 'dedicated'],
@@ -42,6 +44,22 @@ function validate() {
   if (errors.length) process.exitCode = 1;
 }
 
-const commands: Record<string, () => void> = { list, matrix, upgrade, validate };
+/** Script items of an Attempt's Scenario against its record. Model and human items stay open until B03. */
+function check() {
+  for (const path of process.argv.slice(3)) {
+    const record = JSON.parse(readFileSync(path, 'utf8')) as AttemptRecord;
+    const s = library.find(x => x.id === record.subject.id);
+    console.log(`${record.attemptId}  ${record.run.completeness}${record.run.detail ? ` (${record.run.detail})` : ''}`);
+    if (!s) { console.log('  unknown Scenario'); continue; }
+    const kinds: [string, string[]][] = [['common', s.common], ['required', s.requiredEvents.map(i => i.id)], ['must-not', s.mustNot.map(i => i.id)]];
+    const kind = (id: string) => kinds.find(([, ids]) => ids.includes(id))?.[0] ?? 'expect';
+    for (const item of [...itemsOf(s), ...s.common.map(c => common[c])]) {
+      const result = item.judge === 'script' ? item.check(record) : { status: `${item.judge} review`, reason: '' };
+      console.log(`  ${kind(item.id).padEnd(8)} ${item.id.padEnd(30)} ${result.status.padEnd(12)} ${result.reason}`);
+    }
+  }
+}
+
+const commands: Record<string, () => void> = { list, matrix, upgrade, validate, check };
 const command = commands[process.argv[2] ?? 'list'];
-if (!command) { console.error('usage: node tests/behaviour/cli.ts <list|matrix|upgrade|validate>'); process.exitCode = 2; } else command();
+if (!command) { console.error('usage: node tests/behaviour/cli.ts <list|matrix|upgrade|validate|check <attempt.json>…>'); process.exitCode = 2; } else command();

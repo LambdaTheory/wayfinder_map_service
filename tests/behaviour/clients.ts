@@ -4,18 +4,21 @@ import { readiness } from './scenario.ts';
 import type { Capability, Scenario } from './scenario.ts';
 
 /**
- * What each client is expected to support. `onboarded` turns true only when its Driver has passed the five
- * onboarding checks of R2 (B02a for Codex, B06 for the others); until then no cell is shown as applicable.
+ * What each client supports. An Entry joins `onboarded` only when its Driver has passed the five onboarding checks
+ * of R2 (B02a for Codex MCP-only, B02d and B06 for the rest); until then no cell is shown as applicable. `true`
+ * means proven in a run, `false` known unsupported, `'unverified'` expected but not yet shown.
  */
-export const clientProfiles: Record<Harness, { onboarded: boolean; entries: Entry[]; supports: Partial<Record<Capability, boolean | 'unverified'>> }> = {
-  codex: { onboarded: false, entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': true, 'new-session': true, 'concurrent-sessions': true,
-    'workspace-files': true, commands: true, 'resource-read': true, 'sub-agents': 'unverified', 'async-questions': false } },
-  claude: { onboarded: false, entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': true, 'new-session': true, 'concurrent-sessions': true,
-    'workspace-files': true, commands: true, 'resource-read': true, 'sub-agents': 'unverified', 'async-questions': false } },
-  chatgpt: { onboarded: false, entries: ['chatgpt'], supports: { 'multi-turn': true, 'new-session': true, 'concurrent-sessions': 'unverified',
+export const clientProfiles: Record<Harness, { onboarded: Entry[]; entries: Entry[]; supports: Partial<Record<Capability, boolean | 'unverified'>> }> = {
+  // Batch B1-20261025 proved multi-turn resumption, but ran before the sandbox became an allowlist; onboarding
+  // waits for a run under the current profile (#65).
+  codex: { onboarded: [], entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': true, 'workspace-files': 'unverified', commands: 'unverified',
+    'new-session': 'unverified', 'concurrent-sessions': 'unverified', 'resource-read': 'unverified', 'sub-agents': 'unverified', 'async-questions': false } },
+  claude: { onboarded: [], entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': 'unverified', 'new-session': 'unverified', 'concurrent-sessions': 'unverified',
+    'workspace-files': 'unverified', commands: 'unverified', 'resource-read': 'unverified', 'sub-agents': 'unverified', 'async-questions': false } },
+  chatgpt: { onboarded: [], entries: ['chatgpt'], supports: { 'multi-turn': 'unverified', 'new-session': 'unverified', 'concurrent-sessions': 'unverified',
     'workspace-files': false, commands: false, 'resource-read': false, 'sub-agents': false, 'async-questions': false } },
-  pi: { onboarded: false, entries: ['mcp-only'], supports: {} },
-  grok: { onboarded: false, entries: ['mcp-only'], supports: {} },
+  pi: { onboarded: [], entries: ['mcp-only'], supports: {} },
+  grok: { onboarded: [], entries: ['mcp-only'], supports: {} },
 };
 
 export type Cell = { state: 'applicable' } | { state: 'not-applicable' | 'unverified' | 'not-ready'; reasons: string[] };
@@ -29,7 +32,7 @@ export function cell(s: Scenario, harness: Harness, entry: Entry): Cell {
   const unverified = s.applies.needs.filter(need => profile.supports[need] !== true);
   const notReady = readiness(s);
   if (notReady.length) return { state: 'not-ready', reasons: notReady };
-  if (!profile.onboarded) return { state: 'unverified', reasons: [...unverified, 'driver not onboarded'] };
+  if (!profile.onboarded.includes(entry)) return { state: 'unverified', reasons: [...unverified, 'driver not onboarded'] };
   if (unverified.length) return { state: 'unverified', reasons: unverified };
   return { state: 'applicable' };
 }
