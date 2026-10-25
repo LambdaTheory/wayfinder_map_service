@@ -108,7 +108,7 @@ export type SettleCommand = {
 export type Command = { readonly kind: 'map.update'; readonly patch: MapPatch }
   | SettleCommand
   | { readonly kind: 'ticket.reopen'; readonly ticketId: TicketId; readonly reason: string }
-  | (({ readonly kind: 'claim.acquire' } | { readonly kind: 'claim.release' }) & {
+  | (({ readonly kind: 'claim.acquire' } | { readonly kind: 'claim.release'; readonly reason?: string }) & {
     readonly ticketId: TicketId; readonly claimantId: ClaimantId;
   })
   | { readonly kind: 'claim.clear'; readonly ticketId: TicketId; readonly expectedClaimantId: ClaimantId; readonly reason: string }

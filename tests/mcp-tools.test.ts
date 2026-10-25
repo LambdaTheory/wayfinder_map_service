@@ -105,7 +105,20 @@ test('P01/P02: SDK discovers exactly four complete schemas, once-only compact/de
   }
 });
 
-test('W01/W02: initialization, generated tool guidance, Resources and side-effect-free Prompt expose workflow 2.1.0', async () => {
+test('W02: the map_apply description names every command and field its input schema accepts', () => {
+  // Some clients do not pass nested oneOf schemas to the model, so the description must stand alone.
+  const tool = mapTools.find(candidate => candidate.name === 'map_apply')!;
+  const commands = (tool.inputSchema.properties as { commands: { items: { oneOf: { properties: Record<string, { const?: string }> }[] } } })
+    .commands.items.oneOf;
+  const description = workflowContract.toolDescriptions.map_apply;
+  for (const command of commands) {
+    const { kind, ...fields } = command.properties;
+    expect(description).toContain(kind!.const!.replace('ticket.settle', '"kind":"ticket.settle"'));
+    for (const field of Object.keys(fields)) expect(description).toContain(field);
+  }
+});
+
+test('W01/W02: initialization, generated tool guidance, Resources and side-effect-free Prompt expose workflow 2.2.0', async () => {
   const f = await fixture();
   expect(f.client.getInstructions()).toBe(workflowContract.instructions);
   expect(f.client.getInstructions()!.startsWith(workflowContract.safetyCore)).toBe(true);
@@ -118,27 +131,27 @@ test('W01/W02: initialization, generated tool guidance, Resources and side-effec
 
   const listed = await f.client.listResources();
   expect(listed.resources.map(resource => resource.uri)).toEqual([
-    'wayfinder://workflow/exploration', 'wayfinder://workflow/exploration/2.1.0',
+    'wayfinder://workflow/exploration', 'wayfinder://workflow/exploration/2.2.0',
   ]);
   for (const resource of listed.resources) {
-    expect(resource).toMatchObject({ mimeType: 'text/markdown', _meta: { 'wayfinder/workflowVersion': '2.1.0' } });
+    expect(resource).toMatchObject({ mimeType: 'text/markdown', _meta: { 'wayfinder/workflowVersion': '2.2.0' } });
     expect(await f.client.readResource({ uri: resource.uri })).toEqual({ contents: [{ uri: resource.uri,
       mimeType: 'text/markdown', text: readFileSync('docs/agents/exploration-mcp.md', 'utf8'),
-      _meta: { 'wayfinder/workflowVersion': '2.1.0' } }] });
+      _meta: { 'wayfinder/workflowVersion': '2.2.0' } }] });
   }
 
   expect(await f.client.listPrompts()).toEqual({ prompts: [{ name: 'start_wayfinder_exploration',
-    description: 'Start or resume Wayfinder workflow 2.1.0', arguments: [
+    description: 'Start or resume Wayfinder workflow 2.2.0', arguments: [
       { name: 'mode', description: 'create or resume', required: true },
       { name: 'mapId', description: 'Optional stable Map ID', required: false },
-    ], _meta: { 'wayfinder/workflowVersion': '2.1.0' } }] });
+    ], _meta: { 'wayfinder/workflowVersion': '2.2.0' } }] });
   const before = await f.storage.listMaps({});
   for (const arguments_ of [{ mode: 'create' }, { mode: 'resume', mapId: 'Stable.Map' }]) {
     const result = await f.client.getPrompt({ name: 'start_wayfinder_exploration', arguments: arguments_ });
     expect(result.messages).toHaveLength(1);
     expect(result.messages[0]).toMatchObject({ role: 'user', content: { type: 'text' } });
     expect((result.messages[0]!.content as { text: string }).text).toContain(`Mode: ${arguments_.mode}`);
-    expect((result.messages[0]!.content as { text: string }).text).toContain('workflowVersion: 2.1.0');
+    expect((result.messages[0]!.content as { text: string }).text).toContain('workflowVersion: 2.2.0');
   }
   expect(await f.storage.listMaps({})).toEqual(before);
   await expect(f.client.getPrompt({ name: 'start_wayfinder_exploration', arguments: { mode: 'invalid' } })).rejects.toThrow();
