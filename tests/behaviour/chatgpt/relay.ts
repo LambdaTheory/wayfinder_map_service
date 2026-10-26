@@ -56,7 +56,7 @@ export async function startRelay(servicePort: number, token: string, observe: (e
         || (p.arguments !== undefined && (!p.arguments || typeof p.arguments !== 'object' || Array.isArray(p.arguments)))) { respond(outgoing, 400); return; }
     }
     // Out-of-turn operations cannot mutate or leak Scenario state into another chat.
-    if (!state.active && !['initialize', 'notifications/initialized', 'tools/list', 'ping', 'resources/list', 'prompts/list', undefined].includes(rpc.method as string | undefined)) {
+    if (!state.active && !['initialize', 'notifications/initialized', 'tools/list', 'ping', 'resources/list', 'resources/templates/list', 'prompts/list', undefined].includes(rpc.method as string | undefined)) {
       outgoing.writeHead(503).end(); return;
     }
     state.inFlight++;

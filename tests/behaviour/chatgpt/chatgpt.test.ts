@@ -563,6 +563,66 @@ for (const variant of ['matched', 'no-list', 'no-reference', 'different-version'
     } finally { await client?.close(); await other?.close(); await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }
   }, 30_000);
 
+test('out-of-turn discovery reaches the service and wire while Map access stays refused in the fake-tunnel CLI', async () => {
+  const f = await cliFixture();
+  let client: Awaited<ReturnType<typeof createHttpTestClient>>['client'] | undefined;
+  try {
+    const connection = await createHttpTestClient(f.port, 'ignored-relay-token');
+    client = connection.client;
+    const sessionId = connection.transport.sessionId!;
+    const url = `http://127.0.0.1:${f.port}/mcp`;
+    const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream',
+      'mcp-session-id': sessionId, 'mcp-protocol-version': connection.negotiatedProtocol! };
+    const wire = (): Exchange[] => JSON.parse(readFileSync(join(f.batchDir, 'F11-1/raw/wire.json'), 'utf8'));
+    let id = 100;
+    const post = (method: string, params = {}) => fetch(url, { method: 'POST', headers,
+      body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }) });
+    for (const method of ['tools/list', 'resources/list', 'resources/templates/list', 'prompts/list', 'ping']) {
+      const response = await post(method);
+      assert.equal(response.status, 200, method);
+      const body = await response.json();
+      assert.equal(body.id, id);
+      if (method === 'resources/templates/list') {
+        // The current service has no template handler; preserve its protocol error, not a relay 503.
+        assert.deepEqual(body.error, { code: -32601, message: 'Protocol request failed' });
+      } else assert.ok(body.result, method);
+      const exchange = wire().at(-1)!;
+      assert.equal(exchange.httpMethod, 'POST'); assert.equal(exchange.request.method, method);
+      assert.equal(exchange.request.id, id); assert.equal(exchange.status, 200);
+      assert.equal(exchange.sessionId, sessionId); assert.deepEqual(exchange.response, body);
+    }
+    const discovery = wire();
+    assert.deepEqual(discovery.map(e => [e.httpMethod, e.request.method, e.status]), [
+      ['POST', 'initialize', 200], ['POST', 'notifications/initialized', 202],
+      ...['tools/list', 'resources/list', 'resources/templates/list', 'prompts/list', 'ping'].map(method => ['POST', method, 200]),
+    ]);
+    for (const request of [
+      { method: 'tools/call', params: { name: 'map_list', arguments: {} } },
+      { method: 'tools/call', params: { name: 'map_apply', arguments: {} } },
+      { method: 'resources/read', params: { uri: 'wayfinder://workflow/exploration' } },
+      { method: 'prompts/get', params: { name: 'start_wayfinder_exploration', arguments: { mode: 'create' } } },
+    ]) {
+      const response = await post(request.method, request.params);
+      assert.equal(response.status, 503, request.method);
+      await response.text();
+    }
+    assert.deepEqual(wire(), discovery); // Refused requests were never forwarded or recorded as service results.
+    const deleted = await fetch(url, { method: 'DELETE', headers });
+    assert.equal(deleted.status, 200); await deleted.text();
+    const exchange = wire().at(-1)!;
+    assert.equal(exchange.httpMethod, 'DELETE'); assert.deepEqual(exchange.request, {});
+    assert.equal(exchange.status, 200); assert.equal(exchange.sessionId, sessionId);
+    const afterDelete = await post('ping');
+    assert.equal(afterDelete.status, 404); await afterDelete.text();
+    await client.close(); client = undefined;
+    f.child.stdin.end(); await f.exited;
+    assert.equal(f.child.exitCode, 0, f.output());
+    const record = JSON.parse(readFileSync(join(f.batchDir, 'F11-1/attempt.json'), 'utf8'));
+    assert.deepEqual(record.sessions[0].turns, []);
+    assert.equal(record.events.some((e: { kind: string }) => e.kind === 'tool-call' || e.kind === 'resource-read'), false);
+  } finally { await client?.close(); await f.cleanup(); }
+}, 30_000);
+
 test('a session DELETE cannot fabricate a JSON-RPC tool call', async () => {
   const root = fresh(); const a = await ChatGPTAttempt.start(attemptOptions(root, 'F11'));
   const { client, transport } = await createHttpTestClient(a.relay.port, 'ignored');
