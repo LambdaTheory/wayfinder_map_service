@@ -1,15 +1,19 @@
 // Manual B09b controller. Starts only its own service; prints a launcher for an approved operator to run.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, existsSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, existsSync, symlinkSync, copyFileSync, chmodSync, lstatSync, utimesSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { attemptSchema, completeness } from '../evidence.ts';
 import type { AttemptRecord, Completeness } from '../evidence.ts';
-import { sandboxProfile } from '../runner/codex.ts';
+import { prepareClient, prepareSandbox, prepareWorkdir, verifyProfile, writeProfile } from '../runner/codex.ts';
+import type { ControlProfile } from '../runner/codex.ts';
+import { readManifest, sha256 } from './launch.ts';
+import type { LaunchManifest } from './launch.ts';
+import { startRoute } from '../runner/relay.ts';
 import { connectController } from '../runner/controller.ts';
-import { checkoutRoot, newToken, reservedPorts, startService } from '../runner/service.ts';
+import { checkoutRoot, newToken, startService } from '../runner/service.ts';
 import { W1, W7 } from '../scenarios/pace.ts';
 import { isolationSnapshot, isolationMeasurements, openDatabases } from './isolation.ts';
 import type { IsolationSnapshot } from './isolation.ts';
@@ -23,32 +27,52 @@ const json = (file: string, value: unknown) => writeFileSync(file, JSON.stringif
 export const cacheRoot = () => join(homedir(), 'Library/Caches/wayfinder-behaviour-tests');
 
 export interface LaunchOptions {
-  scratch: string; client: InteractiveClient; bin: string; port: number; token: string; model: string; effort: string;
+  scratch: string; client: InteractiveClient; bin: string; port: number; model: string; effort: string;
   subscriptionHome: string; proxyEnv?: Record<string, string>;
 }
-/** Subscription only. Authentication and proxy source paths must be explicit, including in tests. */
-export function launcher({ scratch, client, bin, port, token, model, effort, subscriptionHome, proxyEnv = {} }: LaunchOptions): string {
-  const home = join(scratch, 'home'); const work = join(scratch, 'work');
-  for (const dir of [home, work, join(home, '.codex'), join(home, '.claude'), join(home, 'tmp')]) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const profile = join(scratch, 'sandbox.sb');
-  const authFile = join(subscriptionHome, '.codex/auth.json');
-  if (client === 'codex') symlinkSync(authFile, join(home, '.codex/auth.json'));
-  const authRead = client === 'codex' ? `(allow file-read* (literal ${JSON.stringify(authFile)}))\n` : '';
-  writeFileSync(profile, sandboxProfile(scratch, reservedPorts, dirname(realpathSync(bin))) + authRead, { mode: 0o600 });
-  const url = `http://127.0.0.1:${port}/mcp`;
-  json(join(scratch, 'mcp.json'), { mcpServers: { wayfinder: { type: 'http', url, headers: { Authorization: `Bearer ${token}` } } } });
-  const args = client === 'codex'
-    ? ['--no-daemon', '--dangerously-bypass-approvals-and-sandbox', '--disable', 'apps', '-m', model, '-c', `model_reasoning_effort=${JSON.stringify(effort)}`,
-      '-c', 'check_for_update_on_startup=false', '-c', `mcp_servers.wayfinder.url=${JSON.stringify(url)}`,
-      '-c', 'mcp_servers.wayfinder.bearer_token_env_var="WAYFINDER_TOKEN"', '-c', 'mcp_servers.wayfinder.required=true', '-c', 'mcp_servers.wayfinder.default_tools_approval_mode="approve"']
-    : ['--dangerously-skip-permissions', '--model', model, '--effort', effort, '--strict-mcp-config', '--mcp-config', join(scratch, 'mcp.json'), '--setting-sources', ''];
-  const env = ['PATH=' + (process.env.PATH ?? '/usr/bin:/bin'), 'HOME=' + home, 'TMPDIR=' + join(home, 'tmp'),
-    'CODEX_HOME=' + join(home, '.codex'), 'CLAUDE_CONFIG_DIR=' + join(home, '.claude'), 'LANG=en_US.UTF-8', 'TERM=xterm-256color',
-    'WAYFINDER_TOKEN=' + token, 'DISABLE_AUTOUPDATER=1', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY=1'];
-  if (client === 'claude') for (const key of proxyVariables) if (proxyEnv[key] !== undefined) env.push(`${key}=${proxyEnv[key]}`);
-  // The subscription token is inherited at execution; private proxy settings remain only in this scratch script.
-  const auth = client === 'codex' ? '' : 'CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:?Kun must approve claude setup-token first}"';
-  return `#!/bin/sh\nset -eu\nunset CODEX_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY\ncd ${q(work)}\nexec env -i ${env.map(q).join(' ')} ${auth} /usr/bin/sandbox-exec -f ${q(profile)} ${[bin, ...args].map(q).join(' ')}\n`;
+export interface PreparedLauncher {
+  command: string; controlDir: string; manifestPath: string; manifestHash: string; profile: ControlProfile;
+}
+/** Prepare controls, never a model call. port is a credential-injecting relay, not the service itself. */
+export function launcher({ scratch, client, bin, port, model, effort, subscriptionHome, proxyEnv = {} }: LaunchOptions): PreparedLauncher {
+  scratch = realpathSync(scratch);
+  const { controlDir, readOnlyDir } = prepareSandbox(scratch);
+  try {
+    const home = join(scratch, 'home');
+    mkdirSync(home, { mode: 0o700 }); // Exclusive: never adopt an existing client HOME.
+    for (const dir of ['.codex', '.claude', 'tmp']) mkdirSync(join(home, dir), { mode: 0o700 });
+    const work = prepareWorkdir(scratch, [], scratch);
+    const mutable: string[] = [];
+    if (client === 'codex') {
+      const source = join(subscriptionHome, '.codex/auth.json');
+      const stat = lstatSync(source);
+      if (!stat.isFile() || stat.nlink !== 1) throw new Error('Subscription login must be a regular single-link file');
+      const loginDir = join(readOnlyDir, 'login'); mkdirSync(loginDir, { mode: 0o700 });
+      const copy = join(loginDir, 'auth.json'); copyFileSync(source, copy); chmodSync(copy, 0o600); utimesSync(copy, stat.atime, stat.mtime);
+      symlinkSync(copy, join(home, '.codex/auth.json')); mutable.push(copy);
+    }
+    const configuration = join(readOnlyDir, 'mcp'); mkdirSync(configuration, { mode: 0o700 });
+    const mcp = join(configuration, 'mcp.json');
+    const url = `http://127.0.0.1:${port}/mcp`;
+    json(mcp, { mcpServers: { wayfinder: { type: 'http', url } } });
+    const args = client === 'codex'
+      ? ['--no-daemon', '--dangerously-bypass-approvals-and-sandbox', '--disable', 'apps', '-m', model, '-c', `model_reasoning_effort=${JSON.stringify(effort)}`,
+        '-c', 'check_for_update_on_startup=false', '-c', `mcp_servers.wayfinder.url=${JSON.stringify(url)}`,
+        '-c', 'mcp_servers.wayfinder.required=true', '-c', 'mcp_servers.wayfinder.default_tools_approval_mode="approve"']
+      : ['--dangerously-skip-permissions', '--model', model, '--effort', effort, '--strict-mcp-config', '--mcp-config', mcp, '--setting-sources', ''];
+    const env: Record<string, string> = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, TMPDIR: join(home, 'tmp'),
+      CODEX_HOME: join(home, '.codex'), CLAUDE_CONFIG_DIR: join(home, '.claude'), LANG: 'en_US.UTF-8', TERM: 'xterm-256color',
+      DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' };
+    if (client === 'claude') for (const key of proxyVariables) if (proxyEnv[key] !== undefined) env[key] = proxyEnv[key]!;
+    const executable = prepareClient(controlDir, bin);
+    const profile = writeProfile(controlDir, { home }, work, executable, { readOnlyRoots: [configuration], mutableReadOnlyFiles: mutable, localPorts: [port] });
+    const manifest: LaunchManifest = { client, bin: executable, args, workdir: work, env, profile };
+    const manifestPath = join(controlDir, 'launch.json'); const text = JSON.stringify(manifest);
+    writeFileSync(manifestPath, text, { mode: 0o600, flag: 'wx' });
+    const manifestHash = sha256(text);
+    const command = [process.execPath, fileURLToPath(new URL('./launch.ts', import.meta.url)), manifestPath, manifestHash].map(q).join(' ');
+    return { command, controlDir, manifestPath, manifestHash, profile };
+  } catch (error) { rmSync(controlDir, { recursive: true, force: true }); throw error; }
 }
 
 export async function host(args: string[], options: { subscriptionHome: string; observe?: (paths: string[]) => IsolationSnapshot; inheritedEnv?: NodeJS.ProcessEnv }) {
@@ -64,6 +88,9 @@ export async function host(args: string[], options: { subscriptionHome: string; 
   if (existsSync(dir)) throw new Error('Attempt directory already exists; refusing to reuse it');
   mkdirSync(dir, { mode: 0o700 });
   let scratch: string | undefined;
+  let prepared: PreparedLauncher | undefined;
+  let route: Awaited<ReturnType<typeof startRoute>> | undefined;
+  const relay: unknown[] = [];
   const raw = join(dir, 'raw'); mkdirSync(raw, { mode: 0o700 });
   const controllerCredential = { clientId: `${attempt}-controller`, token: newToken() };
   const agent = { clientId: `${attempt}-${client}-A`, token: newToken() };
@@ -112,11 +139,10 @@ export async function host(args: string[], options: { subscriptionHome: string; 
     writePrivate(join(dir, 'seed.json'), await controller.exportCatalog(), secrets);
     writePrivate(join(dir, 'controller-rules.json'), { instructions: controller.instructions, toolDescriptions: controller.toolDescriptions,
       note: 'Observed by the Controller only; this does not claim the client saw them.' }, secrets);
-    const launchPath = join(scratch, 'launch.sh');
-    writeFileSync(launchPath, launcher({ scratch, client, bin, port: service.port, token: agent.token, model, effort,
-      subscriptionHome: options.subscriptionHome, proxyEnv }), { mode: 0o700 });
+    route = await startRoute(service.port, agent.token, event => relay.push(event));
+    prepared = launcher({ scratch, client, bin, port: route.port, model, effort, subscriptionHome: options.subscriptionHome, proxyEnv });
     launchExposed = true;
-    console.log(`Private Attempt: ${dir}\nClient command (approved Batch only): ${q(launchPath)}\nOpening line: ${scenario.turns[0]!.say}\nStop the client before finishing here. The host has a 60-minute ceiling.`);
+    console.log(`Private Attempt: ${dir}\nClient command (approved Batch only): ${prepared.command}\nOpening line: ${scenario.turns[0]!.say}\nStop the client before finishing here. The host has a 60-minute ceiling.`);
     capture.run.completeness = 'cancelled';
     const status = await readline.question('Client exited; enter complete, precondition-not-met, launch-failed, timeout, rate-limited, cancelled, driver-failed, or service-failed: ', { signal: abort.signal });
     if (!completeness.includes(status as Completeness)) throw new Error('unrecognized capture outcome');
@@ -136,6 +162,8 @@ export async function host(args: string[], options: { subscriptionHome: string; 
     try {
       // Only our scratch is traversed. No daily sessions, auth files, settings or unrelated conversations.
       const nativeRoot = scratch ? join(scratch, 'home', client === 'codex' ? '.codex/sessions' : '.claude/projects') : null;
+      if (nativeRoot && existsSync(nativeRoot) && (!lstatSync(nativeRoot).isDirectory()
+        || !realpathSync(nativeRoot).startsWith(realpathSync(join(scratch!, 'home')) + '/'))) throw new Error('native log root escaped the client HOME');
       const visit = (path: string) => {
         if (!existsSync(path)) return;
         for (const entry of readdirSync(path, { withFileTypes: true })) {
@@ -150,12 +178,31 @@ export async function host(args: string[], options: { subscriptionHome: string; 
       };
       if (nativeRoot) visit(nativeRoot);
     } catch { capture.missing.push('events'); if (capture.run.completeness === 'complete') capture.run.completeness = 'driver-failed'; }
-    try { await controller?.close(); } finally {
+    try { await route?.close(); await controller?.close(); } finally {
       const stopped = await service?.stop();
-      try { after = observe([dir, ...(scratch ? [scratch] : [])]); } catch { after = unavailable(); }
+      writePrivate(join(raw, 'relay.json'), relay, secrets);
+      try { after = observe([dir, ...(scratch ? [scratch] : []), ...(prepared ? [prepared.controlDir] : [])]); } catch { after = unavailable(); }
       if (service) {
         writePrivate(join(raw, 'service.log'), service.logs(), secrets);
         if (existsSync(service.protocolReport)) writePrivate(service.protocolReport, readFileSync(service.protocolReport, 'utf8'), secrets);
+      }
+      let controlIntegrity: Field<boolean> = absent('launcher was not prepared');
+      const controlFailures: string[] = [];
+      let launchFailed = false;
+      if (prepared) {
+        try {
+          readManifest(prepared.manifestPath, prepared.manifestHash);
+          const failure = verifyProfile(prepared.profile); if (failure) controlFailures.push(failure);
+          const log = join(prepared.controlDir, 'launch.jsonl');
+          if (existsSync(log)) for (const line of readFileSync(log, 'utf8').trim().split('\n')) {
+            const entry = JSON.parse(line) as { isolationFailure?: string; launchFailure?: string; phase?: string; code?: number | null };
+            if (entry.launchFailure || (entry.phase === 'exited' && entry.code !== 0)) launchFailed = true;
+            if (entry.isolationFailure) controlFailures.push(entry.isolationFailure);
+          }
+          controlIntegrity = { known: true, value: controlFailures.length === 0 };
+        } catch { controlFailures.push('launcher control files missing or changed'); controlIntegrity = { known: true, value: false }; }
+        if (launchFailed && capture.run.completeness === 'complete') { capture.run.completeness = 'driver-failed'; capture.run.detail = 'Interactive client launch or exit failed'; }
+        if (controlFailures.length) { capture.run.completeness = 'driver-failed'; capture.run.detail = 'Interactive launcher isolation check failed'; }
       }
       let loginSync: unknown = { status: 'not-applicable' };
       let syncFailed = false;
@@ -169,17 +216,19 @@ export async function host(args: string[], options: { subscriptionHome: string; 
           loginSync = { status: 'failed', retainedScratch: scratch };
         }
       }
-      if (scratch && !syncFailed && !pendingClient) rmSync(scratch, { recursive: true, force: true });
+      if (scratch && !syncFailed && !pendingClient) { rmSync(scratch, { recursive: true, force: true }); if (prepared) rmSync(prepared.controlDir, { recursive: true, force: true }); }
       rmSync(join(dir, 'credentials.json'), { force: true });
       capture.run.endedAt = new Date().toISOString();
       if (!capture.maps.length) capture.missing.push('maps');
       if (!capture.raw.files.length) capture.missing.push('events');
       writePrivate(join(dir, 'capture.json'), capture, secrets);
       writePrivate(join(dir, 'isolation.json'), { serviceStopped: stopped ? { known: true, value: stopped } : { known: false, reason: 'service never started' },
-        codexLoginSync: loginSync,
+        codexLoginSync: loginSync, controlIntegrity, controlFailures,
+        controlDirectoryRemoved: prepared ? !existsSync(prepared.controlDir) : null,
+        ...(prepared && existsSync(prepared.controlDir) ? { retainedControlDirectory: prepared.controlDir } : {}),
         scratchRemoved: scratch ? !existsSync(scratch) : null, credentialsRemoved: !existsSync(join(dir, 'credentials.json')),
         port: service?.port, database: service?.databasePath, measurements: isolationMeasurements(before, after, opened, service?.databasePath),
-        clientExit: { known: false, reason: clientExitAttested ? 'manually launched client exit is operator-attested, not measured' : 'client exit not attested; exposed scratch retained' } }, secrets);
+        clientExit: { known: false, reason: clientExitAttested ? 'operator attests exit; wrapper status cannot prove all client descendants exited' : 'client exit not attested; exposed scratch retained' } }, secrets);
       if (syncFailed) throw new Error(capture.run.detail);
     }
   }

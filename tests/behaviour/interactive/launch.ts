@@ -1,0 +1,71 @@
+// Trusted outer launcher. The operator's command pins the manifest before any launch data is read.
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { appendFileSync, lstatSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import type { Writable } from 'node:stream';
+import { IsolationError, verifyProfile } from '../runner/codex.ts';
+import type { ControlProfile } from '../runner/codex.ts';
+import type { InteractiveClient } from './native.ts';
+
+export interface LaunchManifest {
+  client: InteractiveClient;
+  bin: string;
+  args: string[];
+  workdir: string;
+  env: Record<string, string>;
+  profile: ControlProfile;
+}
+export const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
+export function readManifest(path: string, expected: string): LaunchManifest {
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.nlink !== 1) throw new IsolationError('launcher manifest is not a regular single-link file');
+  const text = readFileSync(path, 'utf8');
+  if (sha256(text) !== expected) throw new IsolationError('launcher manifest changed');
+  return JSON.parse(text) as LaunchManifest;
+}
+
+export async function launch(path: string, expected: string, inherited: NodeJS.ProcessEnv = process.env): Promise<number> {
+  const record = (value: object) => appendFileSync(join(dirname(path), 'launch.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...value }) + '\n', { mode: 0o600 });
+  let launched = false;
+  try {
+    const manifest = readManifest(path, expected);
+    const failure = verifyProfile(manifest.profile);
+    if (failure) throw new IsolationError(failure);
+    // The operator supplies the setup-token result only to this trusted outer process. The client gets
+    // a pipe descriptor, never token bytes in argv/environment or a copied keychain/login format.
+    const oauth = manifest.client === 'claude' ? inherited.CLAUDE_CODE_OAUTH_TOKEN : undefined;
+    if (manifest.client === 'claude' && !oauth) throw new Error('Kun must approve claude setup-token and supply its subscription token before launch');
+    const env = { ...manifest.env, ...(oauth ? { CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: '3' } : {}) };
+    const child = spawn('/usr/bin/sandbox-exec', ['-f', manifest.profile.path, manifest.bin, ...manifest.args], {
+      cwd: manifest.workdir, env, stdio: oauth ? ['inherit', 'inherit', 'inherit', 'pipe'] : 'inherit',
+    });
+    const interrupt = () => { /* The foreground group delivers SIGINT to the interactive client too. */ };
+    const terminate = () => child.kill('SIGTERM');
+    process.on('SIGINT', interrupt); process.on('SIGTERM', terminate);
+    try {
+      const exit = await new Promise<{ code: number | null; signal: string | null }>((accept, reject) => {
+        child.once('error', reject);
+        child.once('spawn', () => {
+          launched = true; record({ phase: 'started', launched: true });
+          if (oauth) {
+            const pipe = child.stdio[3] as Writable;
+            pipe.on('error', () => { /* Early client exit closes its descriptor; the exit result remains authoritative. */ });
+            pipe.end(oauth);
+          }
+        });
+        child.once('exit', (code, signal) => accept({ code, signal }));
+      });
+      const failure = verifyProfile(manifest.profile);
+      record({ phase: 'exited', launched, ...exit, ...(failure ? { isolationFailure: failure } : {}) });
+      return failure ? 1 : exit.code ?? 1;
+    } finally { process.off('SIGINT', interrupt); process.off('SIGTERM', terminate); }
+  } catch (error) {
+    record({ phase: 'refused', launched, ...(error instanceof IsolationError ? { isolationFailure: error.message } : { launchFailure: 'client launch failed' }) });
+    throw error;
+  }
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  launch(process.argv[2]!, process.argv[3]!).then(code => { process.exitCode = code; }, error => { console.error(String(error)); process.exitCode = 1; });
+}
