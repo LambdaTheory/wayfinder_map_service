@@ -20,6 +20,42 @@ _Avoid_: Answer, conclusion, resolution
 A bounded piece of work that begins unresolved and, once worked, retains its accepted settlement as part of the map.
 _Avoid_: Issue, task, card
 
+**Answer Desk**:
+The place within a Map where a human considers posted questions and gives answers for an agent to work through.
+_Avoid_: Chat, workbench, approval board
+
+**Desk Question**:
+A versioned request on a Decision Ticket that presents options, a recommendation and the reason human judgment is needed.
+_Avoid_: Ticket question, questionnaire, message
+
+**Question Version**:
+The identity of one published formulation of a Desk Question, to which a human's answer applies.
+_Avoid_: Revision, Release Version, latest question
+
+**Desk Answer**:
+A human's response to a particular Question Version, retained separately from the Ticket's accepted Settlement.
+_Avoid_: Decision, Settlement, agent recommendation
+
+**Quiet Window**:
+The interval after the human's most recent answer on a Map during which answers remain open to revision before being released to an agent.
+_Avoid_: Approval deadline, answer expiry
+
+**Taken**:
+The Desk Question state indicating that an answer has been released to an agent for processing but has not yet become a Settlement.
+_Avoid_: Settled, approved, claimed
+
+**Reopen Request**:
+A human's request to change a settled answer, awaiting the agent's explicit reopening of the Decision Ticket.
+_Avoid_: Reopen, rollback, replacement Settlement
+
+**Unlock Count**:
+The number of Decision Tickets that would enter the Frontier immediately if a given Ticket settled.
+_Avoid_: Frontier size, downstream count, agent priority
+
+**Downstream Count**:
+The number of distinct unsettled Decision Tickets that depend directly or transitively on a given Ticket.
+_Avoid_: Unlock Count, path count, ready work
+
 **Dependency**:
 A prerequisite relationship in which one decision ticket must settle before another can enter the frontier.
 _Avoid_: Link, connection

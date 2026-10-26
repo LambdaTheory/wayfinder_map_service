@@ -8,6 +8,8 @@ Date: 2026-09-18. Planning Destination: a minimal client-neutral SQLite-backed M
 
 Use [GLOSSARY.md](../../GLOSSARY.md) for domain language, [M1](m1.md) for unchanged domain behavior and the [v1 contract](v1.md) for the wider product. This document consolidates the human-confirmed local slice, not completion of v1 or M2–M6.
 
+Sections 1–14 retain their original slice and acceptance boundaries. The proposed [Answer Desk follow-on in section 15](#15-answer-desk-follow-on-slice) amends the four-tool, protocol and viewer-write boundaries only after Kun confirms [#109](https://github.com/kun-g/wayfinder_map_service/issues/109) and the respective implementation is delivered; it is not a claim about the current service.
+
 | Source | Role |
 | --- | --- |
 | [Codex MCP and SQLite acceptance planning Map](https://github.com/kun-g/wayfinder_map_service/issues/27) | Destination and human-approved slice boundaries |
@@ -313,7 +315,9 @@ Shipped means `src/`, `web/`, `scripts/`, `package-lock.json` and `docs/agents/e
 
 Before 2026-10-25 only the workflow had a version, `workflowVersion`, while the server reported a fixed `0.1.0`. The workflow's initial test publication was `1.0.0`; `1.1.0` added complete-command guidance after real Codex exposed partial validation probing; `1.2.0` made nested Reference/Provenance/Evidence shapes explicit; `2.0.0` changed mandatory Conflict behavior after a real ChatGPT run reread a newer Revision but automatically resubmitted the stale intention: a Conflict now voids the rejected request and requires the client to report and stop until the human issues a new request after seeing the new Revision. Later steps through `3.0.0` are in `CHANGELOG.md`. Those numbers overlap the Release Version series; the names `workflowVersion` and `version` keep them apart.
 
-An upgrade is a process restart onto the new build; the service never swaps definitions inside a running session, so it declares no `listChanged` capability and offers no stream for change notifications. A restart ends every session: a request carrying an old `mcp-session-id` gets HTTP 404 and the client must initialize again, receiving the new instructions, tool list, Resource and Prompt. What a client then shows its model is the client's choice, and some keep the definitions they loaded first; the write `version` check (section 4) stops such a caller before it writes under old rules. Client behavior and recovery steps are in [Open conversations across an upgrade](../implementation/client-upgrade.md).
+An upgrade is a process restart onto the new build; the service never swaps definitions inside a running process, so it declares no `listChanged` capability and offers no stream for definition-change notifications. For sessionful clients (`2025-11-25` in the Answer Desk compatibility matrix), a restart ends every session: a request carrying an old `mcp-session-id` gets HTTP 404 and the client must initialize again, receiving the new instructions, tool list, Resource and Prompt. What a client then shows its model is the client's choice, and some keep the definitions they loaded first; the write `version` check (section 4) stops such a caller before it writes under old rules. Client behavior and recovery steps are in [Open conversations across an upgrade](../implementation/client-upgrade.md).
+
+The proposed SDK v2 slice also serves `2026-07-28` clients, which are sessionless: there is no `mcp-session-id` to invalidate, so restart cannot force them through the 404/reinitialize path. Their requests reach a fresh server instance without implying that the model rediscovered instructions or tools. [ADR 0005](../adr/0005-writes-attest-the-rules-version.md)'s `version` attestation remains the write guard in both eras; neither successful transport access nor a task handle attests the rules. Section 15 applies this guard to `map_wait` and the taking form of `map_read` as well. Process-lifetime workflow immutability applies to both eras, not just legacy sessions.
 
 The build extracts and validates the named blocks and emits an immutable asset into `dist`; generated runtime copies are not committed. The service must run from built artifacts without the repository source path and captures one workflow contract for the process lifetime. Workflow changes require rebuild and restart; there is no hot reload or list-changed promise. A new connection receives the new instructions, Resources must be reread, and ChatGPT plugin snapshots follow their own rescan/republication lifecycle.
 
@@ -349,3 +353,51 @@ Use one fresh private database and one shared acceptance Map. Do not install/inj
 One complete journey is sufficient; it naturally uses multiple independent sessions but need not be repeated solely for sampling. Retain native initialize protocol/instructions/capabilities and the version, client/server/runtime versions, session identities, tool parameters/results, database Revision/Frontier/Claim/Settlement/history comparisons, failed attempts and redaction checks. Agent prose or screenshots alone are not evidence.
 
 Publish a new implementation report and machine-readable evidence without rewriting `mcp-sqlite-acceptance.md`, `mcp-exploration-adoption.md` or their evidence. After all automated and real-client gates pass, the live user must explicitly accept the evidence. Only that verdict completes this follow-on slice and authorizes README/release claims of the accepted self-contained workflow version.
+
+## 15. Answer Desk follow-on slice
+
+Status: proposed under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109), pending Kun's specification confirmation. The [Answer Desk specification](answer-desk.md) owns the question/answer lifecycle, timing, ordering, fields, designer defaults and confirmation points. [ADR 0006](../adr/0006-answer-desk-in-the-map-viewer.md) explains the keyed viewer write and [ADR 0007](../adr/0007-map-wait-for-answer-delivery.md) explains the fifth tool. This section describes their MCP/SQLite consequences without rewriting the historical four-tool acceptance evidence above.
+
+### 15.1 Tools and workflow publication
+
+The target tool set is exactly `map_create`, `map_list`, `map_read`, `map_apply`, and `map_wait`. #110 first migrates the SDK while keeping the original four tools; #112 introduces the fifth and updates the build/protocol gates in sections 11 and 14. Backup remains a local maintenance command, not an additional MCP tool.
+
+- `map_create` and `map_list` retain their existing roles.
+- `map_apply` posts/withdraws Desk Questions under existing Claim and expectedRevision checks and settles Tickets with the required answer identity and Question Version in provenance; it never submits the human answer.
+- `map_read` exposes open questions, state and latest answers, plus Taken-but-unsettled answers for recovery. Designer default: optional `claimantId` requires `version` together with it; a current read with both releases eligible answers for ChatGPT without waiting. An ordinary read without them or any historical read never takes anything. This is a bounded extension of the old read-only contract, with Release Version attestation on taking.
+- `map_wait` is a task-capable or blocking delivery operation scoped by Map and Claimant, with explicit Release Version attestation. It does not settle a Ticket. Its locally sufficient description includes quiet-window timing, taking, timeout/cancellation, recovery and client use; do not depend on a Resource read for correct calls.
+
+Once-only structured results, exact committed Revision receipts, unchanged history, safe infrastructure errors and unknown-outcome recovery remain required. Extend schemas and tool annotations to match actual effects; a read that can take an answer must not still be advertised as universally side-effect-free. Every agent operation that can take answers attests the Release Version before taking; ordinary/history inspection remains ungated. Existing `map_apply` version and Settlement checks continue to protect publication.
+
+#114 changes the authored workflow and every governed tool description together, including all-askable posting, ordering/triage, the three client delivery paths and human-verdict safeguards. Its generated Resources, Prompt and instructions retain the one authored source and process-lifetime Release Version. This specification PR changes none of those shipped surfaces.
+
+### 15.2 SDK v2 and two protocol eras
+
+Migrate the pinned SDK v1 package to SDK v2's `@modelcontextprotocol/server` and `@modelcontextprotocol/node`, with exact installed versions recorded by #110. SDK v2 needs explicit modern-protocol configuration; installing it alone does not enable `2026-07-28` ([official migration guide](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/migration/support-2026-07-28.md)).
+
+| Contract | `2025-11-25` | `2026-07-28` |
+| --- | --- | --- |
+| Connection | `initialize`, sessionful Streamable HTTP | `server/discover`, per-request metadata and no MCP session |
+| Restart | Old `mcp-session-id` returns 404; client initializes again | No session header or restart-404 refresh path |
+| Answer wait | Ordinary blocking `map_wait`; the tested Codex client did not see task tools | Opted-in Tasks extension for Claude Code; ordinary calls still need a non-task result |
+| Workflow guard | Explicit write `version` | The same explicit write `version`; transport success does not refresh model context |
+
+Both eras share `/mcp`, operator-controlled credential identity, the process's immutable workflow, Map authority and existing Host/Origin protections. Preserve instructions, Resource and Prompt delivery in the appropriate era and record the actual capabilities each installed client exposes. Do not add STDIO/channel bridges, per-client databases, OAuth or automatic Claim expiry. A protocol session remains distinct from the logical Claimant.
+
+### 15.3 Tasks, storage and failure
+
+Requests opting into `io.modelcontextprotocol/tasks` may receive a task; callers without that opt-in receive the blocking result. Implement the extension's discovery capability, `tasks/get` and `tasks/cancel` in the service. The upstream [Tasks server implementation issue](https://github.com/modelcontextprotocol/ext-tasks/issues/30) remains open as checked on 2026-10-26; #112 identifies server-everything 2.0.1's `dist/server/tasks.js` as a reference. Do not assume that SDK v2 supplies a task store or transplant the deprecated `2025-11-25` experimental task API as the new extension.
+
+Questions, answers, supersession and delivery state are durable SQLite state beside their Decision Tickets. Preserve original Map history and typed Settlement behavior; exact table/command names and schema migration mechanics belong to implementation. Taking and Settlement validation must be atomic with respect to answer replacement; an earlier read is not sufficient proof that an answer is still current.
+
+**Designer default:** task storage must be shared across fresh per-request server instances, but may be process-wide memory. An unknown task ID after restart is an explicit error; the durable answers remain available to a new wait or recovery read. The design session clarified that this supersedes #112's original wording that task records themselves must be durable. Protocol task handles are not Map Revisions, Claims or Settlements.
+
+The Quiet Window and first-delivery boundary are specified in [Answer Desk §4](answer-desk.md#4-submission-release-and-settlement). Taken survives connection loss, timeout, cancellation and restart; only a human change or explicit Claim release/clear produces the specified return to Answered. No task completion, error, expiry or timer implicitly settles a Ticket. A response lost after durable taking has an unknown receipt and is recovered by authoritative reread, not automatic replay.
+
+**Designer default for admission/shutdown:** a suspended wait does not occupy the four ordinary tool-call slots, but the atomic release transaction does. Permit at most one suspended wait per `(mapId, claimantId)`; a newer wait supersedes the older one, which returns “superseded”. Stop admitting waits during shutdown; cancellation and stop return promptly without settling or returning Taken answers. The existing four-call and graceful-stop tests must be extended to prove that waiting does not deadlock the service.
+
+### 15.4 Verification and release boundary
+
+Keep all existing domain/storage/protocol gates and extend them for the five-tool target, both protocol eras, keyed browser writes, answer-version races, task delivery/cancellation/restart and Claimant-scoped release. Verify the client paths on isolated data: Claude task completion resumes an idle session, Codex's blocking call returns an answer or “none yet”, and ChatGPT receives released answers at turn start. The spikes in #108 are feasibility evidence only.
+
+The #109 document changes are not shipped files under section 14.3, so they keep `package.json`, `package-lock.json` and `CHANGELOG.md` unchanged. #110–#113 specify additive minor releases; #114 carries the mandatory workflow/tool-use change in one later major release and requires the approved ChatGPT run before merge. Evaluate the eventual implementation against section 14.3 if its compatibility differs from those intended slices. Kun's specification confirmation, model-Batch approval and live acceptance gates remain separate; this document supplies none of their verdicts.
