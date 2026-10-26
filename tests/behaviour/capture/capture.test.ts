@@ -2,8 +2,6 @@ import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import os from 'node:os';
-import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test, vi } from 'vitest';
@@ -19,6 +17,7 @@ import { F11 } from '../scenarios/safety.ts';
 import { connectController, historyCredentials } from '../runner/controller.ts';
 import { newToken, startService } from '../runner/service.ts';
 import { runAttempt } from '../runner/run.ts';
+import { syntheticClientState } from '../runner/test-state.ts';
 import { agentRevisions } from '../checks.ts';
 import type { AttemptRecord } from '../evidence.ts';
 import { captureInventory } from './inventory.ts';
@@ -575,9 +574,7 @@ test('a lost seed reply and failed reread retain setup failure but recover attri
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const out = mkdtempSync(join(root, 'capture-fallback-'));
   dirs.push(out);
-  // Keep even client-login discovery inside a synthetic home for this Attempt.
-  const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(directory());
-  syncBuiltinESMExports();
+  const clientState = syntheticClientState(directory());
   const realFetch = globalThis.fetch;
   let droppedReply = false;
   let failedReread = false;
@@ -599,7 +596,7 @@ test('a lost seed reply and failed reread retain setup failure but recover attri
   });
   try {
     const outcome = await runAttempt({ batchId: 'CaptureFallback', scenarios: [], count: 1, ceiling: 1, out,
-      scratchRoot: directory(), codex: { model: 'fake-model', effort: 'low', sandbox: false, timeoutMs: 10_000,
+      scratchRoot: directory(), ...clientState, codex: { model: 'fake-model', effort: 'low', sandbox: false, timeoutMs: 10_000,
         bin: fileURLToPath(new URL('../runner/fake-codex.mjs', import.meta.url)) } },
     { attemptId: 'LostReply-1', scenario: capture.scenario }, () => false, () => undefined);
     expect(droppedReply).toBe(true);
@@ -615,8 +612,10 @@ test('a lost seed reply and failed reread retain setup failure but recover attri
     expect(record.sessions.every(s => !s.turns.length && !s.nativeId.known)).toBe(true);
     expect(record.missing).not.toContain('maps');
     expect(agentRevisions(record)).toEqual([]);
+    expect(record.events.some(e => e.kind === 'tool-call' && e.actor === 'controller' && e.tool === 'map_apply' && e.failed)).toBe(true);
+    expect(record.events.some(e => e.actor === 'agent')).toBe(false);
     expect(record.isolation.attribution).toEqual({ agentRevisions: 0, committedReceipts: 0, mismatched: [], unplaced: [] });
-  } finally { fetchSpy.mockRestore(); homeSpy.mockRestore(); syncBuiltinESMExports(); }
+  } finally { fetchSpy.mockRestore(); }
 }, 30_000);
 
 test('README describes history support instead of refusing B04 seeds', () => {

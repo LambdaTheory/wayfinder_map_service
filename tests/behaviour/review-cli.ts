@@ -1,4 +1,5 @@
 // Subscription CLIs only. The controller never reads/copies credentials, and never inherits API keys or hooks.
+import { localNetworkDenials } from './runner/network-policy.ts';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -42,11 +43,7 @@ export function reviewSandbox(scratch: string, runtime: string, install: string,
     ...(auth ? [`(allow file-write* (literal ${q(auth)}) (regex #${q(`^${authTemp}`)}))`] : []),
     // Do not fetch cached managed/user preferences through cfprefsd around the file-read boundary.
     '(deny mach-lookup (global-name "com.apple.cfprefsd.daemon") (global-name "com.apple.cfprefsd.agent"))',
-    '(deny network-outbound (remote ip "localhost:*"))',
-    // Seatbelt's localhost matcher misses ::ffff:0.0.0.0, which can reach an IPv4 loopback listener.
-    // Review proxies are IPv4-only; deny every outbound IPv6 TCP socket, including mapped addresses.
-    // Keep narrow tcp4 proxy allows after the denies so IPv4 routing remains usable.
-    '(deny network-outbound (remote tcp6 "*:*"))', ...proxyRules, ''].join('\n');
+    ...localNetworkDenials, ...proxyRules, ''].join('\n');
 }
 export const codexReviewSandbox = reviewSandbox;
 

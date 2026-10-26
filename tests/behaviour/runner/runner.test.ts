@@ -1,3 +1,4 @@
+import { syntheticClientState } from './test-state.ts';
 // The runner without a model: refusals before running, seeds against the real service, the sandbox profile,
 // and one end-to-end S0b Attempt played by a Codex stand-in that makes real MCP calls.
 import { spawnSync } from 'node:child_process';
@@ -10,16 +11,17 @@ import { requiredFields } from '../evidence.ts';
 import type { AttemptRecord } from '../evidence.ts';
 import { library } from '../library.ts';
 import { itemsOf } from '../scenario.ts';
-import { sandboxProfile } from './codex.ts';
+import { prepareSandbox, prepareSession, writeProfile } from './codex.ts';
 import { connectController } from './controller.ts';
 import { normalizeTurn, readsIn, receiptsFrom, relativePath } from './normalize.ts';
 import { preflight, runAttempt, runBatch } from './run.ts';
 import type { BatchOptions } from './run.ts';
 import type { Scenario } from '../scenario.ts';
-import { freePort, newToken, startService } from './service.ts';
+import { checkoutRoot, freePort, newToken, startService } from './service.ts';
 import { createServer } from 'node:net';
 
 const scratch = realpathSync(mkdtempSync('/private/tmp/wf-behave-test-'));
+const clientState = syntheticClientState(scratch);
 const sandboxAvailable = spawnSync('which', ['sandbox-exec']).status === 0;
 const fakeCodex = fileURLToPath(new URL('./fake-codex.mjs', import.meta.url));
 // The service refuses databases under temporary directories or inside a repository; tests keep theirs in Caches.
@@ -31,11 +33,17 @@ afterAll(() => { rmSync(scratch, { recursive: true, force: true }); rmSync(recor
 
 describe('preflight', () => {
   test('refuses what this runner cannot do, before anything runs', () => {
-    const { refusals } = preflight({ batchId: 'T1', scenarios: ['S6', 'W5', 'S7', 'P1'], count: 1, ceiling: 4 });
-    expect(refusals.join('\n')).toMatch(/S6: Controller actions \(conflicting-write\)/);
-    expect(refusals.join('\n')).toMatch(/W5: Controller actions \(cut-agent-route\)/);
+    const { refusals } = preflight({ batchId: 'T1', scenarios: ['S5', 'S6', 'S10', 'W5', 'S7', 'P1'], count: 1, ceiling: 4 });
+    expect(refusals.join('\n')).not.toMatch(/S6|W5/);
     expect(refusals.join('\n')).toMatch(/P1: no such Scenario/);
     expect(refusals.join('\n')).not.toMatch(/S7/);
+  });
+  test('refuses raw output inside the checkout before starting a service or client', async () => {
+    const out = join(checkoutRoot, 'tests/behaviour/must-not-create');
+    const options: BatchOptions = { batchId: 'T', scenarios: ['S0b'], count: 1, ceiling: 1, out, scratchRoot: scratch, ...clientState,
+      codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs: 1000 } };
+    expect((await runBatch(options)).refusals).toEqual(['raw records must stay outside repositories']);
+    expect(existsSync(out)).toBe(false);
   });
   test('plans count Attempts per Scenario', () => {
     const { plan, refusals } = preflight({ batchId: 'T1', scenarios: ['S0b', 'F11'], count: 2, ceiling: 4 });
@@ -74,8 +82,10 @@ describe('sandbox', () => {
     const listener = createServer(socket => socket.end('hi'));
     const port = await freePort();
     await new Promise<void>(resolve => listener.listen(port, '127.0.0.1', resolve));
-    const profile = join(own, 'probe.sb');
-    writeFileSync(profile, sandboxProfile(own, [port]));
+    const { controlDir } = prepareSandbox(own);
+    const session = prepareSession(own, 'A', 'synthetic', clientState.loginSource);
+    const work = join(own, 'work'); mkdirSync(work);
+    const profile = writeProfile(controlDir, session, work, '/bin/sh').path;
     const q = JSON.stringify;
     const run = (cmd: string) => spawnSync('sandbox-exec', ['-f', profile, '/bin/sh', '-c', cmd], { encoding: 'utf8' }).status;
     try {
@@ -86,7 +96,7 @@ describe('sandbox', () => {
       expect(run(`touch ${q(join(homedir(), '.wf-behave-probe'))}`)).not.toBe(0);
       expect(run('touch /opt/homebrew/.wf-behave-probe || touch /usr/local/.wf-behave-probe')).not.toBe(0);
       expect(existsSync(join(homedir(), '.wf-behave-probe'))).toBe(false);
-      expect(run(`echo ok > ${q(join(own, 'probe.txt'))} && cat ${q(join(own, 'probe.txt'))}`)).toBe(0);
+      expect(run(`echo ok > ${q(join(work, 'probe.txt'))} && cat ${q(join(work, 'probe.txt'))}`)).toBe(0);
       expect(run(`node -e 1`)).toBe(0);
       expect(run(`node -e "require('net').connect(${port}, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"`)).not.toBe(0);
     } finally { listener.close(); rmSync(other, { recursive: true, force: true }); }
@@ -111,7 +121,7 @@ describe('one Attempt end to end, without a model', () => {
   test('S0b with the Codex stand-in: isolated, recorded, attributed, cleaned up', async () => {
     const out = join(records, 'runs', 'T-fake');
     const options: BatchOptions = { batchId: 'T-fake', scenarios: ['S0b'], count: 1, ceiling: 1, out,
-      codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs: 60_000 }, scratchRoot: scratch };
+      codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs: 60_000 }, scratchRoot: scratch, ...clientState };
     const { outcomes, refusals } = await runBatch(options);
     expect(refusals).toEqual([]);
     expect(outcomes.map(o => [o.attemptId, o.completeness])).toEqual([['S0b-1', 'complete']]);
@@ -136,7 +146,7 @@ describe('one Attempt end to end, without a model', () => {
 
 describe('every planned Attempt gets a result', () => {
   const options = (out: string, timeoutMs = 60_000): BatchOptions => ({ batchId: 'T-fail', scenarios: [], count: 1, ceiling: 1,
-    out, codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs }, scratchRoot: scratch });
+    out, codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs }, scratchRoot: scratch, ...clientState });
   const drill = (say: string): Scenario => ({ ...library.find(s => s.id === 'S12')!, id: 'Drill', turns: [{ session: 'A', kind: 'opening', say }] });
   const attempt = async (say: string, timeoutMs?: number, cancelled = () => false) => {
     const out = join(records, `fail-${Math.random().toString(36).slice(2)}`);
@@ -177,7 +187,7 @@ describe('inside the sandbox', () => {
     const s15 = library.find(s => s.id === 'S15')!;
     const drill: Scenario = { ...s15, id: 'Drill', turns: [s15.turns[0]!] };
     const outcome = await runAttempt({ batchId: 'T-sandbox', scenarios: [], count: 1, ceiling: 1, out,
-      codex: { model: 'fake-model', effort: 'low', bin: fake, sandbox: true, timeoutMs: 60_000 }, scratchRoot: scratch }, { attemptId: 'D-1', scenario: drill }, () => false, () => undefined);
+      codex: { model: 'fake-model', effort: 'low', bin: fake, sandbox: true, timeoutMs: 60_000 }, scratchRoot: scratch, ...clientState }, { attemptId: 'D-1', scenario: drill }, () => false, () => undefined);
     expect(outcome.completeness).toBe('complete');
     const record = JSON.parse(readFileSync(join(out, 'D-1', 'attempt.json'), 'utf8')) as AttemptRecord;
     const commands = record.events.flatMap(e => e.kind === 'command' ? [[e.command.replace(homedir(), '~'), e.exitCode]] : []);

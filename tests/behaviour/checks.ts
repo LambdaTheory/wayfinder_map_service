@@ -35,10 +35,11 @@ export function agentRevisions(a: AttemptRecord): AgentRevision[] {
     map.history.forEach((rev, index) => {
       if (map.seedHeadRevision !== null && rev.revision <= map.seedHeadRevision) return;
       if (rev.author.clientId === a.controller.clientId) return;
-      const receipt = a.receipts.find(r => r.mapId === rev.mapId && r.outcome.kind === 'committed' && r.outcome.revision === rev.revision);
+      const receipts = a.receipts.filter(r => r.mapId === rev.mapId && r.outcome.kind === 'committed' && r.outcome.revision === rev.revision);
+      const receipt = receipts.length === 1 ? receipts[0] : undefined;
       // Only a receipt places a write (R3); the author's Client ID may contradict it but never stands in for it.
       const byClient = a.sessions.filter(s => s.clientId === rev.author.clientId).map(s => s.label);
-      const session = receipt && (byClient.length === 0 || byClient.includes(receipt.session)) ? receipt.session : null;
+      const session = receipt && byClient.length === 1 && byClient[0] === receipt.session ? receipt.session : null;
       out.push({ map: map.mapId, rev, prior: index > 0 ? map.history[index - 1]!.state : null,
         locator: `maps.${map.mapId}.history[${index}]`, session, turn: session === null ? null : receipt!.turn });
     });
@@ -170,10 +171,12 @@ export function gotResult(label: string, cls: ResultClass, scope: { session?: st
   };
 }
 
-/** Required event: a Wayfinder call of any tool failed to reach the service (in the given turn). */
+/** Required event: a native transport failure corroborated by a business call blocked at the relay. */
 export function callFailed(label: string, scope: { session?: string; turn?: number } = {}): ScriptCheck {
   return a => {
-    const hits = mapCalls(a).filter(e => (e.failed || resultIs(e, 'transport-failure'))
+    const hits = mapCalls(a).filter(e => e.failed && !e.result.known
+      && a.events.some(c => c.actor === 'controller' && c.kind === 'controller' && c.action === 'relay-cut'
+        && c.session === e.session && c.turn === e.turn && (c.detail as { tool?: string } | undefined)?.tool === e.tool)
       && (scope.session === undefined || e.session === scope.session) && (scope.turn === undefined || e.turn === scope.turn));
     if (hits.length) return holds(label, hits.map(e => at(a, e)));
     return need(a, label, 'events.tool-call') ?? violated(`not observed: ${label}`);
