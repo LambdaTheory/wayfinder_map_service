@@ -62,7 +62,7 @@ did plugin-mentioned
 begin
 ```
 
-Send the printed Scenario message with the Wayfinder plugin mentioned. Capture the complete native assistant messages and all relevant intermediate content. The relay records actual requests/results in `raw/wire.json`; it never fabricates tool calls from prose. The local Map viewer is not forwarded. Calls outside a labelled turn are refused except initialization, ping, tool/Resource/Prompt listing and session deletion. Verify Refresh tools in the real client before continuing; a supported discovery request does not establish client support for Resource reading.
+Send the printed Scenario message with the Wayfinder plugin mentioned. Capture the complete native assistant messages and all relevant intermediate content. The relay records actual requests/results in `raw/wire.json`; it never fabricates tool calls from prose. The local Map viewer is not forwarded. Outside a labelled turn, only `initialize`, `notifications/initialized`, `ping`, `tools/list`, `resources/list`, `resources/templates/list`, `prompts/list` and session deletion (HTTP DELETE with no body) are forwarded. `tools/call`, `resources/read` and `prompts/get` remain refused until a labelled turn begins. Discovery responses, including upstream protocol errors, are forwarded unchanged and recorded in the wire evidence; the current service returns JSON-RPC `-32601` for Resource Template listing. Verify Refresh tools in the real client before continuing; a forwarded discovery request does not establish client support for Resource reading.
 
 Write a UTF-8 JSON capture in this Attempt’s private `raw/` directory, then run `end /absolute/path/capture.json`:
 
