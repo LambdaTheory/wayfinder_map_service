@@ -3,16 +3,12 @@
 import { common } from './common.ts';
 import type { AttemptRecord, Completeness } from './evidence.ts';
 import type { Capability, CheckResult, Item, Scenario } from './scenario.ts';
+import { evidenceHash, reviewProblem, savedReviews } from './reviews.ts';
+import type { Review } from './reviews.ts';
+export type { Review } from './reviews.ts';
 
 export const outcomes = ['pass', 'fail', 'flaky', 'incomplete', 'insufficient-evidence', 'not-applicable'] as const;
 export type Outcome = typeof outcomes[number];
-
-/**
- * One reading of one item. Two independent `review`s that agree decide a model item; when they disagree an
- * `arbitration` decides; a `human` verdict decides anything, and is the only thing that can decide an item a script
- * left open for lack of evidence.
- */
-export interface Review { itemId: string; status: 'holds' | 'violated' | 'undecided'; reason: string; by: string; role: 'review' | 'arbitration' | 'human' }
 
 type Open = 'unknown' | 'pending-review' | 'paused';
 export interface ItemResult { id: string; judge: Item['judge']; status: CheckResult['status'] | Exclude<Open, 'unknown'>; reason: string; evidence: string[] }
@@ -32,22 +28,26 @@ export interface AttemptVerdict {
   gaps: string[];
   /** Raw files of the Attempt, relative to the private run root. */
   raw: string | null;
+  modelReviews?: { path: string; pending: { itemId: string; reason: string; next: 'human' | 'retry' }[] }[];
 }
 
 const isOpen = (s: GroupResult['status']): s is Open => s === 'unknown' || s === 'pending-review' || s === 'paused';
 const said = (r: Review) => `${r.by}: ${r.reason}`;
 
-function decide(itemId: string, reviews: Review[], modelMayDecide: boolean): { status: 'holds' | 'violated'; reason: string } | { open: string } {
+function decide(itemId: string, reviews: Review[], modelMayDecide: boolean): { status: 'holds' | 'violated'; reason: string; evidence: string[] } | { open: string } {
   const mine = reviews.filter(r => r.itemId === itemId && r.status !== 'undecided');
   const human = mine.findLast(r => r.role === 'human');
-  if (human) return { status: human.status as 'holds' | 'violated', reason: said(human) };
+  if (human) return { status: human.status as 'holds' | 'violated', reason: said(human), evidence: human.evidence ?? [] };
   if (!modelMayDecide) return { open: 'evidence is missing; only the human can decide' };
-  const arbitration = mine.findLast(r => r.role === 'arbitration');
-  if (arbitration) return { status: arbitration.status as 'holds' | 'violated', reason: said(arbitration) };
   const readings = reviews.filter(r => r.itemId === itemId && r.role === 'review');
   if (readings.length < 2) return { open: readings.length ? 'one review so far; two independent reviews are required' : 'awaiting review' };
+  if (new Set(readings.map(r => r.readingId)).size !== readings.length) return { open: 'duplicate reading; two independent reviews are required' };
+  const arbitration = reviews.findLast(r => r.itemId === itemId && r.role === 'arbitration');
+  if (arbitration && readings.some(r => r.readingId === arbitration.readingId)) return { open: 'arbitration reused a review reading' };
+  if (arbitration?.status === 'undecided') return { open: `arbitration undecided; human verdict required: ${said(arbitration)}` };
+  if (arbitration) return { status: arbitration.status as 'holds' | 'violated', reason: said(arbitration), evidence: arbitration.evidence ?? [] };
   const agreed = readings.every(r => r.status !== 'undecided' && r.status === readings[0]!.status);
-  return agreed ? { status: readings[0]!.status as 'holds' | 'violated', reason: `two reviews agree: ${readings.map(said).join(' | ')}` }
+  return agreed ? { status: readings[0]!.status as 'holds' | 'violated', reason: `two reviews agree: ${readings.map(said).join(' | ')}`, evidence: [...new Set(readings.flatMap(r => r.evidence ?? []))] }
     : { open: 'the reviews disagree; arbitration pending' };
 }
 
@@ -58,8 +58,17 @@ function judgeItem(item: Item, record: AttemptRecord, reviews: Review[]): ItemRe
   if (script && script.status !== 'unknown') return { ...base, status: script.status, reason: script.reason, evidence: script.evidence };
   // A script that could not decide escalates to the model chain only when it said so; missing evidence goes to the human.
   const modelMayDecide = item.judge === 'model' || script?.escalate === 'model';
-  const d = decide(item.id, reviews, modelMayDecide);
-  if ('status' in d) return { ...base, status: d.status, reason: d.reason, evidence: script?.evidence ?? [] };
+  const mine = reviews.filter(r => r.itemId === item.id).map(r => {
+    const problem = reviewProblem(r, record);
+    return problem ? { ...r, status: 'undecided' as const, reason: problem } : r;
+  });
+  const human = mine.filter(r => r.role === 'human');
+  const rounds = [...new Set(mine.filter(r => r.role !== 'human').map(r => r.roundId ?? 'manual'))];
+  const decisions = (rounds.length ? rounds : ['manual']).map(round => decide(item.id,
+    [...mine.filter(r => r.role !== 'human' && (r.roundId ?? 'manual') === round), ...human], modelMayDecide));
+  // A later review round cannot erase an already observed violation. A human can resolve it explicitly.
+  const d = decisions.find(x => 'status' in x && x.status === 'violated') ?? decisions.find(x => 'status' in x) ?? decisions.at(-1)!;
+  if ('status' in d) return { ...base, status: d.status, reason: d.reason, evidence: [...new Set([...(script?.evidence ?? []), ...d.evidence])] };
   return { ...base, status: modelMayDecide ? 'pending-review' : 'unknown', reason: script ? `${script.reason}; ${d.open}` : d.open, evidence: script?.evidence ?? [] };
 }
 
@@ -84,7 +93,7 @@ export interface JudgeOptions {
  * event that did not happen means the Scenario was not exercised; anything still open is insufficient evidence.
  */
 export function judgeAttempt(s: Scenario, record: AttemptRecord | null, opts: JudgeOptions = {}): AttemptVerdict {
-  const reviews = opts.reviews ?? [];
+  const reviews = [...(record ? savedReviews(record) : []), ...(opts.reviews ?? [])];
   const empty = { required: [], mustNot: [], expect: [], quality: [], gaps: [] };
   const base = { attemptId: record?.attemptId ?? opts.attemptId ?? 'unknown', scenario: { id: s.id, version: record?.subject.version ?? s.version }, raw: record?.raw.path ?? null };
   if (!record) return { ...base, ...empty, completeness: 'no-record', outcome: 'incomplete',
@@ -117,7 +126,9 @@ export function judgeAttempt(s: Scenario, record: AttemptRecord | null, opts: Ju
   else if ([...mustNot, ...expect].some(x => isOpen(x.status))) { outcome = 'insufficient-evidence'; reasons.push(...listOpen(mustNot, 'must-not'), ...listOpen(expect, 'expectation')); }
   else if (expect.every(g => g.status === 'not-applicable')) { outcome = 'not-applicable'; reasons.push('no expectation applies to this client'); }
   else outcome = 'pass';
-  return { ...base, completeness: record.run.completeness, outcome, reasons, required, mustNot, expect, quality, gaps: expect.flatMap(g => g.gap ? [g.gap] : []) };
+  return { ...base, completeness: record.run.completeness, outcome, reasons, required, mustNot, expect, quality, gaps: expect.flatMap(g => g.gap ? [g.gap] : []),
+    modelReviews: (record.modelReviews ?? []).map(r => ({ path: r.path, pending: r.evidenceHash === evidenceHash(record) ? r.pending
+      : [{ itemId: '*', reason: 'evidence changed; saved reviews do not apply', next: 'retry' }] })) };
 }
 
 export type Counts = Record<Exclude<Outcome, 'flaky'>, number>;
