@@ -45,8 +45,10 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
   };
   const addCall = (s: Session, id: string | null, name: string | null, args: unknown, ref: string) => {
     if (!name) return;
-    s.calls.push({ id: id ?? ref, tool: name, ref, mapId: str(obj(parse(args)).mapId), requestId: null, requestIdType: null, result: null });
+    const call: NativeCall = { id: id ?? ref, tool: name, ref, mapId: str(obj(parse(args)).mapId), requestId: null, requestIdType: null, result: null };
+    s.calls.push(call);
     s.fragments.push({ ref, role: 'tool', text: JSON.stringify({ name, arguments: parse(args) }) });
+    return call;
   };
   const result = (s: Session, id: string | null, value: unknown, ref: string) => {
     const call = s.calls.find(c => c.id === id);
@@ -89,6 +91,19 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
         const settings = obj(p.thread_settings);
         setting(s, 'model', settings.model, ref);
         setting(s, 'effort', settings.reasoning_effort ?? settings.model_reasoning_effort, ref);
+      }
+      if (row.type === 'event_msg' && p.type === 'item_completed') {
+        const item = obj(p.item);
+        if (item.type === 'McpToolCall' && item.server === 'wayfinder'
+          && typeof item.tool === 'string' && ['map_create', 'map_apply', 'map_list', 'map_read'].includes(item.tool)
+          && (item.status === 'completed' || item.status === 'failed')) {
+          const id = str(item.id) ?? ref;
+          const call = s.calls.find(c => c.id === id) ?? addCall(s, id, item.tool, item.arguments, ref);
+          if (call) call.turnId = str(p.turn_id);
+          // Product kinds, not client status/isError, establish the outcome (src/call-metadata.ts).
+          // infrastructure_error is service-failure; absent/unrecognized results are transport-failure.
+          result(s, id, item.result ?? null, ref);
+        }
       }
       if (row.type === 'response_item') {
         if (p.type === 'message') message(s, p.role, p.content, ref);

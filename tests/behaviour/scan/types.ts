@@ -15,6 +15,8 @@ export interface Manifest {
 export interface Fragment { ref: string; role: 'user' | 'assistant' | 'tool'; text: string }
 export interface NativeCall {
   id: string; tool: string; ref: string; mapId: string | null;
+  /** Codex completion-event turn ID, when that envelope supplies it. */
+  turnId?: string | null;
   requestId: string | null; requestIdType: 'string' | 'number' | null;
   result: CallResult | null; resultRef?: string;
 }
