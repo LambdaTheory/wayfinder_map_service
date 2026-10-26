@@ -8,6 +8,8 @@ Date: 2026-09-18. Planning Destination: a minimal client-neutral SQLite-backed M
 
 Use [GLOSSARY.md](../../GLOSSARY.md) for domain language, [M1](m1.md) for unchanged domain behavior and the [v1 contract](v1.md) for the wider product. This document consolidates the human-confirmed local slice, not completion of v1 or M2–M6.
 
+Sections 1–14 record their original slice and acceptance boundaries. The [Answer Desk follow-on in section 15](#15-answer-desk-follow-on-slice), accepted by Kun on 2026-10-26 under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109), amends the tool/protocol/viewer-write boundaries, §6's net-no-op classification and §8/§9 storage and migration rules. Those amendments take effect after #109 closeout and the respective implementation is delivered; they are not claims about the current service.
+
 | Source | Role |
 | --- | --- |
 | [Codex MCP and SQLite acceptance planning Map](https://github.com/kun-g/wayfinder_map_service/issues/27) | Destination and human-approved slice boundaries |
@@ -144,7 +146,7 @@ Preserve the structured M1 ReadResult, PrepareResult, CommitResult and Rejection
 | Proven non-publication | State/history unchanged; do not label uncertain outcomes as this class |
 | Commit/response interruption with unproven outcome | Unknown outcome; authoritative reread before any decision, no automatic replay |
 
-Known rejects, conflicts and net-no-ops publish no Revision. Storage-busy is not proof of stale head and must not become Conflict. Unexpected infrastructure/programming failures remain Promise failures at the StateAdapter seam, safely mapped by MCP without changing the pure library's result unions.
+Known rejects, conflicts and net-no-ops publish no Revision; the Answer Desk follow-on amends the no-net-change classification through its [agent request-closing contract](answer-desk.md#81-revision-boundary-and-adapters). Storage-busy is not proof of stale head and must not become Conflict. Unexpected infrastructure/programming failures remain Promise failures at the StateAdapter seam, safely mapped by MCP without changing the pure library's result unions.
 
 Attempt transaction cleanup. If the connection cannot return to usable state, stop DB operations and require restart. A missing/failed response never alone proves no publication. Reread current/history, decide whether the intention is already satisfied, and seek human judgment if evidence cannot resolve uncertainty. No automatic retry, rebase, merge, idempotency cache, Claim takeover or memory fallback. A lost connection cannot necessarily deliver an error envelope; client/workflow handling must still retain this rule.
 
@@ -166,17 +168,17 @@ Pin Node 26.3.0 and use built-in node:sqlite, with its researched release-candid
 
 Use one operator-configured absolute private canonical path on local disk, outside repositories, disposable worktrees and temporary directories. Example, not a file already created: `/Users/kun/Library/Application Support/Wayfinder/maps.sqlite`. All sessions reach this DB through the service, never caller-selected paths/SQL. No network/shared filesystem; reject symlinks in the DB path. Newly created private directories use 0700 and DB/backup files 0600. Reject unsafe existing ownership/permissions rather than silently chmodding user data. Treat WAL/sidecars as managed persistent state, not expendable cache.
 
-Provide explicit first-use initialization to a nonexistent fresh target only. Refuse any existing target, including an empty file; never overwrite. Initialize application identity and initial format version with the schema. Exact identity constant/table names are implementation choices fixed and tested for this first format.
+Provide explicit first-use initialization to a nonexistent fresh target only. Refuse any existing target, including an empty file; never overwrite. Initialize application identity and initial format version with the schema; the Answer Desk follow-on specifies its [fresh initialization format](answer-desk.md#82-format-2-and-startup-migration). Exact identity constant/table names are implementation choices fixed and tested for this first format.
 
-Normal startup opens existing storage only and recognizes its application/format identity, not just its filename. Wrong/missing paths, unsupported format and ordinary open/read/write/JSON-decoding failures are explicit errors. No automatic initialization, empty replacement, reset, repair, overwrite or migration. Support this initial format only.
+Normal startup opens existing storage only and recognizes its application/format identity, not just its filename. Wrong/missing paths, unsupported format and ordinary open/read/write/JSON-decoding failures are explicit errors. No automatic initialization, empty replacement, reset, repair, overwrite or migration. Support this initial format only. The accepted Answer Desk follow-on explicitly replaces this restriction for its format-2 startup migration; see [§15.3](#153-tasks-storage-and-failure).
 
 **Withdrawn Q10 remains excluded:** no startup physical/data integrity audit, full-history scan, proactive semantic graph inspection, replacement per-read audit or mandatory integrity maintenance command. Ordinary application-format recognition and I/O/SQL/JSON failures are not permission to reintroduce those features. Existing M1 validation of a submitted mutation and its final graph remains unchanged; detecting damage is not claimed to restore it.
 
 ## 9. Persisted representation and publication
 
-Principally two tables: Map catalog/head (ID, title, Destination, current Revision), and immutable full Revision JSON unique by Map ID/revision. Preserve every accepted full Revision, including authorship, prior links, changes, Claims and Settlement introduction context. No pruning, command replay or separate graph entity tables.
+Principally two tables: Map catalog/head (ID, title, Destination, current Revision), and immutable full Revision JSON unique by Map ID/revision. Preserve every accepted full Revision, including authorship, prior links, changes, Claims and Settlement introduction context. No pruning, command replay or separate graph entity tables. The Answer Desk table and publication amendments are scoped by [§15.3](#153-tasks-storage-and-failure); the original two-table boundary does not forbid that accepted follow-on.
 
-Keep StateAdapter's three operations unchanged: readCurrent, readRevision, commit. Add only a narrow listMaps read on the SQLite module for MCP listing; do not expand the public StateAdapter, memory Adapter sharing or tool count. Narrow local initialization/backup/open/close management is not a public MCP mutation path.
+Keep StateAdapter's three operations unchanged: readCurrent, readRevision, commit. The original slice adds only a narrow listMaps read on the SQLite module for MCP listing, without expanding the public StateAdapter, memory Adapter sharing or tool count. The accepted Answer Desk follow-on adds the desk-side paths scoped by [§15.3](#153-tasks-storage-and-failure); listMaps is not a restriction on those paths. Narrow local initialization/backup/open/close management is not a public MCP mutation path.
 
 Use one synchronous connection and short operations. Explicitly configure and verify WAL, synchronous=FULL and 100 ms SQLite lock waiting. The wait budget is not an end-to-end latency guarantee; synchronous work can block the execution thread.
 
@@ -313,7 +315,9 @@ Shipped means `src/`, `web/`, `scripts/`, `package-lock.json` and `docs/agents/e
 
 Before 2026-10-25 only the workflow had a version, `workflowVersion`, while the server reported a fixed `0.1.0`. The workflow's initial test publication was `1.0.0`; `1.1.0` added complete-command guidance after real Codex exposed partial validation probing; `1.2.0` made nested Reference/Provenance/Evidence shapes explicit; `2.0.0` changed mandatory Conflict behavior after a real ChatGPT run reread a newer Revision but automatically resubmitted the stale intention: a Conflict now voids the rejected request and requires the client to report and stop until the human issues a new request after seeing the new Revision. Later steps through `3.0.0` are in `CHANGELOG.md`. Those numbers overlap the Release Version series; the names `workflowVersion` and `version` keep them apart.
 
-An upgrade is a process restart onto the new build; the service never swaps definitions inside a running session, so it declares no `listChanged` capability and offers no stream for change notifications. A restart ends every session: a request carrying an old `mcp-session-id` gets HTTP 404 and the client must initialize again, receiving the new instructions, tool list, Resource and Prompt. What a client then shows its model is the client's choice, and some keep the definitions they loaded first; the write `version` check (section 4) stops such a caller before it writes under old rules. Client behavior and recovery steps are in [Open conversations across an upgrade](../implementation/client-upgrade.md).
+An upgrade is a process restart onto the new build; the service never swaps definitions inside a running process, so it declares no `listChanged` capability and offers no stream for definition-change notifications. For sessionful clients (`2025-11-25` in the [Answer Desk compatibility matrix](#152-sdk-v2-and-two-protocol-eras)), a restart ends every session: a request carrying an old `mcp-session-id` gets HTTP 404 and the client must initialize again, receiving the new instructions, tool list, Resource and Prompt. What a client then shows its model is the client's choice, and some keep the definitions they loaded first; the write `version` check (section 4) stops such a caller before it writes under old rules. Client behavior and recovery steps are in [Open conversations across an upgrade](../implementation/client-upgrade.md).
+
+The SDK v2 follow-on slice also serves `2026-07-28` clients, which are sessionless: there is no `mcp-session-id` to invalidate, so restart cannot force them through the 404/reinitialize path. Their requests reach a fresh server instance without implying that the model rediscovered instructions or tools. [ADR 0005](../adr/0005-writes-attest-the-rules-version.md)'s `version` attestation remains the write guard in both eras; neither successful transport access nor a task handle attests the rules. Section 15 applies this guard to `map_wait` and the taking form of `map_read` as well. Process-lifetime workflow immutability applies to both eras, not just legacy sessions.
 
 The build extracts and validates the named blocks and emits an immutable asset into `dist`; generated runtime copies are not committed. The service must run from built artifacts without the repository source path and captures one workflow contract for the process lifetime. Workflow changes require rebuild and restart; there is no hot reload or list-changed promise. A new connection receives the new instructions, Resources must be reread, and ChatGPT plugin snapshots follow their own rescan/republication lifecycle.
 
@@ -349,3 +353,40 @@ Use one fresh private database and one shared acceptance Map. Do not install/inj
 One complete journey is sufficient; it naturally uses multiple independent sessions but need not be repeated solely for sampling. Retain native initialize protocol/instructions/capabilities and the version, client/server/runtime versions, session identities, tool parameters/results, database Revision/Frontier/Claim/Settlement/history comparisons, failed attempts and redaction checks. Agent prose or screenshots alone are not evidence.
 
 Publish a new implementation report and machine-readable evidence without rewriting `mcp-sqlite-acceptance.md`, `mcp-exploration-adoption.md` or their evidence. After all automated and real-client gates pass, the live user must explicitly accept the evidence. Only that verdict completes this follow-on slice and authorizes README/release claims of the accepted self-contained workflow version.
+
+## 15. Answer Desk follow-on slice
+
+Status: accepted by Kun on 2026-10-26 under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109); the design session checks the transcription before Issue closeout. This amends the tool, protocol and viewer-write boundaries, §6's net-no-op classification and §8/§9 storage/migration rules, after #109 closes and the respective implementation is delivered. Original acceptance evidence remains historical evidence.
+
+The [Answer Desk specification](answer-desk.md) is the single normative source for desk behavior. [ADR 0006](../adr/0006-answer-desk-in-the-map-viewer.md) and [ADR 0007](../adr/0007-map-wait-for-answer-delivery.md) record the architectural alternatives.
+
+### 15.1 Tools and workflow publication
+
+The [five-tool target](answer-desk.md#1-outcome-and-boundary) extends §4/§5 through the [public inputs](answer-desk.md#61-public-inputs) and [results/read projections](answer-desk.md#62-public-results-and-recovery-reads), including `map_wait`, taking `map_read` and `FoundMap.reopenContexts`. The latter supplies the agent's default re-post recommendation and the desk's requested-option marker/text context under that normative projection contract. The [typed `deskAnswer` extension](answer-desk.md#agent-settlement) amends `ticket.settle`; [Reopen Requests](answer-desk.md#reopen-requests) define `map_apply.reopenRequestId`, its Settlement binding and validation, and `reopenRequest.close`. The [publication-after-reopening contract](answer-desk.md#publication-after-reopening) amends every reopen path. These are additive contract extensions, not changes to M1 Provenance or Reference shapes.
+
+Implementation updates exact-tool-set checks in §11 and §14 to the target at the step assigned in [Answer Desk §9](answer-desk.md#9-implementation-and-release-sequence). Preserve once-only results, immutable history, safe errors and unknown-outcome recovery; descriptions and annotations must match actual effects, including reads that take answers. Backup stays a local maintenance command.
+
+#114 updates the sole authored workflow and every governed tool description together, with generated Resources, Prompt and instructions retaining the process's one Release Version. This documentation PR changes none of those shipped surfaces.
+
+### 15.2 SDK v2 and two protocol eras
+
+Migrate the pinned SDK v1 package to SDK v2's `@modelcontextprotocol/server` and `@modelcontextprotocol/node`, with exact installed versions recorded by #110. SDK v2 needs explicit modern-protocol configuration; installing it alone does not enable `2026-07-28` ([official migration guide](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/migration/support-2026-07-28.md)).
+
+| Contract | `2025-11-25` | `2026-07-28` |
+| --- | --- | --- |
+| Connection | `initialize`, sessionful Streamable HTTP | `server/discover`, per-request metadata and no MCP session |
+| Restart | Old `mcp-session-id` returns 404; client initializes again | No session header or restart-404 refresh path |
+| Answer wait | Ordinary blocking `map_wait`; the tested Codex client did not see task tools | Opted-in Tasks extension for Claude Code; ordinary calls still need a non-task result |
+| Workflow guard | Explicit write `version` | The same explicit write `version`; transport success does not refresh model context |
+
+Both eras share `/mcp`, operator-controlled credential identity, the process's immutable workflow, Map authority and existing Host/Origin protections. Preserve instructions, Resource and Prompt delivery in the appropriate era and record the actual capabilities each installed client exposes. Do not add STDIO/channel bridges, per-client databases, OAuth or automatic Claim expiry. A protocol session remains distinct from the logical Claimant.
+
+### 15.3 Tasks, storage and failure
+
+Implement the [Tasks, admission and shutdown contract](answer-desk.md#63-tasks-admission-and-shutdown) and [release boundary](answer-desk.md#agent-delivery). The upstream [Tasks server implementation issue](https://github.com/modelcontextprotocol/ext-tasks/issues/30) was open when checked on 2026-10-26; #112 identifies server-everything 2.0.1's `dist/server/tasks.js` as a reference, not a supplied SDK implementation.
+
+[Answer Desk §8.1](answer-desk.md#81-revision-boundary-and-adapters) defines which writes create Revisions, the request-closing amendment to §6 and M1's no-net-change check, the retained StateAdapter seam and the desk-side paths outside it. [Section 8.2](answer-desk.md#82-format-2-and-startup-migration) is the authoritative format-2 schema and backup-before-migration rule, expressly amending §8's initial-format/no-migration restriction and §9's representation. Migration and desk persistence must not be inferred from the task registry's lifetime.
+
+### 15.4 Verification and release boundary
+
+Keep existing domain/storage/protocol gates and add the [Answer Desk acceptance evidence](answer-desk.md#83-required-evidence). Its [Issue ownership and release sequence](answer-desk.md#9-implementation-and-release-sequence) assigns storage, taking reads, Reopen Requests and the keyed viewer route, while distinguishing specification acceptance from implementation and live-client acceptance. The #108 spikes establish feasibility only. Section 14.3 still determines the Release Version from shipped behavior; this documentation-only PR changes no shipped files and needs no bump, CHANGELOG entry or tag.
