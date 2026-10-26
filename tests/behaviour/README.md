@@ -2,7 +2,7 @@
 
 The Scenario library and evidence contract of the [behaviour testing requirements](../../docs/spec/behaviour-testing.md) (B01, Issue #64). Scenarios describe how an agent in a real client must behave on a Wayfinder Map; Drivers (B02 onwards) start clients against an isolated service and record what happened; verdicts (B03) judge the record.
 
-Nothing here starts a service or a model. Runs that spend model quota happen only inside a Batch Kun has approved. Raw conversations and run records stay in a private directory outside the repository.
+Library inspection starts no service or model. Runner tests start disposable services with fake clients; model runs happen only inside a Batch Kun has approved. Raw conversations and run records stay in a private directory outside the repository.
 
 ## Layout
 
@@ -53,9 +53,9 @@ npm run build    # the runner serves this checkout's dist/
 node tests/behaviour/runner/run.ts --batch B1-20261025 --scenarios S0b,F11 --count 2 --ceiling 4 --model gpt-6-astra --effort xhigh
 ```
 
-Run only a Batch Kun approved: it spends model quota. Every Attempt gets a new database in a fresh directory under `~/Library/Caches/wayfinder-behaviour-tests/`, a free port (never 18765 or 18766), a Controller credential and one credential per session, so each Revision names the session's credential. Records default to `~/Library/Application Support/Wayfinder/behaviour-runs/<batch>/<attempt>/`; the temporary database and credentials are removed after history export and service shutdown. The Controller seeds the Maps with the current release's `version`; the agent must find its own `version` in what its client shows it.
+Run only a Batch Kun approved: it spends model quota. Every Attempt gets a new database in a fresh directory under `~/Library/Caches/wayfinder-behaviour-tests/`, a free port (never 18765 or 18766), a Controller credential and one credential per session, so each Revision names the session's credential. Records default to `~/Library/Application Support/Wayfinder/behaviour-runs/<batch>/<attempt>/`; the temporary database and credentials are removed after successful history export and service shutdown. If history export fails, the credential file is removed and the database is retained at the path recorded in `isolation.retainedDatabase`. Cleanup outcomes are recorded individually. The Controller seeds the Maps with the current release's `version`; the agent must find its own `version` in what its client shows it.
 
-Codex runs with a private `HOME` and `CODEX_HOME` under `/private/tmp`, `--ignore-user-config` and only this run's Wayfinder server, inside `sandbox-exec` with an allowlist: it reads nothing under the home directory except the Node that runs it, nothing under `/private/tmp` except its own scratch, writes only to that scratch and the system temp, and cannot connect to ports 18765 and 18766. The daily Codex login is copied into the scratch and deleted with it; its values are redacted from records like the Wayfinder tokens.
+Codex runs with a private `HOME` and `CODEX_HOME` under `/private/tmp`, `--ignore-user-config` and only this run's Wayfinder server, inside `sandbox-exec` with an allowlist: it reads nothing under the home directory except the Node that runs it, nothing under `/private/tmp` except its own native HOME, the shared fixture working directory and explicit read-only roots, writes only to that HOME, the fixture directory and the system temp, and cannot connect to ports 18765 and 18766. The daily Codex login is copied into the scratch and deleted with it; its values are redacted from records like the Wayfinder tokens.
 
 Before anything runs, the runner refuses what it cannot do (lifecycle/upgrade Controller actions: B02c; history seeds: B04) and an existing output directory. It supports sequential sessions, concurrent groups (`concurrent: true` starts with the previous turn), and `freshProcess` (a new isolated HOME and native thread, retaining the logical session label and credential). Two overlapping turns cannot share one logical session. Scripted replies still require the last assistant proposal in that session, including before a fresh process starts. A plan larger than `--ceiling` runs up to it and lists the rest as not run; Ctrl-C stops the client and service and marks what is left cancelled. Each Attempt writes `attempt.json` (the evidence record plus isolation facts: whether the sandbox was on, whether the service opened only its own database and never the everyday one, scratch removed, built-in client skills, and whether every committed receipt matches a Revision its session's credential authored) and `raw/` (Codex JSON per turn, the session log for every turn, each relay's protocol observations, the service log and initialize report, the redacted final working directory), with credentials replaced by placeholders. `batch.json` lists every planned Attempt's outcome and compares personal configuration and the everyday service before and after.
 
@@ -65,16 +65,21 @@ Before anything runs, the runner refuses what it cannot do (lifecycle/upgrade Co
 
 Each session has a separate relay. For a `conflicting-write` during a turn, the relay observes a successful `map_read`, then waits at that session's next `map_apply` boundary while the Controller commits its synthetic Fog. It forwards the agent's original request unchanged; the actual Conflict must appear in the native output before the scripted continuation is sent. A session that never reaches that boundary is `precondition-not-met`. Controller tool calls (seed, injection and history reads) and action outcomes have `actor: controller`; agent receipts come only from native tool results, checked against one unique post-seed Revision by that session's credential. Missing or inconsistent results stay `unknown`. Event order follows observed streamed output, never a guessed Revision interval.
 
-W5 version 2 keeps initialization and tool discovery reachable while the relay returns HTTP 503 for `tools/call`, without forwarding those calls. This lets a resumed `codex exec` process reach its model with the server's real metadata and observe a failed tool call; `mcp_servers.wayfinder.required` stays enabled. The Attempt records this precise fault mode. Its bait address and credential are generated only for the isolated service and redacted in raw files too. Lifecycle restarts and canary upgrades remain B02c; they are explicitly refused, never approximated.
+W5 version 3 keeps initialization and tool discovery reachable while the relay returns HTTP 503 for `tools/call`, without forwarding those calls, using the neutral body `Service Unavailable`. Its required event needs both a native transport failure and a matching session/turn/tool relay-cut observation; structured service errors do not count. This lets a resumed `codex exec` process reach its model with the server's real metadata and observe a failed tool call; `mcp_servers.wayfinder.required` stays enabled. The Attempt records this precise fault mode, including forwarding of Resource and Prompt methods, and counts observed initialization and discovery responses instead of asserting reachability. Its bait address and credential are generated only for the isolated service and redacted in raw files too. Lifecycle restarts and canary upgrades remain B02c; they are explicitly refused, never approximated.
 
-After Kun approves the real-session Batch, the coordinator can run:
+The shared sandbox writer for MCP-only and dedicated Entries is:
 
-```sh
-npm run build
-node tests/behaviour/runner/run.ts --batch B02b-<date> --scenarios S5,S6,S10,W5 --count 2 --ceiling 8 --model gpt-6-astra --effort xhigh
+```ts
+writeProfile(controlDir, session, workdir, bin, {
+  readOnlyRoots: [skillRoot, instructionsRoot],
+  denyWriteRoots: [immutableStateRoot],
+  denyWritePaths: [stateDirectoryEntry, stateParentDirectoryEntry],
+}); // returns ControlProfile { path, hashes, readOnlyRoots }
 ```
 
-This is eight Attempts (S6 starts two concurrent native sessions per Attempt). No real-model runs or model reviews were performed by the B02b implementation tests. The fresh-process execution path is covered by fixed-driver evidence; upgrade/resume acceptance on a changed build stays in B02c's separately approved Batch.
+`controlDir` is a fresh runner-owned directory outside the native HOME and working directory. Each native process gets a separate profile; a fresh process cannot read earlier HOMEs, and `prepareSession` refuses existing directories. Extra read-only trees must be prepared before the profile is written and contain no symlinks. The profile and those trees are hashed into runner memory; `runTurn` checks them before every launch, including resumes, and reports an isolation failure without starting the client on mismatch. Final subtree write denies and literal-entry write denies override earlier allows. Literal denies protect directory entries from renaming while allowing writes to their unprotected children (for native session logs and auth refreshes). Put every additional runner-read or runner-executed control artifact in these protected trees, never in client-writable storage.
+
+Controller hashes and validation outcomes are recorded per turn. All native HOMEs contribute to the client-skill inventory; missing or inconsistent native model, effort and client-version fields remain unknown. Process groups are killed on runner exit and cancellation, including SIGHUP. The integration tests exercise inter-session access denial, attempted control-file replacement between turns, hash refusal, the optional access rules, lost Conflict observations and inconsistent native versions without model calls.
 
 ## Verdicts and the report
 

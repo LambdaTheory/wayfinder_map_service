@@ -23,8 +23,9 @@ export async function startRoute(target: number, observe: (record: unknown) => v
       const body = Buffer.concat(chunks);
       let rpc: RpcRequest = {};
       try { rpc = JSON.parse(body.toString()) as RpcRequest; } catch { /* GET/DELETE have no JSON body */ }
-      observe({ phase: 'request', at: new Date().toISOString(), method: req.method, rpc });
-      if (cut && rpc.method === 'tools/call') { res.writeHead(503).end('route cut by the test Controller'); observe({ phase: 'cut', rpc }); return; }
+      const sessionId = req.headers['mcp-session-id'] ?? null;
+      observe({ phase: 'request', at: new Date().toISOString(), method: req.method, sessionId, rpc });
+      if (cut && rpc.method === 'tools/call') { res.writeHead(503).end('Service Unavailable'); observe({ phase: 'cut', sessionId, rpc }); return; }
       await route.before?.(rpc);
       const proxy = request({ hostname: '127.0.0.1', port: target, method: req.method, path: req.url,
         headers: { ...req.headers, host: `127.0.0.1:${target}` } }, response => {
@@ -37,7 +38,7 @@ export async function startRoute(target: number, observe: (record: unknown) => v
         response.pipe(res, { end: false });
         response.on('end', () => {
           const text = Buffer.concat(captured).toString();
-          observe({ phase: 'response', at: new Date().toISOString(), requestId: rpc.id, status: response.statusCode, body: text });
+          observe({ phase: 'response', at: new Date().toISOString(), requestId: rpc.id, method: rpc.method, sessionId: id ?? sessionId, status: response.statusCode, body: text });
           void Promise.resolve(route.after?.(rpc, text)).then(() => res.end(), error => res.destroy(error as Error));
         });
       });

@@ -29,7 +29,7 @@ export interface GivenRules {
   /** The logical session and first turn whose native log proves this rule exposure. */
   session?: string;
   turn?: number;
-  /** `initial` at the first connection; later phases after a Controller restart or an app refresh (upgrade checks). */
+  /** `initial` identifies the initial service phase, with exposure rechecked per native turn; later phases follow a restart or refresh. */
   phase: 'initial' | 'after-restart' | 'after-refresh';
   /** First event sequence number this phase covers. */
   fromSeq: number;

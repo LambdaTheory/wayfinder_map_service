@@ -53,7 +53,7 @@ export function normalizeTurn(lines: Line[], session: string, turn: number, inpu
 
 /** Incremental normalization preserves observed interleaving across concurrent clients and Controller actions. */
 export function streamTurn(session: string, turn: number, input: string, at: string, workdir: string, emit: (event: EventRecord) => void) {
-  const events = { push: emit };
+  const callId = (id: string) => `${session}:${turn}:${id}`;
   const base = (actor: EventRecord['actor']) => ({ seq: 0, at: new Date().toISOString(), session, turn, actor });
   emit({ ...base('script-human'), at, kind: 'message', role: 'user', text: input });
   const usage = { inputTokens: 0, outputTokens: 0 };
@@ -67,31 +67,31 @@ export function streamTurn(session: string, turn: number, input: string, at: str
     const item = line.item;
     pending.delete(item.id);
     switch (item.type) {
-      case 'agent_message': events.push({ ...base('agent'), kind: 'message', role: 'assistant', text: item.text ?? '' }); break;
+      case 'agent_message': emit({ ...base('agent'), kind: 'message', role: 'assistant', text: item.text ?? '' }); break;
       case 'command_execution':
-        events.push({ ...base('agent'), kind: 'command', command: item.command ?? '', exitCode: item.exit_code ?? null });
-        for (const path of readsIn(item.command ?? '', workdir)) events.push({ ...base('agent'), kind: 'file-read', path });
+        emit({ ...base('agent'), kind: 'command', command: item.command ?? '', exitCode: item.exit_code ?? null });
+        for (const path of readsIn(item.command ?? '', workdir)) emit({ ...base('agent'), kind: 'file-read', path });
         break;
       case 'mcp_tool_call': {
         const structured = item.result?.structured_content;
-        events.push({ ...base('agent'), kind: 'tool-call', callId: `${session}:${turn}:${item.id}`, server: item.server ?? '', tool: item.tool ?? '', arguments: item.arguments ?? null,
+        emit({ ...base('agent'), kind: 'tool-call', callId: callId(item.id), server: item.server ?? '', tool: item.tool ?? '', arguments: item.arguments ?? null,
           result: structured === undefined || structured === null ? { known: false, reason: item.error ? 'the call failed' : 'no structured result' } : { known: true, value: structured },
           failed: item.status === 'failed' || (item.error !== null && item.error !== undefined), requestId: { known: false, reason: 'Codex does not report JSON-RPC request IDs' } });
-        if (/resource/i.test(item.tool ?? '')) events.push({ ...base('agent'), kind: 'resource-read', uri: String((item.arguments as { uri?: string } | null)?.uri ?? ''), ok: item.status !== 'failed' });
+        if (/resource/i.test(item.tool ?? '')) emit({ ...base('agent'), kind: 'resource-read', uri: String((item.arguments as { uri?: string } | null)?.uri ?? ''), ok: item.status !== 'failed' });
         break;
       }
       case 'file_change':
-        for (const change of item.changes ?? []) events.push({ ...base('agent'), kind: 'file-change', path: relativePath(change.path, workdir),
+        for (const change of item.changes ?? []) emit({ ...base('agent'), kind: 'file-change', path: relativePath(change.path, workdir),
           change: change.kind === 'add' ? 'add' : change.kind === 'delete' ? 'delete' : 'modify' });
         break;
-      case 'collab_tool_call': events.push({ ...base('agent'), kind: 'delegation', phase: 'start', id: item.id, summary: item.tool ?? 'collab' }); break;
+      case 'collab_tool_call': emit({ ...base('agent'), kind: 'delegation', phase: 'start', id: item.id, summary: item.tool ?? 'collab' }); break;
       default: break;
     }
   };
   const finish = () => {
     // A call still running when the turn ended (timeout, cancellation) has no known outcome; its receipt stays unknown.
     for (const item of pending.values()) {
-      events.push({ ...base('agent'), kind: 'tool-call', callId: `${session}:${turn}:${item.id}`, server: item.server ?? '', tool: item.tool ?? '', arguments: item.arguments ?? null,
+      emit({ ...base('agent'), kind: 'tool-call', callId: callId(item.id), server: item.server ?? '', tool: item.tool ?? '', arguments: item.arguments ?? null,
         result: { known: false, reason: 'the turn ended before the call completed' }, failed: false, requestId: { known: false, reason: 'Codex does not report JSON-RPC request IDs' } });
     }
   };

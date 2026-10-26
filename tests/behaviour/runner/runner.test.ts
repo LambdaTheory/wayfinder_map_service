@@ -81,7 +81,7 @@ describe('sandbox', () => {
     const port = await freePort();
     await new Promise<void>(resolve => listener.listen(port, '127.0.0.1', resolve));
     const profile = join(own, 'probe.sb');
-    writeFileSync(profile, sandboxProfile(own, [port]));
+    writeFileSync(profile, sandboxProfile(own, own, [port]));
     const q = JSON.stringify;
     const run = (cmd: string) => spawnSync('sandbox-exec', ['-f', profile, '/bin/sh', '-c', cmd], { encoding: 'utf8' }).status;
     try {
@@ -130,7 +130,8 @@ describe('one Attempt end to end, without a model', () => {
     expect(record.isolation.touchedEverydayDatabase).not.toEqual({ known: true, value: true });
     expect(record.isolation.attribution).toEqual({ agentRevisions: 2, committedReceipts: 2, mismatched: [], unplaced: [] });
     expect(record.missing).toEqual([]);
-    expect(text).not.toMatch(/[0-9a-f]{64}/);
+    const withoutControlHashes = JSON.stringify(record, (key, value: unknown) => key === 'hashes' ? '<control-hashes>' : value);
+    expect(withoutControlHashes).not.toMatch(/[0-9a-f]{64}/);
     const s0b = library.find(s => s.id === 'S0b')!;
     const results = Object.fromEntries(itemsOf(s0b).flatMap(i => i.judge === 'script' ? [[i.id, i.check(record).status]] : []));
     expect(results).toEqual({ 'created-in-turn-0': 'holds', 'settled-on-blanket': 'holds', 'paged-and-created-once': 'holds', 'route-published': 'holds' });

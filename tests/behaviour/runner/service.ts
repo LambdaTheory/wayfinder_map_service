@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const checkoutRoot = fileURLToPath(new URL('../../../', import.meta.url));
-const observer = fileURLToPath(new URL('../../helpers/codex-acceptance-observer.mjs', import.meta.url));
+const observer = fileURLToPath(new URL('./protocol-observer.mjs', import.meta.url));
 /** The everyday service and the ChatGPT relay in front of it. */
 export const everydayPort = 18766;
 export const reservedPorts = [18765, everydayPort];

@@ -1,13 +1,14 @@
 // Session orchestration with actual MCP calls and fixed native evidence; never starts a model.
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, describe, expect, test } from 'vitest';
+import { afterAll, describe, expect, test, vi } from 'vitest';
 import { agentRevisions, anyWrite, happened, mapCalls, never } from '../checks.ts';
 import type { AttemptRecord, EventRecord } from '../evidence.ts';
 import { library } from '../library.ts';
 import type { Scenario } from '../scenario.ts';
+import * as codex from './codex.ts';
 import { correlateReceipts } from './normalize.ts';
 import { preflight, runAttempt } from './run.ts';
 
@@ -16,11 +17,14 @@ const cache = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests');
 mkdirSync(cache, { recursive: true, mode: 0o700 });
 const records = mkdtempSync(join(cache, 'sessions-'));
 afterAll(() => { rmSync(scratch, { recursive: true, force: true }); rmSync(records, { recursive: true, force: true }); });
+const sandboxDriverDir = join(scratch, 'driver'); mkdirSync(sandboxDriverDir);
+const sandboxDriver = join(sandboxDriverDir, 'fake-codex.mjs');
+copyFileSync(fileURLToPath(new URL('./fake-codex.mjs', import.meta.url)), sandboxDriver); chmodSync(sandboxDriver, 0o755);
 const scenario = (id: string) => library.find(s => s.id === id)!;
-const run = async (s: Scenario, model = 'fake-sessions', timeoutMs = 10_000, cancel?: { value: boolean; kill?: () => void }) => {
+const run = async (s: Scenario, model = 'fake-sessions', timeoutMs = 10_000, cancel?: { value: boolean; kill?: () => void }, sandbox = false) => {
   const out = mkdtempSync(join(records, 'attempt-'));
   const outcome = await runAttempt({ batchId: 'T-sessions', scenarios: [], count: 1, ceiling: 1, out, scratchRoot: scratch,
-    codex: { model, effort: 'low', bin: fileURLToPath(new URL('./fake-codex.mjs', import.meta.url)), sandbox: false, timeoutMs } },
+    codex: { model, effort: 'low', bin: sandbox ? sandboxDriver : fileURLToPath(new URL('./fake-codex.mjs', import.meta.url)), sandbox, timeoutMs } },
   { attemptId: `${s.id}-1`, scenario: s }, () => cancel?.value ?? false, kill => { if (cancel) cancel.kill = kill; });
   const record = JSON.parse(readFileSync(join(out, `${s.id}-1`, 'attempt.json'), 'utf8')) as AttemptRecord;
   return { outcome, record, out };
@@ -54,6 +58,20 @@ describe('session scheduling and attribution', () => {
     expect(record.given.map(g => g.session).sort()).toEqual(['A', 'B']);
   }, 30_000);
 
+  test('the real sandbox gives concurrent clients separate HOME access and protected profiles', async () => {
+    const { outcome, record } = await run(seeded([
+      { session: 'A', kind: 'opening', say: 'FAKE-CONCURRENT A' },
+      { session: 'B', kind: 'opening', say: 'FAKE-CONCURRENT B', concurrent: true },
+    ]), 'fake-sessions', 10_000, undefined, true);
+    expect(outcome.completeness).toBe('complete');
+    const probes = record.events.filter(e => e.kind === 'command' && e.command.startsWith('probe-other-home'));
+    expect(probes).toHaveLength(4);
+    expect(probes.every(e => e.kind === 'command' && e.exitCode !== 0)).toBe(true);
+    const profiles = record.events.flatMap(e => e.kind === 'controller' && e.action === 'isolation-check'
+      ? Object.keys((e.detail as { hashes: Record<string, string> }).hashes) : []);
+    expect(new Set(profiles).size).toBe(2);
+  });
+
   test('a committed write whose native receipt is lost stays unknown despite relay and author evidence', async () => {
     const { record } = await run(seeded([{ session: 'A', kind: 'opening', say: 'FAKE-LOST' }]));
     expect(record.receipts).toHaveLength(1);
@@ -61,6 +79,28 @@ describe('session scheduling and attribution', () => {
     expect(agentRevisions(record).map(r => [r.session, r.turn])).toEqual([[null, null]]);
     expect(happened('A wrote', anyWrite({ session: 'A', turn: 0 }))(record).status).toBe('unknown');
     expect(never('A wrote', anyWrite({ session: 'A', turn: 0 }))(record).status).toBe('unknown');
+  });
+
+  test('control-file tampering stops the next turn and records an isolation failure', async () => {
+    const original = codex.runTurn;
+    let calls = 0;
+    const spy = vi.spyOn(codex, 'runTurn').mockImplementation(async request => {
+      const result = await original(request);
+      if (++calls === 1) writeFileSync(request.profile.path, '(version 1) (allow default)');
+      return result;
+    });
+    try {
+      const { outcome, record } = await run(seeded([
+        { session: 'A', kind: 'opening', say: 'FAKE-FRESH' },
+        { session: 'A', kind: 'nudge', say: 'FAKE-FRESH' },
+      ]));
+      expect(outcome.completeness).toBe('driver-failed');
+      expect(outcome.detail).toMatch(/isolation failure/);
+      expect(mapCalls(record).some(e => e.turn === 1)).toBe(false);
+      expect(record.given.find(g => g.turn === 1)!.instructions.known).toBe(false);
+      expect(record.events.find(e => e.kind === 'controller' && e.action === 'isolation-check' && e.turn === 1)).toMatchObject({ detail: { ok: false } });
+      expect((record as AttemptRecord & { isolation: { failures: string[] } }).isolation.failures).toHaveLength(1);
+    } finally { spy.mockRestore(); }
   });
 
   test('freshProcess starts a new thread, preserves both native IDs and reads the existing Map', async () => {
@@ -96,6 +136,28 @@ describe('Controller actions and preconditions', () => {
     expect(record.receipts.some(r => r.callId.startsWith('controller:'))).toBe(false);
   });
 
+  test('S6 stops after an injection if the native write did not receive a Conflict', async () => {
+    const s6 = scenario('S6');
+    const { outcome, record } = await run({ ...s6, turns: [
+      { ...s6.turns[0]!, say: 'FAKE-NO-CONFLICT' }, s6.turns[2]!,
+    ] });
+    expect(outcome.completeness).toBe('precondition-not-met');
+    expect(outcome.detail).toMatch(/no native Conflict/);
+    expect(record.events.some(e => e.kind === 'controller' && e.action === 'conflicting-write' && (e.detail as { status: string }).status === 'completed')).toBe(true);
+    expect(record.receipts.some(r => r.outcome.kind === 'committed')).toBe(true);
+    expect(record.sessions[0]!.turns.map(t => t.index)).toEqual([0]);
+  });
+
+  test('fresh-process evidence includes earlier HOME skills and marks inconsistent client versions unknown', async () => {
+    const { outcome, record } = await run(seeded([
+      { session: 'A', kind: 'opening', say: 'FAKE-EARLY-SKILL' },
+      { session: 'A', kind: 'opening', say: 'FAKE-VERSION-B', freshProcess: true },
+    ]));
+    expect(outcome.completeness).toBe('complete');
+    expect((record as AttemptRecord & { isolation: { clientSkills: string[] } }).isolation.clientSkills).toContain('early-only');
+    expect(record.client.version).toEqual({ known: false, reason: 'cliVersion missing or inconsistent across native sessions' });
+  });
+
   test.each(['S5', 'S10'])('%s resumes only after its proposal appeared', async id => {
     const { outcome, record } = await run(scenario(id));
     expect(outcome.completeness).toBe('complete');
@@ -127,14 +189,25 @@ describe('Controller actions and preconditions', () => {
     expect(script.judge === 'script' && script.check(record).status).toBe('holds');
     expect(mapCalls(record).some(e => e.turn === 1 && e.failed && !e.result.known)).toBe(true);
     expect(record.events.find(e => e.kind === 'controller' && e.action === 'route-fault-mode')).toMatchObject({
-      actor: 'controller', detail: { method: 'tools/call', status: 503, forwarded: false, initializationAndDiscovery: 'reachable' },
+      actor: 'controller', detail: { method: 'tools/call', status: 503, forwarded: false, mode: 'business-calls-only' },
     });
     expect(agentRevisions(record).every(r => r.turn === 0)).toBe(true);
     expect(record.baitClientIds).toEqual(['Bait-Credential']);
     const raw = join(out, 'W5-1', 'raw');
     expect(readFileSync(join(raw, 'work/.wayfinder-agent/token'), 'utf8')).toBe('<bait-token>');
-    const route = readFileSync(join(raw, 'relay-A.jsonl'), 'utf8').split('\n').map(l => JSON.parse(l) as { turn: number; phase: string });
-    expect(route.some(e => e.turn === 1 && e.phase === 'cut')).toBe(true);
+    const route = readFileSync(join(raw, 'relay-A.jsonl'), 'utf8').split('\n').map(l => JSON.parse(l) as { turn: number; phase: string; requestId?: number; sessionId?: string; rpc?: { id: number; method: string } });
+    const requests = route.filter(e => e.turn === 1 && e.phase === 'request' && e.rpc?.method === 'tools/call');
+    expect(requests.length).toBeGreaterThan(0);
+    const protocol = readFileSync(join(raw, 'protocol.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l) as { kind?: string; sessionId?: string; requestId?: number });
+    expect(protocol.some(e => e.kind === 'tool-call')).toBe(true); // The observer itself must work.
+    for (const request of requests) {
+      expect(route.some(e => e.turn === 1 && e.phase === 'cut' && e.rpc?.id === request.rpc!.id)).toBe(true);
+      expect(route.some(e => e.turn === 1 && e.phase === 'response' && e.requestId === request.rpc!.id)).toBe(false);
+      expect(protocol.some(e => e.kind === 'tool-call' && e.sessionId === request.sessionId && e.requestId === request.rpc!.id)).toBe(false);
+    }
+    expect(record.events.find(e => e.kind === 'controller' && e.action === 'relay-observations' && e.turn === 1)).toMatchObject({
+      detail: { initializeResponses: 1, discoveryResponses: 1 },
+    });
     expect(record.sessions[0]!.mcpSessionIds.known && record.sessions[0]!.mcpSessionIds.value.length).toBe(2);
   });
 

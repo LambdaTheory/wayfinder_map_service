@@ -13,7 +13,7 @@ export interface Controller {
   instructions: string;
   toolDescriptions: Record<string, string>;
   seed(map: SeedMap): Promise<number>;
-  conflict(mapId: string, id: string): Promise<void>;
+  conflictingWrite(mapId: string, id: string): Promise<void>;
   /** Every Map in the catalog with its full history, paged to the end. */
   exportCatalog(): Promise<{ mapId: string; history: WireRevision[] }[]>;
   close(): Promise<void>;
@@ -65,7 +65,7 @@ export async function connectController(port: number, token: string, observe: (e
       if (claims.length) revision = await apply(map.mapId, revision, claims);
       return revision;
     },
-    async conflict(mapId, id) {
+    async conflictingWrite(mapId, id) {
       // A concurrent agent may advance the head while the Controller prepares its injection.
       // Retry only this synthetic Controller action, never the agent's rejected intention.
       for (let retry = 0; retry < 10; retry++) {

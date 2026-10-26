@@ -2,12 +2,12 @@
 // A stand-in for `codex exec` in tests: makes real MCP calls to the run's service and prints Codex-shaped JSON
 // events, so the runner, normalizer and receipts are exercised without a model. It plays S0b: the first turn
 // pages the catalog and asks to confirm the Destination; a reply creates one Map and publishes a Ticket.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 // The account's real home, not the private HOME the runner gives the client.
 const realHome = userInfo().homedir;
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const args = process.argv.slice(2);
 if (args[0] === '--version') { console.log('codex-cli 0.0.0-fake'); process.exit(0); }
@@ -36,8 +36,11 @@ const rollout = join(process.env.CODEX_HOME, 'sessions', '2026', '10', '25');
 mkdirSync(rollout, { recursive: true });
 const log = join(rollout, `rollout-2026-10-25T00-00-00-${thread}.jsonl`);
 const record = e => appendFileSync(log, JSON.stringify(e) + '\n');
-if (!resume) record({ type: 'session_meta', payload: { id: thread, cli_version: '0.0.0-fake' } });
+if (!resume) record({ type: 'session_meta', payload: { id: thread, cli_version: prompt === 'FAKE-VERSION-B' ? '0.0.1-fake' : '0.0.0-fake' } });
 record({ type: 'event_msg', payload: { type: 'thread_settings_applied', thread_settings: { model: 'fake-model', reasoning_effort: 'low' } } });
+if (prompt === 'FAKE-EARLY-SKILL') {
+  const dir = join(process.env.CODEX_HOME, 'skills', 'early-only'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'SKILL.md'), 'synthetic');
+}
 const tools = await rpc('tools/list', {});
 record({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: init.instructions }] } });
 record({ type: 'response_item', payload: { type: 'additional_tools', tools: tools.tools.map(t => ({ name: t.name, description: t.description })) } });
@@ -79,6 +82,13 @@ if (sessionDrill || prompt.startsWith('FAKE-CONCURRENT') || prompt === 'FAKE-LOS
   } else {
     const concurrent = /^FAKE-CONCURRENT ([AB])/.exec(prompt)?.[1];
     if (concurrent) {
+      const otherHome = join(dirname(process.env.HOME), `home-${concurrent === 'A' ? 'B' : 'A'}`);
+      const probe = (name, action) => {
+        let exitCode = 0; try { action(); } catch { exitCode = 1; }
+        emit({ type: 'item.completed', item: { id: `item_${item++}`, type: 'command_execution', command: name, exit_code: exitCode, status: 'completed' } });
+      };
+      probe('probe-other-home-read', () => readdirSync(join(otherHome, '.codex')));
+      probe('probe-other-home-write', () => writeFileSync(join(otherHome, 'intrusion'), 'synthetic'));
       writeFileSync(`ready-${concurrent}`, thread);
       const until = Date.now() + 5000;
       while (!(existsSync('ready-A') && existsSync('ready-B'))) {
@@ -87,7 +97,7 @@ if (sessionDrill || prompt.startsWith('FAKE-CONCURRENT') || prompt === 'FAKE-LOS
       }
     }
     const commands = [{ kind: 'content.add', section: 'fog', item: { id: `fake-${thread}`, text: 'A synthetic observation', references: [] } }];
-    let result = await tool('map_apply', { version, mapId, expectedRevision: head.revision.revision, commands }, prompt === 'FAKE-LOST');
+    let result = await tool('map_apply', { version, mapId, expectedRevision: head.revision.revision + (prompt === 'FAKE-NO-CONFLICT' ? 1 : 0), commands }, prompt === 'FAKE-LOST');
     if (result?.kind === 'conflict') {
       head = await tool('map_read', { mapId });
       if (concurrent) result = await tool('map_apply', { version, mapId, expectedRevision: head.revision.revision, commands });
