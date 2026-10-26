@@ -20,6 +20,13 @@ export const clientProfiles: Record<Harness, { onboarded: Entry[]; entries: Entr
   grok: { onboarded: [], entries: ['mcp-only'], supports: {} },
 };
 
+/** Capabilities proven for one Entry must not become evidence for an Entry still awaiting onboarding. */
+export function supportsFor(harness: Harness, entry: Entry): Partial<Record<Capability, boolean | 'unverified'>> {
+  const profile = clientProfiles[harness];
+  if (profile.onboarded.includes(entry)) return profile.supports;
+  return Object.fromEntries(Object.entries(profile.supports).map(([key, value]) => [key, value === false ? false : 'unverified']));
+}
+
 export type Cell = { state: 'applicable' } | { state: 'not-applicable' | 'unverified' | 'not-ready'; reasons: string[] };
 
 /** One cell of the applicability matrix: a Scenario on one client through one Entry. */

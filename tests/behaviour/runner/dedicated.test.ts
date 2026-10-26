@@ -1,15 +1,15 @@
 // Model-free onboarding evidence for the Dedicated Entry; real-model onboarding still needs an approved Batch.
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, expect, test } from 'vitest';
-import { clientProfiles } from '../clients.ts';
+import { clientProfiles, supportsFor } from '../clients.ts';
 import type { AttemptRecord } from '../evidence.ts';
 import { library } from '../library.ts';
 import { prepareSession, writeProfile } from './codex.ts';
-import { captureDedicatedArtifacts, dedicatedLauncher, dedicatedServiceDirectory, prepareDedicated } from './dedicated.ts';
+import { captureDedicatedArtifacts, dedicatedContext, dedicatedLauncher, dedicatedServiceDirectory, prepareDedicated, runDedicatedTurn } from './dedicated.ts';
 import { isolationSnapshot, preflight, runAttempt, runBatch } from './run.ts';
 import { newToken, startService } from './service.ts';
 
@@ -29,6 +29,8 @@ afterAll(() => { rmSync(scratch, { recursive: true, force: true }); rmSync(recor
 test('Dedicated planning is explicit, and synthetic evidence does not onboard the Entry', () => {
   expect(preflight({ entry: 'dedicated', batchId: 'D', scenarios: ['S0b', 'F11'], count: 2, ceiling: 4 }).refusals).toEqual([]);
   expect(clientProfiles.codex.onboarded).not.toContain('dedicated');
+  expect(supportsFor('codex', 'dedicated')['multi-turn']).toBe('unverified');
+  expect(supportsFor('codex', 'mcp-only')['multi-turn']).toBe(true);
 });
 
 test.skipIf(!sandbox)('real launcher runs and resumes inside the allowlist, records its context and never reaches everyday state', async () => {
@@ -53,11 +55,13 @@ test.skipIf(!sandbox)('real launcher runs and resumes inside the allowlist, reco
   const context = JSON.parse(readFileSync(join(path, 'raw/entry-context.json'), 'utf8'));
   expect(context.launcher).toBe('scripts/wayfinder-agent/wayfinder');
   expect(context.context.map((c: { installed: boolean }) => c.installed)).toEqual([true, true, true, true]);
-  expect(context.context.slice(0, 2).map((c: { shownToModel: boolean }) => c.shownToModel)).toEqual([true, true]);
+  expect(context.context.slice(0, 2).map((c: { shownToModel: boolean }) => c.shownToModel)).toEqual([false, false]);
   expect(record.given[0]!.extraContext.join()).toContain('.agents/skills/wayfinder/SKILL.md');
   const first = context.launches[0]; const second = context.launches[1];
   expect(first.argv).not.toContain('--ignore-user-config');
   expect(first.argv).toContain('--no-daemon');
+  expect(first.argv[first.argv.indexOf('-m') + 1]).toBe('fake-model');
+  expect(first.argv).toContain('model_reasoning_effort="low"');
   expect(second.argv.slice(-2)).toEqual([record.sessions[0]!.nativeId.known ? record.sessions[0]!.nativeId.value : '', '-']);
   expect(first.overrides.WAYFINDER_AGENT_STATE_ROOT).toContain('/wf-behave-S0b-1-');
   expect(first.overrides.WAYFINDER_AGENT_DATABASE).toMatch(/^~\/Library\/Caches\/wayfinder-behaviour-tests\/dedicated-[^/]+\/db\/maps.sqlite$/);
@@ -67,6 +71,9 @@ test.skipIf(!sandbox)('real launcher runs and resumes inside the allowlist, reco
   expect(first.argv.join(' ')).toContain(`http://127.0.0.1:${first.overrides.WAYFINDER_AGENT_PORT}/mcp`);
   expect(first.argv.join(' ')).not.toMatch(/:(18765|18766)\//);
   const probe = JSON.parse(readFileSync(join(path, 'raw/work/entry-probe.json'), 'utf8'));
+  expect(probe.privateHome).toBe(first.home);
+  expect(probe.authTarget.replace(homedir(), '~')).toBe(`${first.overrides.WAYFINDER_AGENT_SERVICE_DIR}/launcher-home/.codex/auth.json`);
+  expect(probe.instructionsAvailable && probe.skillAvailable).toBe(true);
   expect(probe.bootstrapKeys).toEqual([]);
   expect(probe.resumed).toBe(true);
   expect(readFileSync(join(path, 'raw/work/fake-note.txt'), 'utf8')).toBe('note\n');
@@ -130,3 +137,169 @@ test('artifact capture redacts credentials without corrupting other bytes or fol
   expect(readFileSync(join(target, 'binary'))).toEqual(Buffer.concat([Buffer.from([0, 255]), Buffer.from('<credential>'), Buffer.from([128, 0])]));
   expect(existsSync(join(target, 'auth-link'))).toBe(false);
 });
+
+async function launcherFixture() {
+  const dir = dedicatedServiceDirectory();
+  const own = mkdtempSync(join(scratch, 'cross-turn-'));
+  const controller = { clientId: 'Behaviour-Controller', token: newToken() };
+  const service = await startService(dir, controller, []);
+  const session = prepareSession(own, 'A', newToken(), auth);
+  const setup = prepareDedicated(own, session, service, controller, options, writeProfile(own, fake));
+  session.codexHome = setup.codexHome;
+  const workdir = join(own, 'work'); mkdirSync(workdir);
+  const request = { options, session, port: service.port, workdir, profile: setup.profile, prompt: 'start' };
+  return { dir, own, setup, session, service, request,
+    sandboxed: (code: string) => spawnSync('/usr/bin/sandbox-exec', ['-f', setup.profile, process.execPath, '-e', code],
+      { cwd: workdir, encoding: 'utf8', timeout: 10_000 }),
+    close: async () => { await service.stop(); rmSync(dir, { recursive: true, force: true }); } };
+}
+
+// These are actual client-permission writes between two real launcher invocations, not string checks.
+test.skipIf(!sandbox).each(['codex', 'python3', 'service-build', 'profile'])('cross-turn %s planting is denied before the next launcher can execute it', async kind => {
+  const f = await launcherFixture();
+  const marker = join(records, `escaped-${kind}`);
+  try {
+    expect((await runDedicatedTurn(f.request, f.setup)).turnStarted).toBe(true);
+    const target = kind === 'service-build' ? join(f.setup.control, 'launcher-checkout/dist/mcp-start.js')
+      : kind === 'profile' ? f.setup.profile : join(f.setup.control, 'launcher-bin', kind);
+    const payload = kind === 'profile' ? '(version 1)\n(allow default)\n'
+      : kind === 'service-build' ? `require('fs').writeFileSync(${JSON.stringify(marker)}, 'escaped')`
+      : `#!/bin/sh\nprintf escaped > '${marker}'\nexit 0\n`;
+    const attack = f.sandboxed(`const fs = require('fs'); try {
+      fs.mkdirSync(require('path').dirname(${JSON.stringify(target)}), { recursive: true });
+      fs.writeFileSync(${JSON.stringify(target)}, ${JSON.stringify(payload)}, { mode: 0o700 });
+      console.log('wrote');
+    } catch (e) { console.log(e.code); }`);
+    expect(attack.stdout.trim()).toMatch(/^(EPERM|EACCES)$/);
+    expect(() => f.setup.verify()).not.toThrow();
+    if (kind === 'service-build') await f.service.stop();
+    const next = await runDedicatedTurn({ ...f.request, prompt: 'resume' }, f.setup);
+    expect(next.turnStarted).toBe(kind !== 'service-build');
+    if (kind === 'service-build') expect(next.stderr).toContain('npm run build');
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(join(f.dir, 'service.pid'))).toBe(false);
+  } finally { await f.close(); }
+}, 30_000);
+
+test.skipIf(!sandbox)('a changed control manifest aborts before a second launcher invocation', async () => {
+  const f = await launcherFixture();
+  try {
+    expect((await runDedicatedTurn(f.request, f.setup)).turnStarted).toBe(true);
+    // Runner-side fault injection complements the sandbox write-denial test.
+    writeFileSync(f.setup.profile, '(version 1)\n(allow default)\n');
+    await expect(runDedicatedTurn(f.request, f.setup)).rejects.toThrow(/isolation failure/);
+  } finally { await f.close(); }
+}, 30_000);
+
+test.skipIf(!sandbox)('a client cannot redirect the private source login to an outside sentinel', async () => {
+  const f = await launcherFixture();
+  const sentinel = join(records, 'outside-source-auth'); writeFileSync(sentinel, 'untouched');
+  try {
+    expect((await runDedicatedTurn(f.request, f.setup)).turnStarted).toBe(true);
+    const attack = f.sandboxed(`const fs = require('fs'); try {
+      fs.unlinkSync(${JSON.stringify(f.setup.sourceAuth)});
+      fs.symlinkSync(${JSON.stringify(sentinel)}, ${JSON.stringify(f.setup.sourceAuth)});
+      console.log('replaced');
+    } catch (e) { console.log(e.code); }`);
+    expect(attack.stdout.trim()).toMatch(/^(EPERM|EACCES)$/);
+    expect((await runDedicatedTurn(f.request, f.setup)).turnStarted).toBe(true);
+    expect(readFileSync(sentinel, 'utf8')).toBe('untouched');
+  } finally { await f.close(); }
+}, 30_000);
+
+test.skipIf(!sandbox)('a client-planted native auth symlink is rejected before unsandboxed login synchronization', async () => {
+  const f = await launcherFixture();
+  const sentinel = join(records, 'outside-native-auth'); writeFileSync(sentinel, 'never-read-or-copied');
+  try {
+    expect((await runDedicatedTurn(f.request, f.setup)).turnStarted).toBe(true);
+    const attack = f.sandboxed(`const fs = require('fs'); const target = ${JSON.stringify(join(f.setup.state, 'auth.json'))};
+      fs.unlinkSync(target); fs.symlinkSync(${JSON.stringify(sentinel)}, target); console.log('planted');`);
+    expect(attack.stdout.trim()).toBe('planted');
+    await expect(runDedicatedTurn(f.request, f.setup)).rejects.toThrow(/isolation failure: changed native auth link target/);
+    expect(readFileSync(sentinel, 'utf8')).toBe('never-read-or-copied');
+    expect(readFileSync(f.setup.sourceAuth, 'utf8')).toBe('{}');
+  } finally { await f.close(); }
+}, 30_000);
+
+test.skipIf(!sandbox).each(['symlink', 'inode'])('private source login %s substitution fails identity verification', async kind => {
+  const f = await launcherFixture();
+  const sentinel = join(records, `outside-auth-${kind}`); writeFileSync(sentinel, 'untouched');
+  try {
+    expect((await runDedicatedTurn(f.request, f.setup)).turnStarted).toBe(true);
+    // The sandbox rejects this mutation; inject it as the runner to exercise the second, identity guard.
+    renameSync(f.setup.sourceAuth, `${f.setup.sourceAuth}.saved`);
+    if (kind === 'symlink') symlinkSync(sentinel, f.setup.sourceAuth);
+    else writeFileSync(f.setup.sourceAuth, '{}');
+    await expect(runDedicatedTurn(f.request, f.setup)).rejects.toThrow(/isolation failure/);
+    expect(readFileSync(sentinel, 'utf8')).toBe('untouched');
+  } finally { await f.close(); }
+}, 30_000);
+
+test.skipIf(!sandbox)('the actual Dedicated sandbox rejects TCP connections to both everyday ports', async () => {
+  const f = await launcherFixture();
+  try {
+    const probe = f.sandboxed(`Promise.all([18765,18766].map(port => new Promise(resolve => {
+      const socket = require('net').connect(port, '127.0.0.1');
+      socket.once('connect', () => { socket.destroy(); resolve([port, 'CONNECTED']); });
+      socket.once('error', e => resolve([port, e.code]));
+    }))).then(results => console.log(JSON.stringify(results)));`);
+    expect(probe.status).toBe(0);
+    expect(JSON.parse(probe.stdout)).toEqual([[18765, 'EPERM'], [18766, 'EPERM']]);
+  } finally { await f.close(); }
+}, 30_000);
+
+test('runAttempt refuses Dedicated without a sandbox before creating resources', async () => {
+  const out = join(records, 'unsafe');
+  const outcome = await runAttempt({ entry: 'dedicated', batchId: 'Unsafe', scenarios: [], count: 1, ceiling: 1,
+    out, codex: { ...options, sandbox: false }, scratchRoot: scratch }, { attemptId: 'D-1', scenario: library[0]! }, () => false, () => undefined);
+  expect(outcome).toMatchObject({ completeness: 'driver-failed', detail: expect.stringContaining('isolation failure') });
+  expect(existsSync(out)).toBe(false);
+});
+
+test.skipIf(!sandbox)('a launcher failure records no installed Skill just because its projection exists', async () => {
+  const broken = join(scratch, 'broken-codex'); writeFileSync(broken, '#!/bin/sh\nexit 3\n', { mode: 0o700 });
+  const out = join(records, 'failed-install');
+  const outcome = await runAttempt({ entry: 'dedicated', batchId: 'FailedInstall', scenarios: [], count: 1, ceiling: 1,
+    out, codex: { ...options, bin: broken }, scratchRoot: scratch }, { attemptId: 'D-1', scenario: library[0]! }, () => false, () => undefined);
+  expect(outcome.completeness).toBe('launch-failed');
+  const context = JSON.parse(readFileSync(join(out, 'D-1/raw/entry-context.json'), 'utf8'));
+  expect(context.context.map((c: { installed: boolean }) => c.installed)).toEqual([false, false, false, false]);
+  expect(context.context.map((c: { shownToModel: boolean | null }) => c.shownToModel)).toEqual([null, null, null, null]);
+  const record = JSON.parse(readFileSync(join(out, 'D-1/attempt.json'), 'utf8'));
+  expect(record.missing).toContain('given[0].extraContext');
+  expect(existsSync(join(out, 'D-1/database/maps.sqlite'))).toBe(true);
+}, 30_000);
+
+test.skipIf(!sandbox)('tokens refreshed between turns are redacted before native evidence is written', async () => {
+  const out = join(records, 'refresh');
+  const scenario = library.find(s => s.id === 'S12')!;
+  const outcome = await runAttempt({ entry: 'dedicated', batchId: 'Refresh', scenarios: [], count: 1, ceiling: 1,
+    out, codex: options, scratchRoot: scratch }, { attemptId: 'D-1', scenario: { ...scenario, turns: [
+      { session: 'A', kind: 'opening', say: 'FAKE-REFRESH' }, { session: 'A', kind: 'nudge', say: 'resume' },
+    ] } }, () => false, () => undefined);
+  expect(outcome.completeness, outcome.detail).toBe('complete');
+  const stdout = readFileSync(join(out, 'D-1/raw/turn-0-A.stdout.jsonl'), 'utf8');
+  expect(stdout).not.toContain('synthetic-refreshed-token-');
+  expect(stdout).toContain('<codex-login-A-turn-0-');
+}, 30_000);
+
+test.skipIf(!sandbox)('runAttempt records a client auth-link attack as isolation failure and still cleans up', async () => {
+  const sentinel = join(records, 'attempt-sentinel'); writeFileSync(sentinel, 'unchanged');
+  const hostile = join(scratch, 'hostile-codex.mjs');
+  writeFileSync(hostile, `#!/usr/bin/env node
+await import(${JSON.stringify(new URL('file://' + fake).href)});
+const fs = await import('node:fs');
+const auth = process.env.CODEX_HOME + '/auth.json';
+fs.rmSync(auth); fs.symlinkSync(${JSON.stringify(sentinel)}, auth);
+`, { mode: 0o700 });
+  const out = join(records, 'hostile-attempt');
+  const outcome = await runAttempt({ entry: 'dedicated', batchId: 'Hostile', scenarios: [], count: 1, ceiling: 1,
+    out, codex: { ...options, bin: hostile }, scratchRoot: scratch }, { attemptId: 'D-1', scenario: library.find(s => s.id === 'S0b')! }, () => false, () => undefined);
+  expect(outcome).toMatchObject({ completeness: 'driver-failed', detail: expect.stringContaining('isolation failure') });
+  const record = JSON.parse(readFileSync(join(out, 'D-1/attempt.json'), 'utf8'));
+  expect(record.isolation).toMatchObject({ failure: expect.stringContaining('changed native auth link target'),
+    dedicatedServiceRemoved: true, scratchRemoved: true, serviceStopped: { code: 0 } });
+  expect(record.missing).toContain('raw.client');
+  expect(existsSync(join(out, 'D-1/raw/entry-context.json'))).toBe(true);
+  expect(readFileSync(sentinel, 'utf8')).toBe('unchanged');
+}, 30_000);

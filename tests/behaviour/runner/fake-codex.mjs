@@ -2,7 +2,7 @@
 // A stand-in for `codex exec` in tests: makes real MCP calls to the run's service and prints Codex-shaped JSON
 // events, so the runner, normalizer and receipts are exercised without a model. It plays S0b: the first turn
 // pages the catalog and asks to confirm the Destination; a reply creates one Map and publishes a Ticket.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 // The account's real home, not the private HOME the runner gives the client.
 const realHome = userInfo().homedir;
@@ -43,10 +43,18 @@ record({ type: 'response_item', payload: { type: 'additional_tools', tools: tool
 if (process.env.CODEX_HOME.endsWith('/.codex-wayfinder')) {
   const instructions = readFileSync(join(process.env.CODEX_HOME, 'AGENTS.md'), 'utf8');
   const skill = readFileSync(join(process.env.HOME, '.agents/skills/wayfinder/SKILL.md'), 'utf8');
-  record({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: instructions }] } });
-  record({ type: 'response_item', payload: { type: 'message', role: 'tool', content: [{ type: 'input_text', text: skill }] } });
   writeFileSync('entry-probe.json', JSON.stringify({ privateHome: process.env.HOME, codexHome: process.env.CODEX_HOME,
+    authTarget: readlinkSync(join(process.env.CODEX_HOME, 'auth.json')), instructionsAvailable: Boolean(instructions), skillAvailable: Boolean(skill),
     bootstrapKeys: Object.keys(process.env).filter(k => k.startsWith('WAYFINDER_AGENT_')), args, resumed: Boolean(resume) }));
+}
+if (prompt.includes('FAKE-REFRESH')) {
+  const auth = join(process.env.CODEX_HOME, 'auth.json');
+  const token = `synthetic-refreshed-token-${randomUUID()}`;
+  rmSync(auth);
+  writeFileSync(auth, JSON.stringify({ access_token: token }), { mode: 0o600 });
+  const newer = new Date(Date.now() + 1000);
+  utimesSync(auth, newer, newer);
+  console.log(token); // Deliberate native-output leak: the runner must discover the refreshed token first.
 }
 emit({ type: 'thread.started', thread_id: thread });
 emit({ type: 'turn.started' });

@@ -4,8 +4,8 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { clientProfiles } from './clients.ts';
-import type { AttemptRecord, Completeness, Harness } from './evidence.ts';
+import { supportsFor } from './clients.ts';
+import type { AttemptRecord, Completeness, Entry, Harness } from './evidence.ts';
 import { library } from './library.ts';
 import type { Scenario } from './scenario.ts';
 import { asScenario, upgradeChecks } from './upgrade-checks.ts';
@@ -50,7 +50,7 @@ export function buildReport(batchDirs: string[], reviews: Record<string, Review[
     const records = new Map(batch.outcomes.map(o => [o.attemptId, load(o)]));
     // An Attempt without a record still belongs to its Batch's release, so it stays in the same cell.
     const service = [...records.values()].find(r => r)?.service;
-    const supports = clientProfiles[batch.combination.split(':')[0] as Harness]?.supports ?? {};
+    const supports = supportsFor(batch.combination.split(':')[0] as Harness, batch.entry as Entry);
     for (const o of batch.outcomes) {
       const s = all.find(x => x.id === o.scenario);
       const record = records.get(o.attemptId) ?? null;
