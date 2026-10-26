@@ -22,7 +22,7 @@ The two spikes recorded in #108 establish feasibility, not Wayfinder feature acc
 
 ## Consequences
 
-This amends the four-tool boundary of [ADR 0003](0003-mcp-service-carries-the-versioned-exploration-workflow.md), not its decision against a separate workflow-retrieval tool. The [client paths and public contract](../spec/answer-desk.md#6-client-paths-and-protocol-state) define task, blocking and taking-read use, result schemas, admission, cancellation and task lifetime; [release semantics](../spec/answer-desk.md#agent-delivery) define the durable taking boundary.
+This amends the four-tool boundary of [ADR 0003](0003-mcp-service-carries-the-versioned-exploration-workflow.md), not its decision against a separate workflow-retrieval tool. The [client paths and public contract](../spec/answer-desk.md#6-client-paths-and-protocol-state) define task, blocking and taking-read use, result schemas, admission, cancellation and task lifetime; [release semantics](../spec/answer-desk.md#agent-delivery) define the durable taking boundary. [Reopen Request handling](../spec/answer-desk.md#reopen-requests) and [publication retirement](../spec/answer-desk.md#publication-after-reopening) define what a delivered request authorizes and how its answers remain distinct from a fresh verdict.
 
 The server needs the SDK v2 dual-era transport described in [MCP/SQLite §15.2](../spec/mcp-sqlite.md#152-sdk-v2-and-two-protocol-eras). Merely upgrading the SDK does not supply a Tasks server implementation ([upstream implementation issue](https://github.com/modelcontextprotocol/ext-tasks/issues/30)); the separate task and desk persistence contracts are specified in the Answer Desk, not inferred from SDK lifetime.
 

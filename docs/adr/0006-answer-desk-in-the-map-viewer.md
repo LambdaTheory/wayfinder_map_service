@@ -16,6 +16,6 @@ Kun chose an Answer Desk inside the local Wayfinder service on 2026-10-26 ([#108
 
 This narrowly amends [ADR 0002](0002-mcp-tools-are-the-primary-interface.md): the viewer becomes a second write entry for Desk Answers and Reopen Requests, including changes and permitted cancellation, while agent MCP operations retain Map editing. The [browser boundary](../spec/answer-desk.md#7-keyed-browser-boundary) defines the one route, its key and the exact permitted actions; the [Reopen Request contract](../spec/answer-desk.md#reopen-requests) defines the affected-decision authorization.
 
-The service remains the sole state authority. [Revision and storage boundaries](../spec/answer-desk.md#8-revisions-storage-and-required-evidence) distinguish human responses from agent-authored Map history; [Settlement validation](../spec/answer-desk.md#agent-settlement) keeps the second write entry from bypassing the agent's acceptance checks.
+The service remains the sole state authority. [Revision and storage boundaries](../spec/answer-desk.md#8-revisions-storage-and-required-evidence) distinguish human responses from agent-authored Map history; [Settlement validation](../spec/answer-desk.md#agent-settlement) and [publication retirement on reopening](../spec/answer-desk.md#publication-after-reopening) keep the second write entry from bypassing the agent's acceptance checks.
 
 The viewer's original acceptance and implementation record remain evidence for the read-only release. This ADR authorizes no implementation or release until the specification gate is satisfied.

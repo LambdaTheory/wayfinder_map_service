@@ -178,7 +178,7 @@ Normal startup opens existing storage only and recognizes its application/format
 
 Principally two tables: Map catalog/head (ID, title, Destination, current Revision), and immutable full Revision JSON unique by Map ID/revision. Preserve every accepted full Revision, including authorship, prior links, changes, Claims and Settlement introduction context. No pruning, command replay or separate graph entity tables. The Answer Desk table and publication amendments are scoped by [§15.3](#153-tasks-storage-and-failure); the original two-table boundary does not forbid that accepted follow-on.
 
-Keep StateAdapter's three operations unchanged: readCurrent, readRevision, commit. Add only a narrow listMaps read on the SQLite module for MCP listing; do not expand the public StateAdapter, memory Adapter sharing or tool count. Narrow local initialization/backup/open/close management is not a public MCP mutation path.
+Keep StateAdapter's three operations unchanged: readCurrent, readRevision, commit. The original slice adds only a narrow listMaps read on the SQLite module for MCP listing, without expanding the public StateAdapter, memory Adapter sharing or tool count. The accepted Answer Desk follow-on adds the desk-side paths scoped by [§15.3](#153-tasks-storage-and-failure); listMaps is not a restriction on those paths. Narrow local initialization/backup/open/close management is not a public MCP mutation path.
 
 Use one synchronous connection and short operations. Explicitly configure and verify WAL, synchronous=FULL and 100 ms SQLite lock waiting. The wait budget is not an end-to-end latency guarantee; synchronous work can block the execution thread.
 
@@ -362,7 +362,7 @@ The [Answer Desk specification](answer-desk.md) is the single normative source f
 
 ### 15.1 Tools and workflow publication
 
-The [five-tool target](answer-desk.md#1-outcome-and-boundary) extends §4/§5 through the [public inputs and results](answer-desk.md#61-public-inputs), including `map_wait` and taking `map_read`. The [typed `deskAnswer` extension](answer-desk.md#agent-settlement) amends `ticket.settle`; [Reopen Requests](answer-desk.md#reopen-requests) define the `map_apply.reopenRequestId` citation. These are additive contract fields, not changes to M1 Provenance or Reference shapes.
+The [five-tool target](answer-desk.md#1-outcome-and-boundary) extends §4/§5 through the [public inputs and results](answer-desk.md#61-public-inputs), including `map_wait` and taking `map_read`. The [typed `deskAnswer` extension](answer-desk.md#agent-settlement) amends `ticket.settle`; [Reopen Requests](answer-desk.md#reopen-requests) define `map_apply.reopenRequestId`, its validation and `reopenRequest.close`. The [publication-after-reopening contract](answer-desk.md#publication-after-reopening) amends every reopen path. These are additive contract extensions, not changes to M1 Provenance or Reference shapes.
 
 Implementation updates exact-tool-set checks in §11 and §14 to the target at the step assigned in [Answer Desk §9](answer-desk.md#9-implementation-and-release-sequence). Preserve once-only results, immutable history, safe errors and unknown-outcome recovery; descriptions and annotations must match actual effects, including reads that take answers. Backup stays a local maintenance command.
 
