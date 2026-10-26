@@ -4,7 +4,7 @@ Status: requirements accepted by the live user on 2026-10-23 after reviewing a r
 
 Use [GLOSSARY.md](../../GLOSSARY.md) for domain language and the [v1 contract](v1.md) for the wider product. This slice delivers part of M4 (visual projection) locally; it does not complete M4.
 
-Sections 1–4 record the delivered read-only slice. [Section 5](#5-answer-desk-amendment) is a proposed answer-only amendment under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109), pending Kun's specification confirmation; it does not claim that the running viewer accepts answers.
+Sections 1–4 record the delivered read-only slice. [Section 5](#5-answer-desk-amendment) records the answer-only amendment accepted by Kun on 2026-10-26 under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109); it does not claim that the running viewer accepts answers.
 
 ## 1. Decisions
 
@@ -27,7 +27,7 @@ Sections 1–4 record the delivered read-only slice. [Section 5](#5-answer-desk-
 
 ## 3. Out of scope
 
-For the original slice: editing from the viewer, an embedded chat, MCP Apps, zoom and filtering (the largest current Map has five Tickets), browsing older Revisions, share links, public access, authentication, rollback and deletion. The answer-only write and its key are the bounded exception proposed in section 5; general Map editing remains excluded.
+For the original slice: editing from the viewer, an embedded chat, MCP Apps, zoom and filtering (the largest current Map has five Tickets), browsing older Revisions, share links, public access, authentication, rollback and deletion. The answer-only write and its key are the bounded exception accepted in section 5; general Map editing remains excluded.
 
 ## 4. Design decisions
 
@@ -43,10 +43,10 @@ Accepted with the implementation plan on 2026-10-23.
 
 ## 5. Answer Desk amendment
 
-Status: proposed; behavior and designer defaults are specified in [answer-desk.md](answer-desk.md), with the architectural trade-off in [ADR 0006](../adr/0006-answer-desk-in-the-map-viewer.md). This section supersedes the read-only/no-key restrictions above only when that specification is confirmed and the corresponding implementation is delivered.
+Status: decisions accepted by Kun on 2026-10-26; behavior is specified in [answer-desk.md](answer-desk.md), with the architectural trade-off in [ADR 0006](../adr/0006-answer-desk-in-the-map-viewer.md). This section supersedes the read-only/no-key restrictions above for the follow-on implementation after #109 closeout; the delivered viewer remains read-only until that implementation ships.
 
 - **One answer write entry.** The viewer accepts answers, changes to answers, Reopen Requests and cancellation of untaken Reopen Requests through one keyed endpoint. It cannot post or withdraw questions, edit the Map, manage Claims, reopen Tickets or settle them; those remain agent MCP operations.
-- **Access.** Reading remains unkeyed. The answer key is separate from the MCP token and authorizes only the answer endpoint, with the same-origin and loopback checks retained. The launcher passes it in a fragment, never a query, and the page uses a header and removes the fragment after consuming it. Every other viewer route remains GET/HEAD. The ChatGPT tunnel still forwards only `/mcp`.
+- **Access.** Reading remains unkeyed. The answer key is separate from the MCP token and authorizes only the answer endpoint, with the same-origin and loopback checks retained. The launcher passes it in a fragment, never a query, and the page uses a request header. Every other viewer route remains GET/HEAD. The ChatGPT tunnel still forwards only `/mcp`.
 - **Desk.** Show the ordered pending queue, the current question with its options, complete recommendation, why Kun is asked, what it unlocks and triage reason. Show Answered, Taken and Settled separately; retain Withdrawn questions with a strike-through and their reason, and show Reopen Requests distinctly. Ordering and the long-research flag follow the service's computed keys in the Answer Desk specification.
 - **Submission.** Selection submits immediately; Enter selects the recommendation, 1–3 select options and `t` opens text entry. Empty text, opening, viewing or cancelling never submit. Bulk confirmation shows the full recommended answers for the selected follow-recommendation questions. The service owns the 15-second Quiet Window and release, not the page timer.
 - **Freshness and layout.** Continue the two-second polling cadence for new questions, Taken, Settled and changes. Surface a stale question-version refusal as “question changed, answer again”; keep the existing unreachable/stale display. Verify light and dark themes and a 375 px viewport without horizontal overflow, alongside the existing route and details views.

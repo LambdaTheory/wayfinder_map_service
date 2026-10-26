@@ -1,8 +1,8 @@
 # Answer Desk
 
-Status: proposed specification for [#109](https://github.com/kun-g/wayfinder_map_service/issues/109), part of [#108](https://github.com/kun-g/wayfinder_map_service/issues/108). Kun chose the product direction on 2026-10-26; this consolidated contract still needs his confirmation before #110–#114 start. It describes intended behavior, not a delivered capability.
+Status: decisions accepted by Kun on 2026-10-26 for [#109](https://github.com/kun-g/wayfinder_map_service/issues/109), part of [#108](https://github.com/kun-g/wayfinder_map_service/issues/108). The design session still checks this consolidated specification against those decisions before the coordinator closes #109 and #110–#114 start. This describes the implementation contract, not a delivered capability.
 
-The detailed defaults below were supplied by the Answer Desk design session through the implementation coordinator on 2026-10-26. They are **designer defaults**, included for Kun's specification gate rather than represented as an earlier human verdict. Section 10 lists the confirmation points. Use [GLOSSARY.md](../../GLOSSARY.md), [M1](m1.md), [the local MCP contract](mcp-sqlite.md) and [the viewer contract](map-viewer.md) for unchanged behavior.
+The Answer Desk design session supplied two batches of details through the implementation coordinator, including six clarifications and decisions A–D on read delivery, Reopen Requests, task lifetime and admission. Kun accepted all of them on 2026-10-26; the coordinator relayed that verdict before this specification's closeout. Section 10 records the accepted points and the remaining transcription check. Use [GLOSSARY.md](../../GLOSSARY.md), [M1](m1.md), [the local MCP contract](mcp-sqlite.md) and [the viewer contract](map-viewer.md) for unchanged behavior.
 
 ## 1. Outcome and boundary
 
@@ -16,7 +16,7 @@ The two client spikes in #108 support the transport choice, not feature acceptan
 
 ## 2. Questions and answers
 
-Designer defaults:
+Accepted fields:
 
 | Desk Question field | Meaning |
 | --- | --- |
@@ -81,13 +81,13 @@ Kun may cancel a Reopen Request until it is Taken. Once Taken, the agent handles
 
 Selection submits immediately. Enter submits the recommendation, 1–3 submit the corresponding option, and `t` opens text entry. Opening, viewing and cancelling never submit; empty text never submits. Bulk confirmation applies only to selected `followRecommendation` questions and shows each full recommended answer before confirmation. It creates a separate answer to each displayed Question Version. A blanket “use recommendations” outside the desk remains insufficient.
 
-Designer default: one Quiet Window belongs to the Map, across questions and Claimants. Each successful new or changed submission restarts 15 seconds from the latest submission; a failed submission is not an answer. Editing several answers during that interval produces a batch containing only their latest valid versions. The service owns this timing; closing the page does not constitute either a verdict or a release. Expiry makes answers eligible for delivery, never for automatic Settlement.
+One Quiet Window belongs to the Map, across questions and Claimants. Each successful new or changed submission restarts 15 seconds from the latest submission; a failed submission is not an answer. Editing several answers during that interval produces a batch containing only their latest valid versions. The service owns this timing; closing the page does not constitute either a verdict or a release. Expiry makes answers eligible for delivery, never for automatic Settlement.
 
 ### Agent delivery
 
 `map_wait` identifies `mapId` and `claimantId`, carries the Release Version `version` like `map_apply`, and returns eligible answers only for that Claimant's currently claimed Tickets, plus Map-scoped Reopen Requests as specified in section 3. All eligible answers for that caller are delivered in one batch after the Map is quiet. An answer or request is released once; competing waiters cannot both take it.
 
-Designer default: commit Taken durably in an atomic release transaction just before writing the blocking response, or before the first `tasks/get` that returns completed. An uncollected task does not take answers merely by reaching the end of the Quiet Window. Recheck the current answer, Question Version and applicable Claim at delivery, including when a task result was prepared earlier. A task that never completed released nothing and leaves answers Answered. A network failure after the commit leaves the receipt unknown to the client; writing a response is not proof that the client received it.
+Commit Taken durably in an atomic release transaction just before writing the blocking response, or before the first `tasks/get` that returns completed. An uncollected task does not take answers merely by reaching the end of the Quiet Window. Recheck the current answer, Question Version and applicable Claim at delivery, including when a task result was prepared earlier. A task that never completed released nothing and leaves answers Answered. A network failure after the commit leaves the receipt unknown to the client; writing a response is not proof that the client received it.
 
 Taken answers survive disconnects, timeouts, cancellation and restarts. Current reads expose Taken-but-unsettled answers so a resumed agent can recover them; neither loss of a receipt nor a new wait auto-returns or settles them. Claim release/clear is the explicit exception in the state diagram. A rejected stale Settlement must not consume the replacement answer.
 
@@ -99,7 +99,7 @@ Text is never auto-settled. A text answer requesting material is not a verdict: 
 
 ## 5. Queue ordering
 
-The service derives ordering from the current Map; this display order does not change the M1 Frontier's ASCII Ticket-ID order. Designer default: compare these keys lexicographically:
+The service derives ordering from the current Map; this display order does not change the M1 Frontier's ASCII Ticket-ID order. Compare these keys lexicographically:
 
 1. Unlockers first: `immediateUnlocks > 0` **or** `gatesResearch` is true.
 2. `immediateUnlocks` descending, then `downstreamUnsettled` descending.
@@ -120,19 +120,19 @@ For example, if B requires both A and another open Ticket, settling A alone does
 
 The blocking path sends progress notifications and returns answers or “none yet” before the caller's timeout. A timeout returns no invented verdict. A requested long timeout such as 1,800 seconds is launcher configuration, not permission to block shutdown indefinitely. At most one suspended wait exists per `(mapId, claimantId)`; a newer wait supersedes the older one, which returns “superseded”. A suspended wait does not hold one of the four concurrent tool-call slots; the atomic release transaction does. Cancellation and service stop return promptly without settling or returning Taken answers.
 
-Designer default: `map_read` gains optional `claimantId`, which requires `version` with it. Only a current read with both can take eligible answers. A read without them or an explicit historical read never takes anything; it can still show questions and answers. Read inspection remains version-free, while taking attests the rules exactly like `map_wait`. A historical read never becomes a delivery operation merely because it includes a Claimant.
+`map_read` gains optional `claimantId`, which requires `version` with it. Only a current read with both can take eligible answers. A read without them or an explicit historical read never takes anything; it can still show questions and answers. Read inspection remains version-free, while taking attests the rules exactly like `map_wait`. A historical read never becomes a delivery operation merely because it includes a Claimant.
 
 SDK v2 serves both protocol eras on `/mcp`. The service implements the Tasks extension's discovery capability, `tasks/get` and `tasks/cancel`; it does not treat SDK v1's deprecated experimental task API as the new extension. Task cancellation concerns delivery, not a Question withdrawal, Claim release or Settlement. Protocol task states are independent of the six desk states.
 
-Questions, answers, supersession, Question Versions and Taken state persist in SQLite. Designer default: the task registry must survive fresh server instances for each modern request, but may be process-wide memory; after restart an unknown task ID is an explicit error and the agent reads authoritative state or starts a new wait. The design session clarified that this supersedes #112's original durable-task wording: protocol task handles need not survive restart. Persisting task handles is not a substitute for durable answers.
+Questions, answers, supersession, Question Versions and Taken state persist in SQLite. The task registry must survive fresh server instances for each modern request, but may be process-wide memory; after restart an unknown task ID is an explicit error and the agent reads authoritative state or starts a new wait. The design session clarified that this supersedes #112's original durable-task wording: protocol task handles need not survive restart. Persisting task handles is not a substitute for durable answers.
 
 Modern `2026-07-28` clients have no MCP session or `mcp-session-id`; the historical restart-404/reinitialize path cannot reach them. A restart does not prove that a model learned new instructions. `map_create`, `map_apply`, `map_wait` and a taking `map_read` require explicit Release Version attestation under [ADR 0005](../adr/0005-writes-attest-the-rules-version.md); old-version calls fail before mutation or taking answers. Inspection reads remain ungated because they change no state. See [MCP/SQLite §14.3 and §15](mcp-sqlite.md#143-versioning-build-and-release).
 
 ## 7. Keyed browser boundary
 
-Designer defaults: one browser key is unguessable, separate from and not derived from the MCP write token, and invalidated by service restart at the latest. It authorizes only answer submission/change, Reopen Requests and cancellation of untaken Reopen Requests. A local process without the key cannot answer. Only the key holder answers; the MCP credential does not confer this capability.
+One browser key is unguessable, separate from and not derived from the MCP write token, and invalidated by service restart at the latest. It authorizes only answer submission/change, Reopen Requests and cancellation of untaken Reopen Requests. A local process without the key cannot answer. Only the key holder answers; the MCP credential does not confer this capability.
 
-The `wayfinder` launcher opens the desk with `#key=…`; the page consumes the fragment, removes it from the URL and sends the key in a request header on the one write route. Never put it in a query, Map state, logs or error text. The fragment avoids HTTP transmission but is not a guarantee against browser history by itself. Issuance, page storage and rotation mechanics belong to #113 under these invariants.
+The `wayfinder` launcher opens the desk with `#key=…`; the page sends the key in a request header on the one write route. Never put it in a query, Map state, logs or error text. The fragment avoids HTTP transmission but is not a guarantee against browser history by itself. Issuance, page storage and rotation mechanics belong to #113 under these invariants.
 
 Retain exact loopback Host and same-origin checks, unkeyed reads, non-caching responses, and GET/HEAD on all other viewer routes. Continue the two-second viewer polling cadence and unreachable/stale indication. The test tunnel forwards only `/mcp`, never the desk. Verify light/dark rendering and 375 px without horizontal overflow against the existing viewer and the approved interaction design.
 
@@ -162,7 +162,7 @@ Tests for this implementation must control submission and release boundaries rat
 
 | Issue | Delivery |
 | --- | --- |
-| #109 | This specification, two ADRs, glossary and contract amendments; Kun confirms before implementation starts. |
+| #109 | This specification, two ADRs, glossary and contract amendments; Kun accepted the decisions on 2026-10-26, and the design session checks the transcription before closeout. |
 | #110 | SDK v2 and both protocol eras; retain four tools, schemas and workflow at this step; record actual SDK/client/protocol connectivity evidence. |
 | #111 | Durable Desk Question/answer storage and existing-tool commands/read projection, preserving Ticket question and Settlement semantics. |
 | #112 | Fifth tool, task/blocking delivery, concurrency and recovery checks; update the exact-tool-set build gate and local tool description. |
@@ -171,17 +171,19 @@ Tests for this implementation must control submission and release boundaries rat
 
 #112 depends on #110 and #111; #113 depends on #111; #114 depends on #112 and #113. Follow the implementation Issues for scheduling and Kun's gates. Do not ship the discarded intermediate chat-only approach. Agents settle released verdicts and post newly unlocked questions in the same write where the existing command rules allow it.
 
-Under [MCP/SQLite §14.3](mcp-sqlite.md#143-versioning-build-and-release), this documentation-only PR keeps the Release Version and adds no CHANGELOG section or tag. The current workflow file and generated guidance remain unchanged. The additive implementation Issues specify minor releases; the mandatory workflow change ships with the desk as one later major release after #87, with one approved ChatGPT run before that merge. No real-model Batch, ChatGPT run, everyday-service operation or release is authorized by this specification PR. Keep `Refs #109` until Kun confirms it; a passing build is not that confirmation.
+Under [MCP/SQLite §14.3](mcp-sqlite.md#143-versioning-build-and-release), this documentation-only PR keeps the Release Version and adds no CHANGELOG section or tag. The current workflow file and generated guidance remain unchanged. The additive implementation Issues specify minor releases; the mandatory workflow change ships with the desk as one later major release after #87, with one approved ChatGPT run before that merge. No real-model Batch, ChatGPT run, everyday-service operation or release is authorized by this specification PR. Keep `Refs #109`; the coordinator closes the Issue after the design session verifies the specification against Kun's decisions, independently of the build result.
 
-## 10. Points for Kun to confirm
+## 10. Accepted decisions and closeout
 
-The design session resolved the implementation questions; these designer defaults still need Kun's consolidated confirmation:
+Kun accepted all the following points on 2026-10-26:
 
-- Confirm the one-active-publication model, immutable Question Versions, current-answer Settlement check and withdraw/re-post handling of requests for material.
-- Confirm the Map-wide 15-second Quiet Window, changes after Taken and the explicit return to Answered on Claim release/clear.
-- Confirm the ordering keys: immediate unlocks or research gating first, then immediate and downstream counts, triage, post time and question ID.
-- Confirm that a current `map_read` takes only with both `claimantId` and `version`, while ordinary and historical reads remain inspections.
-- Confirm Map-scoped Reopen Requests, cancellation only before Taken, and explicit reopen/Claim/re-post followed by a new human verdict.
-- Confirm a process-wide task registry with durable questions/answers/Taken, once-only release and unknown-receipt recovery after interruption.
-- Confirm one suspended wait per Map/Claimant, superseding older waits, free ordinary slots while suspended and prompt cancellation/stop.
-- Confirm the separate browser answer key and the specification/implementation/major-workflow release gates.
+- One active publication, immutable Question Versions, current-answer Settlement checks and withdraw/re-post handling of requests for material.
+- A Map-wide 15-second Quiet Window, changes after Taken and explicit return to Answered on Claim release/clear.
+- Ordering by immediate unlocks or research gating, then immediate and downstream counts, triage, post time and question ID.
+- Current `map_read` taking only with both `claimantId` and `version`, with ordinary and historical reads remaining inspections.
+- Map-scoped Reopen Requests, cancellation only before Taken and explicit reopen/Claim/re-post followed by a new human verdict.
+- A process-wide task registry with durable questions/answers/Taken, once-only release and unknown-receipt recovery after interruption.
+- One suspended wait per Map/Claimant, superseding older waits, free ordinary slots while suspended and prompt cancellation/stop.
+- A separate browser answer key and distinct specification, implementation and major-workflow release gates.
+
+No additional product decision is proposed here. The remaining #109 gate is the design session's check that this text faithfully records the accepted decisions; any new design choice discovered during that check returns to Kun rather than inheriting this verdict.

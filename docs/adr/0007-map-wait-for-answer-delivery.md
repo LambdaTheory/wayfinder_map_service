@@ -1,10 +1,10 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # A task-capable fifth tool delivers Desk Answers
 
-Kun chose `map_wait` as a fifth business tool on 2026-10-26 ([#108](https://github.com/kun-g/wayfinder_map_service/issues/108)). It releases answers for the caller's claimed Tickets after the Map's Quiet Window: a client opting into MCP Tasks receives a task, while other clients can hold an ordinary blocking call. The choice keeps delivery in the service that owns the answers and makes the wait independent of an agent's terminal. The [Answer Desk specification](../spec/answer-desk.md) awaits Kun's confirmation under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109).
+Kun chose `map_wait` as a fifth business tool on 2026-10-26 ([#108](https://github.com/kun-g/wayfinder_map_service/issues/108)). It releases answers for the caller's claimed Tickets after the Map's Quiet Window: a client opting into MCP Tasks receives a task, while other clients can hold an ordinary blocking call. The choice keeps delivery in the service that owns the answers and makes the wait independent of an agent's terminal. Kun accepted the detailed decisions on 2026-10-26; the [Answer Desk specification](../spec/answer-desk.md) records them for the design session's transcription check under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109).
 
 ## Considered options
 
@@ -24,6 +24,6 @@ The two spikes recorded in #108 establish feasibility, not Wayfinder feature acc
 
 This amends the four-tool boundary of [ADR 0003](0003-mcp-service-carries-the-versioned-exploration-workflow.md), not its decision against a separate workflow-retrieval tool. Claude Code uses the `2026-07-28` Tasks extension; Codex keeps a blocking path; ChatGPT reads at turn start and does not call `map_wait`. Task completion delivers answers, never a Ticket Settlement.
 
-The service moves to SDK v2 and serves both protocol eras on `/mcp`. The modern era is sessionless, so task records must outlive a request-scoped server instance. The service implements task discovery, retrieval and cancellation; merely upgrading the SDK does not supply that implementation ([upstream server implementation issue](https://github.com/modelcontextprotocol/ext-tasks/issues/30)). Questions, answers and Taken state are durable. The designer default permits a process-wide task registry, with task handles lost at restart; this refinement of #112's original durable-task wording awaits confirmation in the specification. Task state is distinct from Desk Question and Decision Ticket state.
+The service moves to SDK v2 and serves both protocol eras on `/mcp`. The modern era is sessionless, so task records must outlive a request-scoped server instance. The service implements task discovery, retrieval and cancellation; merely upgrading the SDK does not supply that implementation ([upstream server implementation issue](https://github.com/modelcontextprotocol/ext-tasks/issues/30)). Questions, answers and Taken state are durable. Kun accepted a process-wide task registry on 2026-10-26, with task handles lost at restart; this refines #112's original durable-task wording. Task state is distinct from Desk Question and Decision Ticket state.
 
 Restart cannot invalidate a modern client's nonexistent MCP session. [ADR 0005](0005-writes-attest-the-rules-version.md)'s explicit Release Version attestation remains the protection against writes under old rules and also guards taking through `map_wait` or current `map_read` with `claimantId` and `version`; the historical restart-404 path applies only to sessionful clients. Ordinary/history reads still change no state. See [MCP/SQLite §15](../spec/mcp-sqlite.md#15-answer-desk-follow-on-slice) for the protocol and release boundaries.
