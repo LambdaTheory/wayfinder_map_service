@@ -34,7 +34,7 @@
     },
     "consistencyCheck": {
       "test": "tests/behaviour/capture/capture.test.ts: F11 public fixture regenerates identically through new capture as a consistency check, without reading private incident material",
-      "basis": "A temporary synthetic SQLite Revision state reconstituted from the redacted B01 seed, its documented D03 Claim and synthetic path prefixes. captureProblem reproduces the existing SeedMap by deep equality, with exactly 25 recorded replacements.",
+      "basis": "A temporary synthetic SQLite database reconstituted from the redacted B01 seed, its documented D03 Claim and synthetic path prefixes. captureProblem reproduces the existing SeedMap by deep equality, with exactly 25 recorded replacements.",
       "limit": "This checks conversion consistency with the accepted public fixture; it does not establish whether the original private-source redaction was complete. It is not a new read of the incident database or conversation, and the old prototype's 28-Revision restoration is not implementation evidence."
     }
   },

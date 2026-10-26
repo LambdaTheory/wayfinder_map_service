@@ -33,3 +33,34 @@ The chained-redaction regressions were rerun against the pre-fix `capture.ts` af
 Node 26.3.0: `npm run build`, `npm test` (**19 files, 1,328 tests**), `npm run typecheck`, and `node tests/behaviour/cli.ts validate` (**26 Scenarios; 1 admitted capture, 0 paused drafts**) passed. The focused capture suite has **27 passing tests**. No real model ran; the everyday service was untouched.
 
 PR #94 integration remains coordinator-ordered. Once it lands, combine its Controller observer with historical-author routing, log those calls as Controller events with their author label, retain lost-response boundary recovery, remove any remaining B04 history refusal, reconcile the README sentence and run its `sessions.test.ts` along with the full checks. This review-fix dispatch deliberately does not merge that branch or the PR.
+
+## Second review round
+
+2026-10-26: read [Claude's re-review](https://github.com/kun-g/wayfinder_map_service/pull/96#issuecomment-6407126744) and [Grok's re-review](https://github.com/kun-g/wayfinder_map_service/pull/96#issuecomment-6407473011). Both accepted the previous six corrections and identified the remaining final-output privacy gap. Merged latest `origin/main` (`480e0c4`, including PR #92, Release Version 2.1.0) before building or testing. PR #94 remains separate.
+
+The privacy guard now walks actual strings and object keys recursively. It checks declared private literals and the path/credential patterns on the final bundle, after assembling the opening turn, conversion descriptions, references and redaction record. JSON escaping cannot hide a quote, backslash or control character from that check. Unsafe results are refused, with no secret copied into the error.
+
+| Regression | Before | After |
+| --- | --- | --- |
+| `a"aa"a`, private literal `a"a`, replacement `a"` | Capture returned the surviving overlap; new test failed because no exception was thrown | Final string traversal rejects it |
+| `line1` plus `line2`, private literal `line1\n\nline2` | Joining the opening formed the literal after redaction; new test failed | The completed opening is rejected |
+| `Bearer` plus `tokentoken`, no declared rule | Joining the opening formed a credential after the original guard; new test failed | The completed opening matches the raw-string credential guard and is rejected |
+| Committed historical write loses its reply, immediate reread also fails | Temporarily removing the final-export fallback made the new test fail: seed boundary 1, actual head 2 | With the existing fallback restored, boundary 2 is retained, setup still fails with the original exception, no agent turn starts and both attribution checks report zero agent writes |
+
+The three requested privacy cases were added and run before the fix: **3 failed**, each because unsafe output was accepted. Additional passing cases cover a backslash overlap, a Windows private path and a tab-separated bearer credential. The fallback test exercises `runAttempt` through a disposable service and faults only HTTP transport; it substitutes a synthetic OS home for client-login discovery and uses the fake client executable. No real model or incident data is involved.
+
+### Re-review suggestions
+
+- **Unknown original conditions:** capture now records why Entry/effort unknowns keep non-reproduction comparison pending, in both `reproduction.reasons` and Scenario references. Two new tests failed before this addition and pass now; even matching `unknown` effort strings cannot establish an unchanged baseline.
+- **Documentation and names:** replaced “audit log” with “redaction record”, called the synthetic source a database, removed stale totals from the maintainer guide, documented the shared seed plan and CLI capture inventory in the README, removed the `review:` test-name prefix and unified both capture references to a repository-relative path.
+- **Backup entry point:** the guide now names the existing consistent backup command and links §10. No backup was performed on a real source.
+- **Historical intermediate wording:** narrowed the guide's ambiguity claim. Multiple text updates within one Revision reconstruct its stored state, not every intermediate word; an evidenced override is needed when those words matter. The stronger Claimant ambiguity refusal remains intact.
+- **Failure labels:** documented the current `service-failed` label for prelaunch identity collisions. A new Attempt completeness class would affect evidence consumers and is unnecessary for this capture correction.
+- **Conditions shape:** simplified `originalConditions` to `{ entry; effort }`; retained the existing `originalCombination` field and capture schema rather than migrating input manifests only to regroup fields.
+- **Command types (deferred):** B01 history commands are wire data (`unknown[]`), while domain `Command` uses branded IDs and domain-only shapes. The shared plan and replay boundary keep that distinction and validate through the domain/MCP; relabelling wire values as `Command[]` would require unchecked casts. A dedicated validated wire-command type is separate work.
+- **Small duplicated checks (retained):** `expectedHead` projects the three Map text fields from wire history without widening the product API; the real-service mismatch test remains. The inventory validates untrusted JSON, including the historical `admitted` status that `CaptureRecord.library.status` cannot contain. Its short ID/status guards remain local; extracting runtime validators would broaden this review fix without changing its result.
+- **Closeout and #94:** the PR references #71 without closing it. F11/private-source verification and any human acceptance remain with the coordinator after integration. Preserve both historical-author routing and #94's observation hooks, plus the reread and final-export boundaries, when that branch is integrated.
+
+### Second-round validation
+
+Node 26.3.0 on the branch merged with `main` at `480e0c4`: `npm run build`, `npm test` (**20 files, 1,357 tests**), `npm run typecheck` and `node tests/behaviour/cli.ts validate` (**26 Scenarios; 1 admitted capture, 0 paused drafts**) all passed. The focused capture suite has **36 passing tests**. `git diff --check` passed. This round changes only `tests/behaviour/` and documentation, so it keeps Release Version 2.1.0; no ChatGPT run is required for these test-tool changes. No real database or conversation log was read, no real model ran, and the everyday service was untouched.

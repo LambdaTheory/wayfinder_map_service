@@ -14,17 +14,17 @@ Nothing here starts a service or a model. Runs that spend model quota happen onl
 | `checks.ts`, `common.ts` | Script checks over an Attempt record, and the common checks attached to many Scenarios |
 | `library.ts`, `scenarios/` | The 26 candidates of spec §3 |
 | `upgrade-checks.ts` | Upgrade compatibility checks, listed apart from the 26 |
-| `seeds/` | Seed Maps; `f11.json` is the redacted capture of a real Map |
+| `seeds/` | Seed Maps and the shared capture/Controller write plan (`steps.ts`); `f11.json` is the redacted capture of a real Map |
 | `capture/`, `captures/` | Read-only problem capture tool, synthetic verification and admitted/paused capture traces (B04) |
 | `fixtures/` | Working-directory fixtures copied into the agent's directory |
 | `runner/` | The runner: isolated service, Controller, Codex Driver, normalizer (B02a) |
 | `verdict.ts`, `report.ts` | Verdicts of Attempts and cells, and the comparison report (B03a) |
 
 ```sh
-node tests/behaviour/cli.ts list       # candidates, readiness, item counts
+node tests/behaviour/cli.ts list       # candidates, readiness, item counts, capture inventory
 node tests/behaviour/cli.ts matrix     # applicability per client and Entry
 node tests/behaviour/cli.ts upgrade    # upgrade compatibility checks
-node tests/behaviour/cli.ts validate   # structural validation
+node tests/behaviour/cli.ts validate   # structural validation and capture inventory (including paused drafts)
 ```
 
 Use Node 26.3.0. `library.test.ts` runs in `npm test`; it validates the library and pins check semantics on small fixed evidence.

@@ -25,7 +25,7 @@ export interface CaptureInput {
   /** Context supplied to resume the Map, kept distinct from the verbatim human line. */
   replayContext: string;
   originalCombination: string;
-  originalConditions: Omit<ReproductionConditions, 'combination' | 'entry'> & { entry: Entry | 'unknown' };
+  originalConditions: { entry: Entry | 'unknown'; effort: string };
   applies: Scenario['applies'];
   purpose: string;
   claims: ClaimChoice[];
@@ -47,7 +47,7 @@ export interface CaptureRecord {
   history: { revision: number; author: Revision['author']; changes: Revision['changes'] }[];
   verdict: { status: 'specified' | 'paused'; reasons: string[]; basis: string | null };
   reproduction: { status: 'reproduced' | 'not-reproduced-twice' | 'pending'; originalCombination: string;
-    originalConditions: CaptureInput['originalConditions']; attempts: Reproduction[] };
+    originalConditions: CaptureInput['originalConditions']; attempts: Reproduction[]; reasons: string[] };
   library: { retain: true; status: 'skeleton' | 'paused-draft'; structuralErrors: string[] };
 }
 export interface CaptureBundle { seed: Seed; scenario: Scenario; record: CaptureRecord }
@@ -111,10 +111,19 @@ function redact<T>(value: T, rules: RedactionRule[], log: CaptureRecord['redacti
 }
 
 /** This is a guard, not an automatic secret detector. Maintainers still review all output before admission. */
-function guardPrivate(value: unknown) {
-  const text = JSON.stringify(value);
-  if (/(?:file:\/\/|\/Users\/|\/home\/|\/private\/|~\/|[A-Za-z]:\\\\Users\\\\)/i.test(text)
-    || /Bearer\s+[A-Za-z0-9._-]{8,}/i.test(text)) throw new CaptureError('Unredacted private path or credential; add an explicit redaction rule');
+function guardPrivate(value: unknown, rules: RedactionRule[] = []) {
+  if (typeof value === 'string') {
+    if (rules.some(r => value.includes(r.value))) throw new CaptureError('A declared private literal survived in the capture output');
+    if (/(?:file:\/\/|\/Users\/|\/home\/|\/private\/|~\/|[A-Za-z]:\\Users\\)/i.test(value)
+      || /Bearer\s+[A-Za-z0-9._-]{8,}/i.test(value)) throw new CaptureError('Unredacted private path or credential; add an explicit redaction rule');
+  } else if (Array.isArray(value)) {
+    for (const item of value) guardPrivate(item, rules);
+  } else if (value && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) {
+      guardPrivate(key, rules);
+      guardPrivate(item, rules);
+    }
+  }
 }
 
 export function captureProblem(database: string, input: CaptureInput): CaptureBundle {
@@ -164,9 +173,10 @@ export function captureProblem(database: string, input: CaptureInput): CaptureBu
     derivedFrom: { mapId: redactedInput.mapId, revision: redactedInput.revision, date: redactedInput.date, conversion } };
   const reasons = [!redactedInput.humanWords?.trim() ? 'Original human words missing; verdict paused, no replay turn invented.' : '',
     !redactedInput.verdict ? 'Correct behaviour unresolved; verdict paused, no criterion invented.' : ''].filter(Boolean);
+  const captureRef = `tests/behaviour/captures/${redactedInput.id}/capture.json`;
   const scenario: Scenario = { id: redactedInput.id, version: 1, title: redactedInput.title,
     source: { kind: 'real-problem', origin: redactedInput.origin, originalCombination: redactedInput.originalCombination,
-      refs: [redactedInput.sessionRef, `Map ${redactedInput.mapId} Revision ${redactedInput.revision}, ${redactedInput.date}`, `tests/behaviour/captures/${redactedInput.id}/capture.json`] },
+      refs: [redactedInput.sessionRef, `Map ${redactedInput.mapId} Revision ${redactedInput.revision}, ${redactedInput.date}`, captureRef] },
     target: redactedInput.verdict?.target ?? '', applies: redactedInput.applies, seed,
     turns: redactedInput.humanWords?.trim() ? [{ session: 'A', kind: 'opening', say: [redactedInput.replayContext, redactedInput.humanWords].filter(Boolean).join('\n\n') }] : [],
     controller: [], requiredEvents: [],
@@ -176,20 +186,24 @@ export function captureProblem(database: string, input: CaptureInput): CaptureBu
     pending: reasons.length ? reasons : ['Maintainer must review this skeleton, wire available script checks, and admit it to the library.'] };
   const attempts = redactedInput.reproductions;
   const original = attempts.filter(a => a.combination === redactedInput.originalCombination);
+  const baselineKnown = redactedInput.originalConditions.entry !== 'unknown' && redactedInput.originalConditions.effort.trim().toLowerCase() !== 'unknown';
   const status = original.some(a => a.result === 'reproduced') ? 'reproduced'
-    : original.filter(a => a.result === 'not-reproduced' && !a.changedConditions.length
+    : baselineKnown && original.filter(a => a.result === 'not-reproduced' && !a.changedConditions.length
       && a.entry === redactedInput.originalConditions.entry && a.effort === redactedInput.originalConditions.effort).length >= 2 ? 'not-reproduced-twice' : 'pending';
+  const reproductionReasons = status === 'pending' && !baselineKnown
+    ? ['Original Entry or effort is unknown; unchanged baseline non-reproductions cannot be established.'] : [];
   const record: CaptureRecord = { schema: 'wayfinder-problem-capture/1', scenarioId: redactedInput.id,
     source: { mapId: redactedInput.mapId, revision: redactedInput.revision, date: redactedInput.date, sessionRef: redactedInput.sessionRef, humanWords: redactedInput.humanWords },
     purpose: redactedInput.purpose, restores: seed.restores, conversion, claims, redactions,
     verification: { seedSha256: digest(map), sourceRevisionsVerified: verified },
     history: input.restores === 'history' ? records.map(r => ({ revision: r.revision, author: r.author, changes: r.changes })) : [],
     verdict: { status: reasons.length ? 'paused' : 'specified', reasons, basis: redactedInput.verdict?.basis ?? null },
-    reproduction: { status, originalCombination: redactedInput.originalCombination, originalConditions: redactedInput.originalConditions, attempts },
+    reproduction: { status, originalCombination: redactedInput.originalCombination, originalConditions: redactedInput.originalConditions, attempts, reasons: reproductionReasons },
     library: { retain: true, status: reasons.length ? 'paused-draft' : 'skeleton', structuralErrors: validateScenario(scenario) } };
   if (!reasons.length && record.library.structuralErrors.length) throw new CaptureError('Generated Scenario is invalid; check input applicability and verdict item IDs');
-  scenario.source.refs.push(`Reproduction status: ${status}; see captures/${redactedInput.id}/capture.json for every Attempt and changed condition.`);
+  scenario.source.refs.push(`Reproduction status: ${status}; see ${captureRef} for every Attempt and changed condition.`, ...reproductionReasons);
   const bundle = { seed, scenario, record };
-  if (input.redactions.some(r => JSON.stringify(bundle).includes(r.value))) throw new CaptureError('A declared private literal survived in the capture output');
+  // Check actual strings after all joins and generated metadata, including the redaction record.
+  guardPrivate(bundle, input.redactions);
   return bundle;
 }

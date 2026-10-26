@@ -2,6 +2,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
+import os from 'node:os';
+import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test, vi } from 'vitest';
@@ -16,6 +18,7 @@ import { validateScenario } from '../scenario.ts';
 import { F11 } from '../scenarios/safety.ts';
 import { connectController, historyCredentials } from '../runner/controller.ts';
 import { newToken, startService } from '../runner/service.ts';
+import { runAttempt } from '../runner/run.ts';
 import { agentRevisions } from '../checks.ts';
 import type { AttemptRecord } from '../evidence.ts';
 import { captureInventory } from './inventory.ts';
@@ -115,7 +118,7 @@ describe('capture from a read-only database', () => {
     } finally { writer.close(); }
   });
 
-  test('review: rejects a closed WAL source before SQLite can create sidecars', () => {
+  test('rejects a closed WAL source before SQLite can create sidecars', () => {
     const path = database();
     const writer = new DatabaseSync(path);
     writer.exec('PRAGMA journal_mode=WAL');
@@ -128,7 +131,7 @@ describe('capture from a read-only database', () => {
     expect(readFileSync(path)).toEqual(bytes);
   });
 
-  test.each(['-journal', '-wal', '-shm'])('review: rejects a source with a %s sidecar before opening', suffix => {
+  test.each(['-journal', '-wal', '-shm'])('rejects a source with a %s sidecar before opening', suffix => {
     const path = database();
     writeFileSync(path + suffix, 'synthetic sidecar');
     expect(() => captureProblem(path, input())).toThrow(/private.*copy/i);
@@ -157,10 +160,28 @@ describe('capture from a read-only database', () => {
     [{ id: 'first', value: 'token-A', replacement: 'token-B' }, { id: 'second', value: 'token-B', replacement: '<redacted>' }],
     [{ id: 'path', value: '/private/proof-sensitive.html', replacement: '<private-evidence>/proof-sensitive.html' },
       { id: 'filename', value: 'proof-sensitive.html', replacement: 'proof.html' }],
-  ])('review: a chained replacement cannot reintroduce secrets into the audit record', (first, second) => {
+  ])('a chained replacement cannot reintroduce secrets into the audit record', (first, second) => {
     const rules = [first, second];
     const path = database();
     expect(() => captureProblem(path, input({ humanWords: rules[0]!.value, redactions: [...input().redactions, ...rules] }))).toThrow(/replacement.*private literal/i);
+  });
+
+  test.each([
+    { name: 'quoted literal recreated by overlapping replacements', humanWords: 'a"aa"a', replayContext: '',
+      redactions: [{ id: 'quoted', value: 'a"a', replacement: 'a"' }], error: /declared private literal survived/i },
+    { name: 'backslash literal recreated by overlapping replacements', humanWords: 'x\\xx\\x', replayContext: '',
+      redactions: [{ id: 'backslash', value: 'x\\x', replacement: 'x\\' }], error: /declared private literal survived/i },
+    { name: 'declared literal formed by joining the opening turn', humanWords: 'line2', replayContext: 'line1',
+      redactions: [{ id: 'joined', value: 'line1\n\nline2', replacement: '<redacted>' }], error: /declared private literal survived/i },
+    { name: 'Bearer credential formed by joining the opening turn', humanWords: 'tokentoken', replayContext: 'Bearer',
+      redactions: [], error: /Unredacted private path or credential/i },
+  ])('rejects $name in the final capture bundle', ({ humanWords, replayContext, redactions, error }) => {
+    expect(() => captureProblem(database(), input({ humanWords, replayContext,
+      redactions: [...input().redactions, ...redactions] }))).toThrow(error);
+  });
+
+  test.each(['C:\\Users\\synthetic\\proof.txt', 'Bearer\ttokentoken'])('rejects a raw private string %s before output', humanWords => {
+    expect(() => captureProblem(database(), input({ humanWords }))).toThrow(/Unredacted private path or credential/i);
   });
 
   test('requires purpose-based choices for every Claim, never clears them wholesale', () => {
@@ -228,7 +249,7 @@ describe('history restoration', () => {
     expect(() => captureProblem(path, { ...request, historyOverrides: [{ ...override, commands: [{ kind: 'map.update', patch: { notes: 'Wrong' } }] }] })).toThrow(/differs/);
   });
 
-  test('review: acquire A, release A, acquire B requires documented command evidence', () => {
+  test('acquire A, release A, acquire B requires documented command evidence', () => {
     const records = sampleHistory().slice(0, 2);
     const last = records.at(-1)!;
     const commands = [{ kind: 'claim.acquire', ticketId: 'q', claimantId: 'transient-A' },
@@ -245,13 +266,13 @@ describe('history restoration', () => {
     expect(captured.seed.maps[0]!.history![1]!.commands).toEqual(commands);
   });
 
-  test('review: a source client named controller cannot silently become the Controller role', () => {
+  test('a source client named controller cannot silently become the Controller role', () => {
     const records = sampleHistory().slice(0, 2);
     records[1] = { ...records[1]!, author: { ...seedAuthor, clientId: 'controller' as Revision['author']['clientId'] } };
     expect(() => captureProblem(database(records), input({ revision: 2, restores: 'history', claims: [] }))).toThrow(/controller.*reserved/i);
   });
 
-  test('review: historical credentials cannot collide with Controller or active session client IDs', () => {
+  test('historical credentials cannot collide with Controller or active session client IDs', () => {
     const map = { mapId: 'Collision', title: 'T', destination: 'D', notes: '', tickets: [],
       history: [{ author: 'Active.Controller', commands: [] }] };
     expect(() => historyCredentials([map], ['Active.Controller'])).toThrow(/collision/i);
@@ -287,6 +308,15 @@ describe('verdict and reproduction intake', () => {
     const result = captureProblem(path, input({ reproductions: [attempt('1'), attempt('2', { result: 'reproduced', changedConditions: ['Full environment comparison'] })] }));
     expect(result.record.reproduction.status).toBe('reproduced');
     expect(result.record.reproduction.attempts[1]!.changedConditions).toEqual(['Full environment comparison']);
+  });
+  test.each([
+    { entry: 'unknown' as const, effort: 'xhigh' },
+    { entry: 'mcp-only' as const, effort: 'unknown' },
+  ])('unknown original conditions explain why two non-reproductions stay pending: %j', originalConditions => {
+    const result = captureProblem(database(), input({ originalConditions, reproductions: [attempt('1', { effort: originalConditions.effort }), attempt('2', { effort: originalConditions.effort })] }));
+    expect(result.record.reproduction.status).toBe('pending');
+    expect(result.record.reproduction.reasons).toContain('Original Entry or effort is unknown; unchanged baseline non-reproductions cannot be established.');
+    expect(result.scenario.source.refs.join('\n')).toContain('Original Entry or effort is unknown');
   });
   test('missing words or undecided correct behaviour pause intake without invented text or criteria', () => {
     const path = database();
@@ -452,7 +482,57 @@ test('history seed replays on a disposable service with original client labels, 
   } finally { await ctl.close(); await service.stop(); rmSync(dir, { recursive: true, force: true }); }
 }, 30_000);
 
-test('review: README describes history support instead of refusing B04 seeds', () => {
+test('a lost seed reply and failed reread retain setup failure but recover attribution from the final export', async () => {
+  const capture = captureProblem(database(), input({ restores: 'history' }));
+  const root = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests');
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const out = mkdtempSync(join(root, 'capture-fallback-'));
+  dirs.push(out);
+  // Keep even client-login discovery inside a synthetic home for this Attempt.
+  const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(directory());
+  syncBuiltinESMExports();
+  const realFetch = globalThis.fetch;
+  let droppedReply = false;
+  let failedReread = false;
+  const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (...args) => {
+    const body = args[1]?.body;
+    const request = typeof body === 'string' ? JSON.parse(body) as { params?: { name?: string; arguments?: { mapId?: string } } } : undefined;
+    const ownMap = request?.params?.arguments?.mapId === 'Capture.Map';
+    if (ownMap && droppedReply && !failedReread && request?.params?.name === 'map_read') {
+      failedReread = true;
+      throw new TypeError('synthetic seed reread unavailable');
+    }
+    const response = await realFetch(...args);
+    if (ownMap && !droppedReply && request?.params?.name === 'map_apply') {
+      await response.clone().text(); // Ensure Revision 2 committed before dropping the reply.
+      droppedReply = true;
+      throw new TypeError('synthetic committed seed reply lost');
+    }
+    return response;
+  });
+  try {
+    const outcome = await runAttempt({ batchId: 'CaptureFallback', scenarios: [], count: 1, ceiling: 1, out,
+      scratchRoot: directory(), codex: { model: 'fake-model', effort: 'low', sandbox: false, timeoutMs: 10_000,
+        bin: fileURLToPath(new URL('../runner/fake-codex.mjs', import.meta.url)) } },
+    { attemptId: 'LostReply-1', scenario: capture.scenario }, () => false, () => undefined);
+    expect(droppedReply).toBe(true);
+    expect(failedReread).toBe(true);
+    expect(outcome.completeness).toBe('driver-failed');
+    const record = JSON.parse(readFileSync(join(out, outcome.record!), 'utf8')) as AttemptRecord & {
+      isolation: { attribution: { agentRevisions: number; committedReceipts: number; mismatched: string[]; unplaced: string[] } };
+    };
+    expect(record.run.detail).toContain('synthetic committed seed reply lost');
+    expect(record.maps).toHaveLength(1);
+    expect(record.maps[0]!.history.at(-1)!.revision).toBe(2);
+    expect(record.maps[0]!.seedHeadRevision).toBe(2);
+    expect(record.sessions.every(s => !s.turns.length && !s.nativeId.known)).toBe(true);
+    expect(record.missing).not.toContain('maps');
+    expect(agentRevisions(record)).toEqual([]);
+    expect(record.isolation.attribution).toEqual({ agentRevisions: 0, committedReceipts: 0, mismatched: [], unplaced: [] });
+  } finally { fetchSpy.mockRestore(); homeSpy.mockRestore(); syncBuiltinESMExports(); }
+}, 30_000);
+
+test('README describes history support instead of refusing B04 seeds', () => {
   const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
   expect(readme).not.toMatch(/refuses[^\n]*history seeds/);
   expect(readme).toMatch(/historical author/i);
