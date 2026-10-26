@@ -38,14 +38,34 @@ function isConnectorCommand(command: string): boolean {
   const executable = /^(?:\S*\/)?cloudflared(?:\s|$)/.exec(command);
   if (!executable) return false;
   const args = command.slice(executable[0].length);
-  if (/(?:^|\s)(?:--help|-h|--version)(?=\s|$)/.test(args)) return false;
   const value = String.raw`(?:"[^"]*"|'[^']*'|\S+)`;
   const tunnel = /(?:^|\s)tunnel(?:\s|$)/.exec(args);
   if (tunnel) {
-    // Only options may precede "run"; never skip a diagnostic action to find a later "run" argument.
-    const option = String.raw`--[\w-]+(?:=${value}|\s+${value})?`;
-    return new RegExp(String.raw`^(?:${option}\s+)*run(?:\s|$)`).test(args.slice(tunnel.index + tunnel[0].length));
+    // A visible target identity is unsafe unless the entire command is a known read-only
+    // inspection. In particular, unknown options must not hide a connector or masquerade
+    // as a diagnostic action through their values. No launch-option allowlist is needed.
+    const inspection = `${args.slice(0, tunnel.index)} ${args.slice(tunnel.index + tunnel[0].length)}`;
+    const argument = /(?:[^\s"']+|"[^"]*"|'[^']*')+/g;
+    if (inspection.replace(argument, '').trim()) return true; // Unbalanced quotes are ambiguous too.
+    const tokens = inspection.match(argument) ?? [];
+    const positional: string[] = [];
+    let help = false;
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i]!;
+      if (!token.startsWith('-')) { positional.push(token); continue; }
+      if (['--help', '-h', '--version'].includes(token)) { help = true; continue; }
+      if (/^--no-autoupdate(?:=(?:true|false))?$/.test(token)) continue;
+      if (!/^(?:--(?:name|config|credentials-file|output|loglevel)|-n|-o|-config)(?:=.+)?$/.test(token)) return true;
+      if (!token.includes('=')) {
+        if (!tokens[i + 1] || tokens[i + 1]!.startsWith('-')) return true;
+        i++;
+      }
+    }
+    if (help) return false;
+    return !(['info', 'list', 'token'].includes(positional[0] ?? '')
+      || positional[0] === 'ingress' && ['validate', 'rule'].includes(positional[1] ?? ''));
   }
+  if (/(?:^|\s)(?:--help|-h|--version)(?=\s|$)/.test(args)) return false;
   // Legacy config-only launch: known options, no positional subcommand such as "service".
   const option = String.raw`(?:--(?:no-autoupdate|hello-world)|--(?:config|credentials-file|token|token-file)(?:=|\s+)${value})`;
   return new RegExp(String.raw`^${option}(?:\s+${option})*$`).test(args);
@@ -53,7 +73,7 @@ function isConnectorCommand(command: string): boolean {
 
 export function hasLocalConnector(stdout: string, target: LocalTunnelTarget, ownPid?: number): boolean {
   const identifiers = [target.id, target.credentialsFile, target.configPath, 'opencode'].map((value, index) =>
-    new RegExp(`(?:^|[\\s="'])${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s"'])`, index === 0 ? 'i' : ''));
+    new RegExp(`(?:^|[\\s="'])${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s"'])`, index === 0 || index === 3 ? 'i' : ''));
   return stdout.split('\n').some(line => {
     const match = /^\s*(\d+)\s+(.*)$/.exec(line);
     if (!match || Number(match[1]) === ownPid) return false;
@@ -72,7 +92,8 @@ export async function assertNoLocalConnector(target: LocalTunnelTarget, ownPid?:
 /** Unknown remote state fails closed; pending reconnects also count as occupied. */
 export function connectorsFrom(text: string, id: string): string[] {
   const info = JSON.parse(text) as { id?: unknown; name?: unknown; conns?: { id?: unknown; conns?: unknown }[] | null };
-  if (info.id !== id || info.name !== 'opencode' || !(info.conns === null || Array.isArray(info.conns)))
+  if (typeof info.id !== 'string' || info.id.toLowerCase() !== id.toLowerCase()
+    || info.name !== 'opencode' || !(info.conns === null || Array.isArray(info.conns)))
     throw new Error('Cannot confirm the opencode tunnel identity and connectors');
   const ids: string[] = [];
   for (const c of info.conns ?? []) {

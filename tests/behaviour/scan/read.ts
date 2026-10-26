@@ -50,6 +50,8 @@ export function blankSession(key: string, harness: Session['harness'], nativeId:
 /** Parse the clients' native JSONL envelopes, retaining original words and stable line references. */
 export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harness: 'codex' | 'claude', fileRef: string): Session[] {
   const sessions = new Map<string, Session>();
+  const completedCalls = new WeakSet<NativeCall>();
+  const callInputs = new WeakMap<NativeCall, Session['fragments'][number]>();
   const claudeQuestions = new Map<Session, Map<string, string[]>>();
   let current: Session | undefined;
   const get = (id: string | null, subagentId: string | null = null) => {
@@ -59,9 +61,16 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
   };
   const addCall = (s: Session, id: string | null, name: string | null, args: unknown, ref: string) => {
     if (!name) return;
-    const call: NativeCall = { id: id ?? ref, tool: name, ref, mapId: str(obj(parse(args)).mapId), requestId: null, requestIdType: null, result: null };
-    s.calls.push(call);
-    s.fragments.push({ ref, role: 'tool', text: JSON.stringify({ name, arguments: parse(args) }) });
+    const existing = harness === 'codex' && id ? s.calls.find(c => c.id === id) : undefined;
+    const call: NativeCall = existing ?? { id: id ?? ref, tool: name, ref, mapId: null, requestId: null, requestIdType: null, result: null };
+    call.mapId ??= str(obj(parse(args)).mapId);
+    // A function_call arriving after its completion still supplies the input and its locator.
+    call.ref = ref;
+    if (!existing) s.calls.push(call);
+    const input = { ref, role: 'tool' as const, text: JSON.stringify({ name, arguments: parse(args) }) };
+    const previous = callInputs.get(call);
+    if (previous) Object.assign(previous, input);
+    else { s.fragments.push(input); callInputs.set(call, input); }
     return call;
   };
   const result = (s: Session, id: string | null, value: unknown, ref: string) => {
@@ -117,6 +126,7 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
           // Product kinds, not client status/isError, establish the outcome (src/call-metadata.ts).
           // infrastructure_error is service-failure; absent/unrecognized results are transport-failure.
           result(s, id, item.result ?? null, ref);
+          if (call) completedCalls.add(call);
         }
       }
       if (row.type === 'response_item') {
@@ -124,7 +134,10 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
         if (p.type === 'function_call') {
           addCall(s, str(p.call_id), toolName(p.name), p.arguments, ref);
         }
-        if (p.type === 'function_call_output') result(s, str(p.call_id), p.output, ref);
+        if (p.type === 'function_call_output') {
+          const call = s.calls.find(c => c.id === str(p.call_id));
+          if (!call || !completedCalls.has(call)) result(s, str(p.call_id), p.output, ref);
+        }
       }
       // EventMsg-only recordings can contain messages instead of ResponseItems. Do not count a mirror twice.
       if (row.type === 'event_msg' && (p.type === 'user_message' || p.type === 'agent_message')) {
@@ -277,7 +290,8 @@ export function loadInputs(manifest: Manifest, base: string): Inputs {
           const c: Call = { ref, serviceStartedAt: String(v.serviceStartedAt), sequence: Number(v.sequence), missingObservations: Number(v.missingObservations),
             mcpSessionId: str(v.mcpSessionId), presentedMcpSessionId: str(v.presentedMcpSessionId), requestId: str(v.requestId),
             requestIdType: v.requestIdType === 'string' || v.requestIdType === 'number' ? v.requestIdType : null, requestIdHash: str(v.requestIdHash),
-            credentialFingerprint: str(v.credentialFingerprint), clientId: str(v.clientId), tool: str(v.tool), mapId: str(v.mapId), result: v.result as CallResult };
+            credentialFingerprint: str(v.credentialFingerprint), clientId: str(v.clientId), tool: str(v.tool), mapId: str(v.mapId),
+            result: v.httpStatus === 401 ? 'unauthenticated' : v.result as CallResult };
           out.calls.push(c);
           if (c.missingObservations > 0) out.gaps.push(`${ref}: ${c.missingObservations} missing service observations`);
         } else if (source.kind === 'launches' && v.schema === 'wayfinder-launch/1') {

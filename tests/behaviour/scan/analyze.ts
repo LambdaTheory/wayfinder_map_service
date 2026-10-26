@@ -157,12 +157,12 @@ export function analyze(inputs: Inputs, manifest: Manifest, previous: ScanState 
   const leads: Lead[] = [];
   const acceptedReviews: Review[] = [];
   for (const s of inventory) {
-    const service = matches.filter(m => m.session === s.key && m.call.tool);
+    const service = matches.filter(m => m.session === s.key && (m.call.tool || m.call.result === 'unauthenticated'));
     const signals = new Map<Lead['kind'], string[]>();
     const add = (kind: Lead['kind'], ref: string) => signals.set(kind, [...signals.get(kind) ?? [], ref]);
     const signal = (tool: string | null, result: string | null, ref: string) => {
       if (result === 'conflict') add('conflict', ref);
-      else if (result && ['input-error', 'command-rejected', 'version-mismatch', 'map-exists', 'not-found'].includes(result)) add('refusal', ref);
+      else if (result && ['unauthenticated', 'input-error', 'command-rejected', 'version-mismatch', 'map-exists', 'not-found'].includes(result)) add('refusal', ref);
       else if (result === 'service-failure' || result === 'transport-failure') add('failure', ref);
       else if (tool === 'map_apply' || tool === 'map_create') add('write', ref);
     };

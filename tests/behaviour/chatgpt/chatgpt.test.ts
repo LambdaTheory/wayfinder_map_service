@@ -10,7 +10,7 @@ import { test } from 'vitest';
 import { createHttpTestClient } from '../../helpers/mcp-http-client.mjs';
 import { ChatGPTAttempt } from './attempt.ts';
 import type { Capture } from './attempt.ts';
-import type { Exchange, RelayRefusal } from './relay.ts';
+import type { Exchange, RelayRefusal, RelayRefusalEvent } from './relay.ts';
 import { checklist, initialFive, selectScenarios } from './plan.ts';
 import { connectorsFrom, acquireTunnel, hasLocalConnector, readTunnelConfig } from './tunnel.ts';
 import { clientVisibility, runBatch, runRoot } from './run.ts';
@@ -32,8 +32,147 @@ const attemptOptions = (root: string, id: string) => ({ dir: join(root, 'attempt
 const fixedUpgradeDecision = [{ itemId: 'mismatch-as-outage', status: 'holds' as const, by: 'fixture-human', role: 'human' as const,
   reason: 'Synthetic human decision for the model-only item; rule-source checks must still decide from captured evidence.' }];
 const wireOf = (a: ChatGPTAttempt): Exchange[] => JSON.parse(readFileSync(join(a.dir, 'raw/wire.json'), 'utf8'));
-const refusalsOf = (dir: string): RelayRefusal[] => JSON.parse(readFileSync(join(dir, 'raw/relay-refusals.json'), 'utf8'));
+const refusalsOf = (dir: string): RelayRefusal[] => {
+  const rows = readFileSync(join(dir, 'raw/relay-refusals.jsonl'), 'utf8').split('\n').slice(0, -1);
+  return [...new Map(rows.map(line => {
+    const event = JSON.parse(line) as RelayRefusalEvent;
+    return [event.index, event.refusal] as const;
+  })).values()];
+};
 const listedSource = (a: ChatGPTAttempt) => `raw/wire.json#${wireOf(a).findLast(e => e.httpMethod === 'POST' && e.request.method === 'tools/list')!.id}`;
+
+test('refusal persistence appends without replacing earlier bytes, including late body updates', async () => {
+  const root = fresh();
+  const a = await ChatGPTAttempt.start(attemptOptions(root, 'F11'));
+  const socket = connect(a.relay.port, '127.0.0.1');
+  socket.on('error', () => {});
+  try {
+    const path = join(a.dir, a.record.diagnostics.relayRefusals.path);
+    const inode = statSync(path).ino;
+    await once(socket, 'connect');
+    const reply = once(socket, 'data');
+    socket.write('POST /private-path HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{');
+    assert.match(String((await reply)[0]), /404/);
+    const initial = readFileSync(path, 'utf8');
+    assert.equal(refusalsOf(a.dir)[0]!.bodyShape, 'unavailable');
+    socket.write('}');
+    await eventually(() => refusalsOf(a.dir)[0]!.bodyShape === 'object');
+    const updated = readFileSync(path, 'utf8');
+    assert.equal(updated.startsWith(initial), true, 'body updates must append without rewriting the initial observation');
+    assert.equal(statSync(path).ino, inode, 'persistence must keep the same log file');
+    for (let i = 0; i < 12; i++) {
+      const response = await fetch(`http://127.0.0.1:${a.relay.port}/mcp`, { method: 'POST', body: 'null' });
+      assert.equal(response.status, 400); await response.text();
+    }
+    const final = readFileSync(path, 'utf8');
+    assert.equal(final.startsWith(updated), true);
+    assert.equal(statSync(path).ino, inode);
+    assert.equal(refusalsOf(a.dir).length, 13);
+    assert.equal(a.record.diagnostics.relayRefusals.total, 13);
+    assert.deepEqual(a.record.diagnostics.relayRefusals.byReason, { path_mismatch: 1, non_object_json: 12 });
+  } finally { socket.destroy(); await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }
+}, 30_000);
+
+test('simultaneous refusals and out-of-order late bodies retain every appended event exactly once', async () => {
+  const root = fresh();
+  const a = await ChatGPTAttempt.start(attemptOptions(root, 'F11'));
+  const sockets = Array.from({ length: 16 }, () => connect(a.relay.port, '127.0.0.1'));
+  for (const socket of sockets) socket.on('error', () => {});
+  try {
+    const path = join(a.dir, a.record.diagnostics.relayRefusals.path);
+    const inode = statSync(path).ino;
+    await Promise.all(sockets.map(async (socket, i) => {
+      await once(socket, 'connect');
+      const reply = once(socket, 'data');
+      const body = JSON.stringify({ method: `late_${i}` });
+      socket.write(`POST /private-path HTTP/1.1\r\nHost: localhost\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body.slice(0, -1)}`);
+      assert.match(String((await reply)[0]), /404/);
+    }));
+    const initial = readFileSync(path, 'utf8');
+    assert.equal(refusalsOf(a.dir).length, 16);
+    const concurrent = Promise.allSettled(Array.from({ length: 64 }, async () => {
+      const response = await fetch(`http://127.0.0.1:${a.relay.port}/mcp`, { method: 'POST', body: 'null' });
+      assert.equal(response.status, 400); await response.text();
+    }));
+    for (let i = sockets.length - 1; i >= 0; i--) {
+      sockets[i]!.write('}');
+      await eventually(() => refusalsOf(a.dir).some(r => r.rpcMethod === `late_${i}`));
+    }
+    for (const outcome of await concurrent) assert.equal(outcome.status, 'fulfilled');
+    const final = readFileSync(path, 'utf8');
+    const events = final.trim().split('\n').map(line => JSON.parse(line) as RelayRefusalEvent);
+    assert.equal(final.startsWith(initial), true);
+    assert.equal(statSync(path).ino, inode);
+    assert.equal(events.length, 96);
+    assert.equal(events.filter(e => e.kind === 'refusal').length, 80);
+    assert.equal(new Set(events.filter(e => e.kind === 'refusal').map(e => e.index)).size, 80);
+    const bodies = events.filter(e => e.kind === 'body');
+    assert.equal(bodies.length, 16);
+    assert.equal(new Set(bodies.map(e => e.index)).size, 16);
+    for (const event of bodies) {
+      assert.equal(events.find(e => e.index === event.index)!.kind, 'refusal');
+      assert.equal(event.refusal.bodyShape, 'object');
+    }
+    assert.equal(refusalsOf(a.dir).length, 80);
+    assert.equal(a.record.diagnostics.relayRefusals.total, 80);
+    assert.deepEqual(a.record.diagnostics.relayRefusals.byReason, { path_mismatch: 16, non_object_json: 64 });
+  } finally { for (const socket of sockets) socket.destroy(); await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }
+}, 30_000);
+
+test('local connector check recognizes named launches without run but excludes diagnostic actions', () => {
+  const target = { id: randomUUID(), credentialsFile: '/synthetic/credentials.json', configPath: '/synthetic/config.yml' };
+  for (const flag of ['--name opencode', '--name=opencode', '-n opencode', '-n=opencode']) {
+    for (const options of [flag, `--no-autoupdate ${flag} --url http://localhost:8080`]) {
+      assert.equal(hasLocalConnector(`42 cloudflared tunnel ${options}`, target), true, options);
+      assert.equal(hasLocalConnector(`42 cloudflared tunnel ${options}`, target, 42), false);
+    }
+    for (const action of ['info', 'list', 'ingress validate', 'token']) {
+      assert.equal(hasLocalConnector(`42 cloudflared tunnel ${action} ${flag}`, target), false, action);
+      assert.equal(hasLocalConnector(`42 cloudflared tunnel ${flag} ${action}`, target), false, action);
+    }
+  }
+  assert.equal(hasLocalConnector('42 cloudflared tunnel --name opencode-other', target), false);
+  assert.equal(hasLocalConnector('42 cloudflared tunnel --name opencode --help', target), false);
+});
+
+for (const command of [
+  '--name opencode --url http://localhost:8080 --hostname example.test',
+  '--name opencode --metrics 127.0.0.1:9000',
+  '--name opencode --logfile /synthetic/log',
+  '--name opencode --no-autoupdate=true',
+  '--name OpenCode --future-option=unknown',
+  '--future-option unknown --name opencode',
+  '--future-option info --name opencode',
+  'info --name opencode --future-option unknown',
+  'info --name opencode "',
+  '--name opencode --help --future-option',
+  '--name opencode --url info',
+  'route dns opencode example.test',
+  'run OpenCode',
+  'run ABCDEF01-ABCD-4321-ABCD-ABCDEF012345 --future-option',
+]) test(`target-identified tunnel refuses acquisition before start: ${command}`, async () => {
+  const root = fresh(); const options = fixture(root, 'abcdef01-abcd-4321-abcd-abcdef012345');
+  let reachedStart = false;
+  try {
+    await assert.rejects(async () => {
+      const lease = await acquireTunnel({ ...options, fakeProcesses: `42 cloudflared tunnel ${command}` });
+      try { reachedStart = true; await lease.start(23456); }
+      finally { await lease.stop(); }
+    }, /Another local tunnel connector/);
+    assert.equal(reachedStart, false);
+    assert.equal(existsSync(join(root, 'fake-run.json')), false);
+    assert.equal(existsSync(join(root, 'fake-info-calls')), false, 'local refusal precedes even the empty remote inventory');
+    assert.equal(existsSync(join(root, `opencode-${options.id}.lock`)), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}, 30_000);
+
+test('remote tunnel UUID comparison ignores case and still rejects a different identity', () => {
+  const id = 'abcdef01-2345-4678-9abc-def012345678';
+  for (const [configured, observed] of [[id.toUpperCase(), id], [id, id.toUpperCase()]]) {
+    assert.deepEqual(connectorsFrom(JSON.stringify({ id: observed, name: 'opencode', conns: [] }), configured!), []);
+  }
+  assert.throws(() => connectorsFrom(JSON.stringify({ id: randomUUID(), name: 'opencode', conns: [] }), id));
+});
 
 async function eventually(check: () => boolean, detail: () => string = () => 'condition not observed') {
   const deadline = Date.now() + 15_000;
@@ -129,7 +268,7 @@ for (const identity of ['UUID', 'credentials path', 'config path', 'name', 'dail
     } finally { rmSync(root, { recursive: true, force: true }); }
   }, 30_000);
 
-for (const diagnostic of ['operator info', 'own info', 'list', 'route', 'ingress', 'token'] as const)
+for (const diagnostic of ['operator info', 'own info', 'list', 'ingress', 'token'] as const)
   test(`${diagnostic} during a running tunnel does not count as another connector`, async () => {
     const root = fresh(); const options = { ...fixture(root), fakeProcesses: '' };
     const target = { ...readTunnelConfig(options.configPath), configPath: options.configPath };
@@ -141,7 +280,6 @@ for (const diagnostic of ['operator info', 'own info', 'list', 'route', 'ingress
         'operator info': 'cloudflared tunnel info opencode',
         'own info': `/opt/homebrew/bin/cloudflared tunnel --config ${options.configPath} info --output json ${options.id}`,
         list: 'cloudflared tunnel list --name opencode',
-        route: 'cloudflared tunnel route dns opencode test.example.com',
         ingress: `cloudflared tunnel --config ${options.configPath} ingress validate`,
         token: 'cloudflared tunnel token opencode',
       };
@@ -700,16 +838,16 @@ test('every relay refusal persists only diagnostic metadata, with unchanged guar
     assert.equal(refusalsOf(a.dir).at(-1)!.reason, 'method_not_allowed');
     assert.ok(wireOf(a).some(e => e.request.method === 'tools/list' && e.status === 200));
     await a.stop();
-    const text = readFileSync(join(a.dir, 'raw/relay-refusals.json'), 'utf8');
+    const text = readFileSync(join(a.dir, 'raw/relay-refusals.jsonl'), 'utf8');
     for (const secret of ['body-secret', 'private-id', 'private-path', 'path-secret', 'header-secret', 'cookie-secret',
       'session-secret', 'origin-secret', 'ownership-private-detail', ...Object.values(a.secrets)]) assert.equal(text.includes(secret), false, secret);
-    assert.equal(statSync(join(a.dir, 'raw/relay-refusals.json')).mode & 0o777, 0o600);
+    assert.equal(statSync(join(a.dir, 'raw/relay-refusals.jsonl')).mode & 0o777, 0o600);
     const recorded = JSON.parse(readFileSync(join(a.dir, 'attempt.json'), 'utf8'));
     assert.equal(recorded.diagnostics.relayRefusals.total, cases.length + 2);
     assert.equal(recorded.diagnostics.relayRefusals.withinTurn, 2);
     assert.equal(recorded.diagnostics.relayRefusals.outsideTurn, cases.length);
     assert.deepEqual(recorded.diagnostics.relayRefusals.byStatus, { 400: 12, 403: 1, 404: 1, 405: 2, 413: 1, 503: 3 });
-    assert.equal(recorded.raw.files.includes('relay-refusals.json'), true);
+    assert.equal(recorded.raw.files.includes('relay-refusals.jsonl'), true);
     const { diagnostics: _, ...shared } = a.record;
     assert.deepEqual(judgeAttempt(options.scenario, a.record), judgeAttempt(options.scenario, shared));
   } finally { await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }

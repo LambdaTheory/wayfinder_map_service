@@ -12,7 +12,8 @@ import type { Capability, Scenario } from './scenario.ts';
  */
 export const clientProfiles: Record<Harness, { onboarded: Entry[]; entries: Entry[]; supports: Partial<Record<Capability, boolean | 'unverified'>> }> = {
   // MCP-only onboarded by Batch B2-20261025 under the allowlist sandbox (#65): resumed sessions, commands, complete records.
-  codex: { onboarded: ['mcp-only'], entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': true, commands: true, 'workspace-files': 'unverified',
+  // Dedicated onboarded by approved Batch B02d-onboarding-20261026 (#68): all five R2 checks, four Attempts.
+  codex: { onboarded: ['mcp-only', 'dedicated'], entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': true, commands: true, 'workspace-files': 'unverified',
     'new-session': 'unverified', 'concurrent-sessions': 'unverified', 'resource-read': 'unverified', 'sub-agents': 'unverified', 'async-questions': false } },
   claude: { onboarded: [], entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': 'unverified', 'new-session': 'unverified', 'concurrent-sessions': 'unverified',
     'workspace-files': 'unverified', commands: 'unverified', 'resource-read': 'unverified', 'sub-agents': 'unverified', 'async-questions': false } },

@@ -72,6 +72,12 @@ Matched AskUserQuestion results without usable answers (including cancellation, 
 
 Existing Claude evidence hashes near AskUserQuestion exchanges can change: an answer can become the preceding human turn, while a question call after a write can become its following assistant reply, and answers stop the forward search. Such leads appear as `changed`; submitting a review bound to the old hash reports it stale, so re-read the affected exchange and screen against the new hash. Existing pinned confirmations retain their original evidence as described below. Untracked tool outputs do not change a write's evidence hash merely by sharing its result row.
 
+## Result classification and mirrored Codex calls
+
+Service observations with `httpStatus: 401` become the scan-only result `unauthenticated`, grouped as refusal even when authentication stopped the request before its tool was known. Other statuses and missing status retain their recorded result; a generic transport error is never guessed to be authentication failure. Shipped service metadata and Scenario verdict classification are unchanged.
+
+A Codex `function_call` and `McpToolCall` completion with the same native ID become one call in either order. A later function call supplies its original input fragment and locator, including a Map ID missing from the completion. The completion owns the result and result locator; a trailing `function_call_output` does not replace it or add a mirrored result fragment. Different IDs stay separate because no evidence establishes that they are the same call.
+
 ## Correlation and usage classification
 
 The inventory distinguishes native sessions, launcher-only rows and unmatched service-session rows. A launch joins native evidence only by known native ID **and harness**, then B07 calls by credential fingerprint. A B01 Attempt can supply MCP session IDs and normalized JSON-RPC IDs. Exact request matches require an unambiguous MCP session plus request ID or B07's domain-separated request hash. Numeric/string collisions stay unmatched because B01 currently loses that type distinction. A native tool-use ID is never a JSON-RPC ID; a session association is not a committed-write receipt.

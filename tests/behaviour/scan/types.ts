@@ -2,6 +2,9 @@ import type { CaptureInput } from '../capture/capture.ts';
 import type { Entry } from '../evidence.ts';
 import type { CallResult } from '../../../src/call-metadata.ts';
 
+/** Scan-only HTTP classification; the shipped observation and Scenario verdict contracts stay unchanged. */
+export type ScanCallResult = CallResult | 'unauthenticated';
+
 export type Usage = 'normal' | 'test' | 'research' | 'unknown';
 export type SourceKind = 'codex' | 'claude' | 'calls' | 'gaps' | 'launches' | 'attempt';
 export interface Source { id: string; kind: SourceKind; path: string }
@@ -33,7 +36,7 @@ export interface Call {
   mcpSessionId: string | null; presentedMcpSessionId: string | null;
   requestId: string | null; requestIdType: 'string' | 'number' | null; requestIdHash: string | null;
   credentialFingerprint: string | null; clientId: string | null; tool: string | null;
-  mapId: string | null; result: CallResult;
+  mapId: string | null; result: ScanCallResult;
 }
 export interface Launch {
   ref: string; harness: string | null; model: string | null; effort: string | null;

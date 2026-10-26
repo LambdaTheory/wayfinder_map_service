@@ -22,6 +22,8 @@ export interface RelayRefusal extends RefusalBody {
   contentTypeIsJson: boolean;
   withinTurn: boolean;
 }
+/** The same index identifies the initial refusal and its optional late body observation. */
+export interface RelayRefusalEvent { index: number; kind: 'refusal' | 'body'; refusal: RelayRefusal }
 const bodyLimit = 1_048_576;
 const unavailableBody: RefusalBody = { bodyShape: 'unavailable', rpcMethod: null };
 function describeBody(body: Buffer): RefusalBody {
@@ -46,11 +48,11 @@ export interface Relay {
   stop(): Promise<void>;
 }
 export async function startRelay(servicePort: number, token: string, observe: (e: Exchange) => void,
-  observeRefusals: (refusals: readonly RelayRefusal[]) => void): Promise<Relay> {
+  observeRefusal: (event: RelayRefusalEvent) => void): Promise<Relay> {
   if (reservedPorts.includes(servicePort)) throw new Error('Everyday service ports are forbidden');
   const agent = directAgent();
   let counter = 0;
-  const refusals: RelayRefusal[] = [];
+  let refusalCounter = 0;
   const state: Relay = { port: await freePort(), token, active: false, inFlight: 0, beforeForward: async () => {},
     onFailure: () => { state.active = false; }, stop: async () => { agent.destroy(); await close(server); } };
   const fail = (error: unknown) => {
@@ -69,12 +71,12 @@ export async function startRelay(servicePort: number, token: string, observe: (e
       contentTypeIsJson: /^application\/(?:json|[a-z0-9!#$&^_.+-]+\+json)(?:\s*;|\s*$)/i.test(incoming.headers['content-type'] ?? '') };
     const recordRefusal = (status: number, reason: RefusalReason, body: RefusalBody) => {
       const refusal = { ...metadata, status, reason, ...body };
-      refusals.push(refusal);
-      observeRefusals(refusals); // Persist before responding or invoking a failure/exit handler.
-      return refusal;
+      const event: RelayRefusalEvent = { index: refusalCounter++, kind: 'refusal', refusal };
+      observeRefusal(event); // Persist before responding or invoking a failure/exit handler.
+      return event;
     };
     const earlyRefusal = (status: number, reason: RefusalReason) => {
-      const refusal = recordRefusal(status, reason, unavailableBody);
+      const event = recordRefusal(status, reason, unavailableBody);
       // Keep the immediate header refusal. Fill in the same record if a bounded, complete body arrives later.
       const chunks: Buffer[] = [];
       let bytes = 0;
@@ -83,8 +85,8 @@ export async function startRelay(servicePort: number, token: string, observe: (e
         if (bytes <= bodyLimit) chunks.push(chunk); else chunks.length = 0;
       });
       incoming.once('end', () => {
-        Object.assign(refusal, bytes <= bodyLimit ? describeBody(Buffer.concat(chunks)) : unavailableBody);
-        try { observeRefusals(refusals); } catch (error) { fail(error); }
+        const refusal = { ...event.refusal, ...(bytes <= bodyLimit ? describeBody(Buffer.concat(chunks)) : unavailableBody) };
+        try { observeRefusal({ index: event.index, kind: 'body', refusal }); } catch (error) { fail(error); }
       });
       incoming.on('error', () => {}); // The already persisted record remains unavailable on interruption.
       outgoing.writeHead(status).end();

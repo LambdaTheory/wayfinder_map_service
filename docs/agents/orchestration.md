@@ -31,6 +31,7 @@ Every developer brief and review brief carries these:
 - Start and stop only services you create: a fresh database under `~/Library/Caches/wayfinder-behaviour-tests/` (the service refuses `/tmp` and repository paths) on a free port. The everyday service on ports 18765 and 18766, its credentials and the real database stay untouched; `npm run serv`, `wayfinder restart` and `wayfinder chatgpt` are the coordinator's, behind a gate.
 - Behaviour tests use the fake drivers and fixed evidence. Real-model runs belong to the coordinator after gate 1; raw run records stay outside the repository.
 - Private material stays unread: `~/.wayfinder-service/`, `~/.codex-wayfinder*/`, `~/.claude-wayfinder*/` (service credentials and dedicated-agent conversations), and the workspace's `contexts/`, `raw/` and agent memories.
+  - Isolation-snapshot exception: the runner may programmatically read the files listed by `isolationSnapshot` in [`tests/behaviour/runner/run.ts`](../../tests/behaviour/runner/run.ts) to check isolation, emitting only hashes or booleans from their contents. Agents never open or print those files. Workers and reviewers continue to use synthetic snapshot roots; this exception authorizes no conversation, credential-content or private-directory inspection.
 - Node 26.3.0 is required. Put it first on `PATH` with `export PATH="$(dirname "$(npm exec --yes --package=node@26.3.0 -- node -p process.execPath)"):$PATH"`, then run `npm ci` in a new worktree.
 
 ## Labels and state
