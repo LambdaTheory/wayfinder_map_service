@@ -760,7 +760,7 @@
     },
     {
       "file": "tests/behaviour/runner/upgrade.test.ts",
-      "test": "owned upgrade through the real shared sandbox, fake native driver only > verdict order: U-codex-process Conflict replay / unkno\u2026",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > verdict order: U-codex-process Conflict replay / unkno…",
       "scenario": "U-codex-process",
       "mode": "definition",
       "before": "incomplete",
@@ -772,7 +772,7 @@
     },
     {
       "file": "tests/behaviour/runner/upgrade.test.ts",
-      "test": "owned upgrade through the real shared sandbox, fake native driver only > verdict order: U-codex-process Conflict replay / unkno\u2026",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > verdict order: U-codex-process Conflict replay / unkno…",
       "scenario": "U-codex-process",
       "mode": "definition",
       "before": "insufficient-evidence",
@@ -856,7 +856,7 @@
     },
     {
       "file": "tests/behaviour/runner/upgrade.test.ts",
-      "test": "owned upgrade through the real shared sandbox, fake native driver only > verdict order: U-codex-resume Conflict replay / unknow\u2026",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > verdict order: U-codex-resume Conflict replay / unknow…",
       "scenario": "U-codex-resume",
       "mode": "definition",
       "before": "incomplete",
@@ -1072,7 +1072,7 @@
     },
     {
       "file": "tests/behaviour/verdict.test.ts",
-      "test": "Attempt verdicts on fixed evidence > missing evidence cannot prove absence: file read through command / events.comm\u2026",
+      "test": "Attempt verdicts on fixed evidence > missing evidence cannot prove absence: file read through command / events.comm…",
       "scenario": "S12",
       "mode": "helpers",
       "before": "fail",
