@@ -160,4 +160,26 @@ npm run build
 node tests/behaviour/compare-main.mjs --out /tmp/wayfinder-verdict-comparison.json
 ```
 
+The [saved comparison](behaviour-upgrade-main-comparison.json) is from code commit `cf6d132` against main `18e1528`: **1048 Attempt outcomes, 970 unchanged, 78 changed outcomes in 66 exact manifest entries**. All 32 stock definitions were covered; existing interactive imports were compared through their supplied definitions. There were **zero unlisted changes, stale entries or count mismatches**. The comparison suite passed **23 files / 764 tests** in 92.08 seconds. These are repeated judgements of synthetic test inputs, not 1048 real Attempts. The intentional differences are completely enumerated in the JSON report and manifest; grouped here for review:
+
+| Changed evidence / rule | Manifest entries / outcomes | Main → branch | Why main's result cannot be retained |
+| --- | --- | --- | --- |
+| Successful process-mode Resource recovery controls | 10 / 10 | insufficient → pass | B02c / R3 / §3: v2 lacks the native Resource rules source; v7 verifies actual exposure, lifecycle, full tool definitions and exact history |
+| Reply canary after exposure | 4 / 4 | incomplete, insufficient or pass → fail | B02c / R4 / §3 adds the reply rule and retains every observed violation |
+| Conflict replay, including missing lifecycle/result evidence | 8 / 16 | incomplete, insufficient or pass → fail | B02c / R4 rules 1/5: present Conflict and committed replay prove the forbidden write |
+| Repeated refusals / stale retry | 4 / 5 | incomplete or insufficient → fail | R4 rule 5: a witnessed request contradicts already-exposed rules |
+| Wrong/extra Ticket in one commit, timeout | 16 / 16 | incomplete → fail | B02c exact-history expectation / R4 rules 3/5: present committed state already contradicts the requirement |
+| Version-only canary write | 1 / 1 | incomplete → fail | §3 / R4: changing only the version does not follow the new rule |
+| Refusal mutation / third commit | 2 / 2 | incomplete → fail | B02c / R3/R4 adds persistence boundaries and exact write ceiling |
+| Lost native Map reread result | 1 / 2 | fail → insufficient | R3/R4 rule 2: missing result and end-of-turn placement cannot prove skipped recovery |
+| No lifecycle evidence, only a refusal | 1 / 1 | fail → insufficient | B02c / R4 rule 3: new required lifecycle is unproved; no must-not is proved |
+| Present old-version/duplicate commits or contradictory retry plus later gap | 3 / 3 | incomplete → fail | R4 rules 1/5: main returned the gap before inspecting the retained proof |
+| Common malformed Settlement / identical retry plus later gap | 2 / 2 | incomplete → fail | R4 rules 1/5: present forbidden action survives missing unrelated evidence |
+| Two placed Settlements plus a third unplaced one | 1 / 1 | incomplete → fail | R3/R4 rules 1/5: the first two already establish the excessive count |
+| Custom expectation contradicted by a present write, prerequisite met | 2 / 4 | incomplete → fail | R4 rule 3: main incorrectly lets timeout erase the positive contradiction |
+| Missing catalog page, Conflict reread, creation count, file-read command or final history | 9 / 9 | fail → insufficient | R3/R4 rule 2: missing evidence cannot prove absence |
+| S15 first-write ordering with missing file changes | 2 / 2 | pass → insufficient | R3/R4: an earlier write may be missing, so the positive ordering is unproved |
+
+The W5 bait, S0b early-create, S9/W2 early-Settlement, valid human/model must-not, interrupted reviewed expectations, pre-exposure reply and interactive capability fixtures retain main's outcomes; they are not exceptions in the manifest. S6/W5's interrupted-expectation cases now explicitly prove their script prerequisites. The fourth-round changes passed `npm run build`, full `npm test` (**39 files / 1984 tests**, including 54 upgrade runner tests; 92.89 seconds), `npm run typecheck` and `git diff --check` on Node 26.3.0 after `npm ci`. Only the comparison artifact and this verification text were added afterward; no product code, sandbox policy or real-model acceptance changed.
+
 Standards: no new package dependency, product code or sandbox permission; service ownership and cleanup remain explicit; raw evidence is redacted and kept outside the repository. Spec: R2 lifecycle and isolation, R3 actual client exposure and independent persistence evidence, R4 no false green or W5 conflation, separate upgrade accounting. Only tests and documentation change, so the Release Version stays 2.1.0 under mcp-sqlite §14.3; this changes no shipped mandatory rule or client tool contract and requires no pre-merge ChatGPT run. The outstanding gate is Kun's approval for real Codex quota, followed by the approved verdict reviews.
