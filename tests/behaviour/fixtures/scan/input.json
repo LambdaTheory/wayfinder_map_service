@@ -1,0 +1,48 @@
+{
+  "schema": "wayfinder-usage-input/1",
+  "sources": [
+    {
+      "id": "codex",
+      "kind": "codex",
+      "path": "codex"
+    },
+    {
+      "id": "claude",
+      "kind": "claude",
+      "path": "claude"
+    },
+    {
+      "id": "calls",
+      "kind": "calls",
+      "path": "service.calls.jsonl"
+    },
+    {
+      "id": "gaps",
+      "kind": "gaps",
+      "path": "service.calls.gaps.jsonl"
+    },
+    {
+      "id": "launch",
+      "kind": "launches",
+      "path": "launches.jsonl"
+    },
+    {
+      "id": "attempt",
+      "kind": "attempt",
+      "path": "attempt.json"
+    },
+    {
+      "id": "missing",
+      "kind": "codex",
+      "path": "deliberately-absent.jsonl"
+    }
+  ],
+  "labels": [
+    {
+      "harness": "claude",
+      "nativeId": "research",
+      "usage": "research",
+      "basis": "Synthetic operator label: bounded research-only task"
+    }
+  ]
+}
