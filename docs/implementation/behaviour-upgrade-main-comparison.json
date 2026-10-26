@@ -1,8 +1,8 @@
 {
-  "main": "18e15286d68c408047b8509c89218594368e9080",
-  "branch": "cf6d13238b9c9327a13f0566b42fc07d783e3dba",
-  "comparisons": 1048,
-  "unchanged": 970,
+  "main": "e4d54cc189b853239c646143597780133292372f",
+  "branch": "593f8b03c1ad1deb523fcc88379220e0864d4f28",
+  "comparisons": 1080,
+  "unchanged": 995,
   "covered": [
     "F11",
     "S0",
@@ -769,6 +769,66 @@
       "branchVersion": 1,
       "count": 1,
       "reason": "R3/R4 rules 1/5: two placed Settlements already prove the excess count; main lets a third unplaced Settlement erase them."
+    },
+    {
+      "file": "tests/behaviour/verdict.test.ts",
+      "test": "S15 witnessed ordering versus trace gaps > a missing read trace may hide an earlier read: events.command",
+      "scenario": "S15",
+      "mode": "definition",
+      "before": "fail",
+      "after": "insufficient-evidence",
+      "baselineVersion": 1,
+      "branchVersion": 1,
+      "count": 1,
+      "reason": "R3/R4: S15 may have read the relevant source through an omitted command before the recorded write; main ignores the command-trace gap and infers a violation from missing evidence. This control preserves unknown rather than treating a gap as proof."
+    },
+    {
+      "file": "tests/behaviour/verdict.test.ts",
+      "test": "S15 witnessed ordering versus trace gaps > a recorded write before every read still fails with a write gap: timeout",
+      "scenario": "S15",
+      "mode": "definition",
+      "before": "incomplete",
+      "after": "fail",
+      "baselineVersion": 1,
+      "branchVersion": 1,
+      "count": 2,
+      "reason": "R4: S15 proposal prerequisite is confirmed and a recorded write precedes every read in the complete read/command trace; timeout or missing other writes cannot erase this proved ordering violation (including the failed Attempt retained by the flaky rerun cell)."
+    },
+    {
+      "file": "tests/behaviour/verdict.test.ts",
+      "test": "S15 witnessed ordering versus trace gaps > a recorded write before every read still fails with a write gap: timeout",
+      "scenario": "S15",
+      "mode": "engine",
+      "before": "incomplete",
+      "after": "fail",
+      "baselineVersion": 1,
+      "branchVersion": 1,
+      "count": 2,
+      "reason": "R4: S15 proposal prerequisite is confirmed and a recorded write precedes every read in the complete read/command trace; timeout or missing other writes cannot erase this proved ordering violation (including the failed Attempt retained by the flaky rerun cell)."
+    },
+    {
+      "file": "tests/behaviour/verdict.test.ts",
+      "test": "S15 witnessed ordering versus trace gaps > a witnessed write-before-read failure plus two passing reruns stays flaky",
+      "scenario": "S15",
+      "mode": "definition",
+      "before": "incomplete",
+      "after": "fail",
+      "baselineVersion": 1,
+      "branchVersion": 1,
+      "count": 1,
+      "reason": "R4: S15 proposal prerequisite is confirmed and a recorded write precedes every read in the complete read/command trace; timeout or missing other writes cannot erase this proved ordering violation (including the failed Attempt retained by the flaky rerun cell)."
+    },
+    {
+      "file": "tests/behaviour/verdict.test.ts",
+      "test": "S15 witnessed ordering versus trace gaps > a witnessed write-before-read failure plus two passing reruns stays flaky",
+      "scenario": "S15",
+      "mode": "engine",
+      "before": "incomplete",
+      "after": "fail",
+      "baselineVersion": 1,
+      "branchVersion": 1,
+      "count": 1,
+      "reason": "R4: S15 proposal prerequisite is confirmed and a recorded write precedes every read in the complete read/command trace; timeout or missing other writes cannot erase this proved ordering violation (including the failed Attempt retained by the flaky rerun cell)."
     },
     {
       "file": "tests/behaviour/verdict.test.ts",
