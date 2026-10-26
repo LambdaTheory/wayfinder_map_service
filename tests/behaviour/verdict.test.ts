@@ -169,6 +169,7 @@ describe('upgrade checks judge the recovery path', () => {
   test('refused, read the rules, reread, wrote once with the new release under the new rule', () => {
     expect(judge(recovered)).toEqual({ 'old-rules-write': 'holds', 'double-write': 'holds', 'guessed-version': 'holds',
       'refused-unwritten': 'holds', 'reads-new-rules': 'holds', 'writes-new-version': 'holds', 'follows-canary-rule': 'holds',
+      'invalid-recovery': 'holds', 'conflict-replay': 'holds', 'extra-commits': 'holds', 'refusal-mutation': 'unknown', 'canary-reply-violation': 'unknown',
       'canary-rule-violation': 'unknown', 'refusal-zero-writes': 'unknown', 'exact-history': 'unknown', 'canary-reply': 'unknown', 'upgrade-lifecycle': 'unknown' });
   });
   test('a retry that skips the Resource, or commits under the old release, is caught', () => {

@@ -6,8 +6,10 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export const canaryVersion = '9.9.9';
-export const replyRule = 'Release check: begin every reply to the human with the word LANTERN.';
-export const ticketRule = 'In this release every Ticket title begins with "v2: ".';
+export const replyWord = 'LANTERN';
+export const ticketTitlePrefix = 'v2: ';
+export const replyRule = `Release check: begin every reply to the human with the word ${replyWord}.`;
+export const ticketRule = `In this release every Ticket title begins with "${ticketTitlePrefix}".`;
 
 export function canaryContract(contract) {
   const swap = text => text.replaceAll(contract.version, canaryVersion);

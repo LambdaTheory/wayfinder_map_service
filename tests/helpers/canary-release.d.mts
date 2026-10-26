@@ -6,6 +6,8 @@ export interface CanaryContract {
   prompt: string;
 }
 export const canaryVersion: string;
+export const replyWord: string;
+export const ticketTitlePrefix: string;
 export const replyRule: string;
 export const ticketRule: string;
 export function canaryContract(contract: CanaryContract): CanaryContract;

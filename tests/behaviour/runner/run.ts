@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { parseArgs } from 'node:util';
+import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { attemptSchema, classifyResult, leaks, redact } from '../evidence.ts';
 import type { AttemptRecord, Completeness, EventRecord, Field, GivenRules, SessionRecord } from '../evidence.ts';
 import { library } from '../library.ts';
@@ -21,7 +21,7 @@ import { checkoutRoot, cleanupServiceDirectory, everydayPort, newToken, startSer
 import type { Credential } from './service.ts';
 import { startRoute, structuredReply } from './relay.ts';
 import type { RelayObservation, Route } from './relay.ts';
-import { asScenario, upgradeChecks } from '../upgrade-checks.ts';
+import { asScenario, codexLifecycle, upgradeChecks } from '../upgrade-checks.ts';
 import { captureWrite, databaseState, isWrite, upgradeEvidence, upgradeRules } from './upgrade.ts';
 
 export interface BatchOptions {
@@ -56,7 +56,7 @@ export function preflight(o: Pick<BatchOptions, 'scenarios' | 'upgradeChecks' | 
   if (!upgrades.length && !o.scenarios.length) refusals.push('select at least one Scenario or upgrade check');
   if (new Set([...o.scenarios, ...upgrades]).size !== o.scenarios.length + upgrades.length) refusals.push('duplicate subject IDs');
   for (const id of [...o.scenarios, ...upgrades]) {
-    const u = upgrades.includes(id) ? upgradeChecks.find(x => x.id === id && x.harness === 'codex') : undefined;
+    const u = upgrades.includes(id) ? upgradeChecks.find(x => x.id === id && x.harness === 'codex' && x.lifecycle) : undefined;
     const s = upgrades.includes(id) ? u && asScenario(u) : library.find(x => x.id === id);
     if (!s) { refusals.push(`${id}: no such Scenario`); continue; }
     refusals.push(...validateScenario(s, u ? 'upgrade-check' : 'scenario'), ...readiness(s).map(r => `${id}: not ready: ${r}`));
@@ -69,8 +69,8 @@ export function preflight(o: Pick<BatchOptions, 'scenarios' | 'upgradeChecks' | 
 
 /** Unsupported lifecycle operations remain explicit refusals. */
 function unsupported(s: Scenario): string[] {
-  const reasons = s.controller.filter(a => !['conflicting-write', 'cut-agent-route', ...(/^U-codex-(process|resume)$/.test(s.id) ? ['restart-onto-canary'] : [])].includes(a.action))
-    .map(a => `Controller action ${a.action} needs the lifecycle/upgrade driver (B02c)`);
+  const reasons = s.controller.filter(a => !['conflicting-write', 'cut-agent-route', ...(codexLifecycle(s.id) ? ['restart-onto-canary'] : [])].includes(a.action))
+    .map(a => `Controller action ${a.action} is unsupported by this runner`);
   if (s.controller.some(a => a.action === 'conflicting-write' && !('during' in a.when))) reasons.push('conflicting-write needs a during-turn read/write boundary');
   let group = new Set<string>();
   for (const turn of s.turns) {
@@ -159,7 +159,7 @@ export interface AttemptIsolation {
 
 export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: () => boolean, register: (kill: () => void) => void): Promise<AttemptOutcome> {
   const s = p.scenario;
-  const upgradeMode = s.id === 'U-codex-process' ? 'process' : s.id === 'U-codex-resume' ? 'resume' : null;
+  const upgradeMode = codexLifecycle(s.id) ?? null;
   if (upgradeMode && !o.codex.sandbox) return { attemptId: p.attemptId, scenario: s.id, completeness: 'not-run', detail: 'upgrade checks require the shared sandbox' };
   const outputError = outputRefusal(o.out);
   if (outputError) return { attemptId: p.attemptId, scenario: s.id, completeness: 'not-run', detail: outputError };
@@ -239,7 +239,8 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       session.route = await startRoute(service.port, session.credential.token, entry => {
         log.push({ turn: session.turn ?? null, ...entry });
         if (upgrade && entry.phase === 'hook-error') {
-          completeness = 'driver-failed'; detail = `Upgrade observation failed: ${entry.error}`; killAll();
+          if (completeness === 'complete') { completeness = 'driver-failed'; detail = `Upgrade observation failed: ${entry.error}`; }
+          killAll();
         }
         if (entry.phase === 'cut') controllerEvent('relay-cut', { method: entry.rpc.method,
           tool: entry.rpc.method === 'tools/call' ? entry.rpc.params?.name : undefined,
@@ -267,6 +268,12 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
           upgrade.restart = { seq: events.length, ...pids, port: service.port };
           controllerEvent('owned-service-restarted', upgrade.restart, index);
           ctl = await connectController(service.port, controller.token, {}, emit);
+          const observed = { version: ctl.version, instructions: ctl.instructions, toolDescriptions: ctl.toolDescriptions };
+          const expected = { version: upgrade.contracts.after.version, instructions: upgrade.contracts.after.instructions, toolDescriptions: upgrade.contracts.after.toolDescriptions };
+          const matches = isDeepStrictEqual(observed, expected);
+          controllerEvent('canary-contract-observed', { ...observed, matches }, index);
+          if (!matches) throw new Error('Restarted service did not deliver the expected canary contract');
+          upgrade.contracts.after = { ...upgrade.contracts.after, ...observed };
           openDatabases(service.pid).forEach(d => opened.add(d));
         }
         controllerEvent(a.action, { status: 'completed', ...(mapId ? { mapId } : {}) }, index);

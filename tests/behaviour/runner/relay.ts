@@ -20,14 +20,14 @@ export interface Route {
   close(): Promise<void>;
 }
 
-export async function startRoute(target: number, token: string, observe: (record: RelayObservation) => void, bufferResponses = false): Promise<Route> {
+export async function startRoute(target: number, token: string, observe: (record: RelayObservation) => void, serializeAndBuffer = false): Promise<Route> {
   let cut = false;
   let previous = Promise.resolve();
   const upstream = new Set<ReturnType<typeof request>>();
   const server = createServer(async (req, res) => {
     // Upgrade snapshots bracket one request at a time. Native clients may issue parallel calls;
     // an unrelated concurrent write must never be mistaken for a refused request's side effect.
-    if (bufferResponses) {
+    if (serializeAndBuffer) {
       const wait = previous;
       let release!: () => void;
       previous = new Promise<void>(resolve => { release = resolve; });
@@ -57,7 +57,7 @@ export async function startRoute(target: number, token: string, observe: (record
         // Stream responses as they arrive (including SSE). Capture each response for hooks and raw evidence.
         const captured: Buffer[] = [];
         response.on('data', (chunk: Buffer) => { captured.push(chunk); });
-        if (!bufferResponses) {
+        if (!serializeAndBuffer) {
           res.writeHead(response.statusCode ?? 502, response.headers);
           response.pipe(res, { end: false });
         }
@@ -65,7 +65,7 @@ export async function startRoute(target: number, token: string, observe: (record
           const text = Buffer.concat(captured).toString();
           observe({ phase: 'response', at: new Date().toISOString(), requestId: rpc.id, method: rpc.method, sessionId: id ?? sessionId, status: response.statusCode, body: text });
           void Promise.resolve(route.after?.(rpc, text)).then(() => {
-            if (bufferResponses) res.writeHead(response.statusCode ?? 502, response.headers).end(text);
+            if (serializeAndBuffer) res.writeHead(response.statusCode ?? 502, response.headers).end(text);
             else res.end();
           }, error => { observe({ phase: 'hook-error', requestId: rpc.id, error: String(error) }); res.destroy(error as Error); });
         });

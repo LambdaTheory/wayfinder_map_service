@@ -32,7 +32,7 @@ async function initialize() {
   return init;
 }
 const init = await initialize();
-const definitions = await rpc('tools/list', {});
+const definitions = model === 'fake-upgrade-no-tools' ? null : await rpc('tools/list', {});
 let version = /^version: (\S+)$/m.exec(init.instructions)[1];
 const dir = join(process.env.CODEX_HOME, 'sessions', '2026', '10', '26');
 mkdirSync(dir, { recursive: true });
@@ -41,7 +41,7 @@ const record = e => appendFileSync(log, JSON.stringify(e) + '\n');
 if (!resume) record({ type: 'session_meta', payload: { id: thread, cli_version: '0.0.0-fake' } });
 record({ type: 'event_msg', payload: { type: 'thread_settings_applied', thread_settings: { model, reasoning_effort: 'low' } } });
 record({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: init.instructions }] } });
-record({ type: 'response_item', payload: { type: 'additional_tools', tools: definitions.tools } });
+if (definitions && model !== 'fake-upgrade-no-native-tools') record({ type: 'response_item', payload: { type: 'additional_tools', tools: definitions.tools } });
 emit({ type: 'thread.started', thread_id: thread }); emit({ type: 'turn.started' });
 const say = text => emit({ type: 'item.completed', item: { id: `item_${item++}`, type: 'agent_message', text } });
 const done = () => emit({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } });
@@ -58,13 +58,15 @@ if (model === 'fake-upgrade-no-trigger') { say('Stopped without creating the Map
 if (!resume) {
   await call('map_list', { limit: 100 });
   await call('map_create', { version, mapId: 'Upgrade.Probe', title: 'Upgrade probe', destination: 'Learn how this client behaves across a service upgrade' });
+  if (model === 'fake-upgrade-early-ticket') await call('map_apply', { version, mapId: 'Upgrade.Probe', expectedRevision: 1,
+    commands: [{ kind: 'ticket.create', ticket: { id: 'Probe.One', title: 'Early probe', question: 'Too early?', type: 'research' } }] });
   if (!prompt.includes('in this same turn')) { say('Created the probe Map.'); done(); process.exit(0); }
 }
 let head = await call('map_read', { mapId: 'Upgrade.Probe' });
 let learned = init.instructions;
-const write = () => call('map_apply', { version, mapId: 'Upgrade.Probe', expectedRevision: head.revision.revision,
+const write = (expectedRevision = head.revision.revision) => call('map_apply', { version, mapId: 'Upgrade.Probe', expectedRevision,
   commands: [{ kind: 'ticket.create', ticket: { id: 'Probe.One', title: `${learned.includes('LANTERN') ? 'v2: ' : ''}Probe`, question: 'Does the client pick up new rules after an upgrade?', type: 'research' } }] });
-let result = await write();
+let result = await write(model === 'fake-upgrade-conflict-replay' && resume ? head.revision.revision + 1 : head.revision.revision);
 if (result.code === 'version_mismatch') {
   if (model === 'fake-upgrade-stop') { say('Please refresh the tools.'); done(); process.exit(0); }
   const resource = await call('read_mcp_resource', { uri: 'wayfinder://workflow/exploration' }, true);
@@ -72,7 +74,23 @@ if (result.code === 'version_mismatch') {
   version = /^version: (\S+)$/m.exec(text)[1];
   if (model !== 'fake-upgrade-version-only') learned = text;
   head = await call('map_read', { mapId: 'Upgrade.Probe' });
+  if (model === 'fake-upgrade-repeat-refusal') {
+    const current = version;
+    version = /^version: (\S+)$/m.exec(init.instructions)[1];
+    await write();
+    version = current; // Deliberately skip both reads after the second refusal.
+  }
+  result = await write(model === 'fake-upgrade-conflict-replay' ? head.revision.revision + 1 : head.revision.revision);
+}
+if (model === 'fake-upgrade-conflict-replay' && result.kind === 'conflict') {
+  head = await call('map_read', { mapId: 'Upgrade.Probe' });
   result = await write();
 }
+if (model === 'fake-upgrade-bad-reply') say('Recovered under the new rules.');
 say(`${learned.includes('LANTERN') ? 'LANTERN ' : ''}Added the probe Ticket (${result.kind}).`);
+if (model === 'fake-upgrade-extra-timeout') {
+  await call('map_apply', { version, mapId: 'Upgrade.Probe', expectedRevision: result.revision,
+    commands: [{ kind: 'ticket.create', ticket: { id: 'Probe.Two', title: 'v2: Extra', question: 'An extra write?', type: 'research' } }] });
+  await new Promise(resolve => setTimeout(resolve, 30_000));
+}
 done();
