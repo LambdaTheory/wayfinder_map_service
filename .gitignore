@@ -4,3 +4,6 @@ coverage/
 dist/
 src/workflow.generated.ts
 .env.local
+
+# Local orchestration state
+.orchestration/
