@@ -41,7 +41,7 @@ Run the [manual usage scan](../../docs/implementation/behaviour-usage-scan.md) w
 node tests/behaviour/scan/cli.ts --input tests/behaviour/fixtures/scan/input.json --out "$FRESH_SCAN_OUTPUT"
 ```
 
-`scan/*.test.ts` runs in `npm test` with synthetic records and fake review drivers. Workers/reviewers do not run real scans; the coordinator or Kun needs explicit approval before reading real sources. Installing a weekly schedule remains Kun's decision after integration.
+`scan/*.test.ts` runs in `npm test` with synthetic records and fake review drivers. Workers/reviewers do not run real scans; the coordinator or Kun needs explicit approval before reading real sources. Kun decided on 2026-10-26 that his workspace's weekly system report runs the weekly scan; this repository creates no scheduled task. Before tagging a release, the coordinator runs the same scan.
 
 For subsequent scans, pass `--state "$PREVIOUS_SCAN_OUTPUT/state.json"` to retain seen leads and confirmations. Pending observations produce no model work or capture drafts until screened. Inspect new/changed evidence before asking for quota approval; metadata alone never establishes a failure or human authorization. Complete the generated input drafts through B04 before admission to this library. The separately approved `scan/review.ts` handoff uses B03b's exact call plan and meters each probe/reading/arbitration through the same ledger.
 
