@@ -5,6 +5,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { modelMatches } from './model-review.ts';
 import { reportReason } from './review-verdict.ts';
+import { ReviewProxyError, reviewProxyEnvironment, reviewProxyRouting } from './review-proxy.ts';
 import type { ReviewDriver, ReviewRequest, ReviewResponse, Reviewer } from './model-review.ts';
 
 const disabledCodexFeatures = ['apps', 'plugins', 'hooks', 'memories', 'shell_tool', 'shell_snapshot', 'unified_exec', 'multi_agent',
@@ -24,7 +25,7 @@ export function reviewArgs(target: Reviewer): string[] {
 }
 
 /** Both CLIs use the same OS boundary. Native authentication is the only permitted personal resource. */
-export function reviewSandbox(scratch: string, runtime: string, install: string, auth?: string, keychain?: string): string {
+export function reviewSandbox(scratch: string, runtime: string, install: string, auth?: string, keychain?: string, proxyRules: readonly string[] = []): string {
   const q = JSON.stringify;
   const workspace = join(homedir(), 'workspace');
   const blocked = [homedir(), '/private/tmp', realpathSync(tmpdir()), process.cwd(),
@@ -41,7 +42,11 @@ export function reviewSandbox(scratch: string, runtime: string, install: string,
     ...(auth ? [`(allow file-write* (literal ${q(auth)}) (regex #${q(`^${authTemp}`)}))`] : []),
     // Do not fetch cached managed/user preferences through cfprefsd around the file-read boundary.
     '(deny mach-lookup (global-name "com.apple.cfprefsd.daemon") (global-name "com.apple.cfprefsd.agent"))',
-    '(deny network-outbound (remote ip "localhost:*"))', ''].join('\n');
+    '(deny network-outbound (remote ip "localhost:*"))',
+    // Seatbelt's localhost matcher misses ::ffff:0.0.0.0, which can reach an IPv4 loopback listener.
+    // Review proxies are IPv4-only; deny every outbound IPv6 TCP socket, including mapped addresses.
+    // Keep narrow tcp4 proxy allows after the denies so IPv4 routing remains usable.
+    '(deny network-outbound (remote tcp6 "*:*"))', ...proxyRules, ''].join('\n');
 }
 export const codexReviewSandbox = reviewSandbox;
 
@@ -114,8 +119,9 @@ async function run(cmd: string, args: string[], input: string, cwd: string, env:
 
 export class CliReviewDriver implements ReviewDriver {
   private timeoutMs: number;
+  private subscriptionHome: string;
   private cancelled = false;
-  constructor(timeoutMs = 300_000) { this.timeoutMs = timeoutMs; }
+  constructor(timeoutMs = 300_000, subscriptionHome = homedir()) { this.timeoutMs = timeoutMs; this.subscriptionHome = subscriptionHome; }
   /** Zero generations; authentication output is summarized without email addresses or credential contents. */
   async checkLogin(target: Reviewer): Promise<{ cli: string; available: boolean; detail: string }> {
     const result = await this.execute(target);
@@ -127,22 +133,24 @@ export class CliReviewDriver implements ReviewDriver {
     if (process.platform !== 'darwin') throw new Error('CLI review isolation is implemented for macOS only');
     const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'wayfinder-review-')));
     try {
+      const proxies = reviewProxyRouting(reviewProxyEnvironment(this.subscriptionHome, process.env));
       const work = join(scratch, 'work'); const runtime = join(scratch, 'runtime');
       mkdirSync(work); mkdirSync(runtime, { mode: 0o700 });
       const resolved = spawnSync('/usr/bin/which', [target.cli], { encoding: 'utf8' }).stdout?.trim();
       if (!resolved) throw new Error(`${target.cli} is not installed; no substitute`);
       const bin = realpathSync(resolved);
-      const env: NodeJS.ProcessEnv = { PATH: `${dirname(process.execPath)}:${dirname(resolved)}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: homedir(), TMPDIR: runtime, LANG: 'en_US.UTF-8' };
-      // User identity and already-exported proxy settings only; never inspect personal settings files for them.
-      for (const key of ['USER', 'LOGNAME', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'])
+      const env: NodeJS.ProcessEnv = { PATH: `${dirname(process.execPath)}:${dirname(resolved)}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: this.subscriptionHome, TMPDIR: runtime, LANG: 'en_US.UTF-8', ...proxies.environment };
+      for (const key of ['USER', 'LOGNAME'])
         if (process.env[key]) env[key] = process.env[key];
-      const authFile = target.cli === 'codex' ? join(homedir(), '.codex', 'auth.json') : undefined;
+      const authFile = target.cli === 'codex' ? join(this.subscriptionHome, '.codex', 'auth.json') : undefined;
       // Native keychain access needs this one file; no personal settings or keychain contents are handled here.
-      const keychain = target.cli === 'claude' ? join(homedir(), 'Library/Keychains/login.keychain-db') : undefined;
-      const prefix = ['-p', reviewSandbox(scratch, runtime, dirname(dirname(bin)), authFile, keychain), bin];
+      const keychain = target.cli === 'claude' ? join(this.subscriptionHome, 'Library/Keychains/login.keychain-db') : undefined;
+      const prefix = ['-p', reviewSandbox(scratch, runtime, dirname(dirname(bin)), authFile, keychain, proxies.rules), bin];
       const cmd = '/usr/bin/sandbox-exec'; let args = reviewArgs(target); let authArgs: string[];
       let authEnv = env;
       if (target.cli === 'claude') {
+        // Claude's per-uid /tmp directory ignores TMPDIR; keep its private files inside this review's sandbox.
+        env.CLAUDE_CODE_TMPDIR = join(runtime, 'claude-tmp'); mkdirSync(env.CLAUDE_CODE_TMPDIR, { mode: 0o700 });
         env.CLAUDE_CONFIG_DIR = join(runtime, 'claude'); mkdirSync(env.CLAUDE_CONFIG_DIR);
         env.CLAUDE_SECURESTORAGE_CONFIG_DIR = ''; // The launcher's shared daily keychain route, never a copied keychain entry.
         env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1'; env.DISABLE_AUTOUPDATER = '1';
@@ -173,6 +181,9 @@ export class CliReviewDriver implements ReviewDriver {
       const response = await run(cmd, [...prefix, ...args], request.input, work, env, this.timeoutMs);
       this.cancelled = response.cancelled ?? false;
       return { ...decodeResponse(target.cli, response, target.model), invocation: base.invocation! };
+    } catch (error) {
+      if (!(error instanceof ReviewProxyError)) throw error;
+      return { status: 'unavailable', detail: error.message, text: '', stdout: '', stderr: '', responseId: null, visibleModel: null, cached: false };
     } finally { rmSync(scratch, { recursive: true, force: true }); }
   }
 }
