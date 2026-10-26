@@ -4,13 +4,13 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { connect } from 'node:net';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'vitest';
 import { createHttpTestClient } from '../../helpers/mcp-http-client.mjs';
 import { ChatGPTAttempt } from './attempt.ts';
 import type { Capture } from './attempt.ts';
-import type { Exchange } from './relay.ts';
+import type { Exchange, RelayRefusal } from './relay.ts';
 import { checklist, initialFive, selectScenarios } from './plan.ts';
 import { connectorsFrom, acquireTunnel, hasLocalConnector, readTunnelConfig } from './tunnel.ts';
 import { clientVisibility, runBatch, runRoot } from './run.ts';
@@ -32,6 +32,7 @@ const attemptOptions = (root: string, id: string) => ({ dir: join(root, 'attempt
 const fixedUpgradeDecision = [{ itemId: 'mismatch-as-outage', status: 'holds' as const, by: 'fixture-human', role: 'human' as const,
   reason: 'Synthetic human decision for the model-only item; rule-source checks must still decide from captured evidence.' }];
 const wireOf = (a: ChatGPTAttempt): Exchange[] => JSON.parse(readFileSync(join(a.dir, 'raw/wire.json'), 'utf8'));
+const refusalsOf = (dir: string): RelayRefusal[] => JSON.parse(readFileSync(join(dir, 'raw/relay-refusals.json'), 'utf8'));
 const listedSource = (a: ChatGPTAttempt) => `raw/wire.json#${wireOf(a).findLast(e => e.httpMethod === 'POST' && e.request.method === 'tools/list')!.id}`;
 
 async function eventually(check: () => boolean, detail: () => string = () => 'condition not observed') {
@@ -465,6 +466,8 @@ test('the ceiling stops at its limit and preserves the remaining plan as not-run
     assert.equal(report.chatgptAcceptance.visibility[0].phases[0].compatibilityMode, 'toolsOnly');
     assert.equal(report.chatgptAcceptance.visibility[0].phases[0].instructions.known, false);
     assert.equal(report.chatgptAcceptance.visibility[1].phases.known, false);
+    assert.equal(report.chatgptAcceptance.visibility[0].relayRefusals.total, 0);
+    assert.equal(report.chatgptAcceptance.visibility[1].relayRefusals.known, false);
     assert.match(readFileSync(join(f.batchDir, 'report.md'), 'utf8'), /S1-1: mode unknown/);
   } finally { await f.cleanup(); }
 }, 30_000);
@@ -639,6 +642,101 @@ test('a session DELETE cannot fabricate a JSON-RPC tool call', async () => {
   } finally { await client.close(); await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }
 }, 30_000);
 
+test('every relay refusal persists only diagnostic metadata, with unchanged guard priority and forwarding', async () => {
+  const root = fresh(); const options = attemptOptions(root, 'F11');
+  const a = await ChatGPTAttempt.start(options);
+  const rpc = (method: unknown = 'ping', params: unknown = { private: 'body-secret' }) => JSON.stringify({ jsonrpc: '2.0', id: 'private-id', method, params });
+  const cases = [
+    { path: '/mcp?token=path-secret', origin: true, method: 'PATCH', body: rpc(), status: 404, reason: 'path_mismatch', shape: 'object', rpcMethod: 'ping' },
+    { origin: true, method: 'PATCH', body: rpc(), status: 403, reason: 'origin_present', shape: 'object', rpcMethod: 'ping' },
+    { method: 'PATCH', body: rpc(), status: 405, reason: 'method_not_allowed', shape: 'object', rpcMethod: 'ping' },
+    { body: '{body-secret', status: 400, reason: 'invalid_json', shape: 'unparseable', rpcMethod: null },
+    { body: `[${rpc()}]`, status: 400, reason: 'non_object_json', shape: 'array', rpcMethod: null },
+    ...['null', '17', 'true', '"body-secret"'].map(body => ({ body, status: 400, reason: 'non_object_json', shape: 'scalar', rpcMethod: null })),
+    { body: '', status: 400, reason: 'invalid_rpc', shape: 'empty', rpcMethod: null },
+    { body: '{"method":"ping","params":{"private":"body-secret"}}', status: 400, reason: 'invalid_rpc', shape: 'object', rpcMethod: 'ping' },
+    { body: '{"jsonrpc":"2.0"}', status: 400, reason: 'invalid_rpc', shape: 'object', rpcMethod: null },
+    { body: rpc({ private: 'body-secret' }), status: 400, reason: 'invalid_rpc', shape: 'object', rpcMethod: null },
+    { method: 'DELETE', body: rpc(), status: 400, reason: 'delete_body', shape: 'object', rpcMethod: 'ping' },
+    { body: rpc('tools/call', { name: 'map_list', arguments: [] }), status: 400, reason: 'invalid_tool_params', shape: 'object', rpcMethod: 'tools/call' },
+    { body: rpc('resources/read'), status: 503, reason: 'outside_turn', shape: 'object', rpcMethod: 'resources/read' },
+    { body: rpc('private text\nbody-secret'), status: 503, reason: 'outside_turn', shape: 'object', rpcMethod: null },
+    { body: 'x'.repeat(1_048_577), status: 413, reason: 'body_too_large', shape: 'unavailable', rpcMethod: null },
+  ];
+  try {
+    assert.deepEqual(refusalsOf(a.dir), []);
+    for (const [index, c] of cases.entries()) {
+      const contentType = index % 2 ? 'text/plain; private=header-secret' : 'application/json; private=header-secret';
+      const response = await fetch(`http://127.0.0.1:${a.relay.port}${c.path ?? '/mcp'}`, { method: c.method ?? 'POST',
+        headers: { 'content-type': contentType, authorization: 'Bearer header-secret', cookie: 'cookie-secret',
+          'mcp-session-id': 'session-secret', ...(c.origin ? { origin: 'https://origin-secret.example' } : {}) }, body: c.body });
+      assert.equal(response.status, c.status, c.reason); await response.text();
+      // Header rejections reply immediately; their same record is enriched once the body has arrived.
+      await eventually(() => refusalsOf(a.dir).at(-1)?.bodyShape === c.shape);
+      const records = refusalsOf(a.dir);
+      assert.equal(records.length, index + 1);
+      const refusal = records[index]!;
+      assert.equal(Number.isNaN(Date.parse(refusal.at)), false);
+      assert.deepEqual(refusal, { at: refusal.at, status: c.status, reason: c.reason, httpMethod: c.method ?? 'POST',
+        pathIsMcp: c.path === undefined, originPresent: c.origin === true, contentTypeIsJson: index % 2 === 0,
+        bodyShape: c.shape, rpcMethod: c.rpcMethod, withinTurn: false });
+    }
+    assert.equal(existsSync(join(a.dir, 'raw/wire.json')), false);
+    // Ownership failures retain the arrival's turn attribution even though failure disables forwarding.
+    await a.begin();
+    a.relay.beforeForward = async () => { throw new Error('ownership-private-detail'); };
+    assert.equal((await fetch(`http://127.0.0.1:${a.relay.port}/mcp`, { method: 'POST', body: rpc() })).status, 503);
+    assert.deepEqual(refusalsOf(a.dir).at(-1), { at: refusalsOf(a.dir).at(-1)!.at, status: 503,
+      reason: 'ownership_check_failed', httpMethod: 'POST', pathIsMcp: true, originPresent: false,
+      contentTypeIsJson: false, bodyShape: 'object', rpcMethod: 'ping', withinTurn: true });
+    a.relay.beforeForward = async () => {}; a.relay.active = true;
+    const { client, streamProbe } = await createHttpTestClient(a.relay.port, 'ignored');
+    try {
+      assert.equal((await client.listTools()).tools.length, 4);
+      assert.deepEqual(await streamProbe, { status: 405 }); // The SDK's optional GET probe keeps its existing refusal.
+    }
+    finally { await client.close(); }
+    assert.equal(refusalsOf(a.dir).length, cases.length + 2);
+    assert.equal(refusalsOf(a.dir).at(-1)!.reason, 'method_not_allowed');
+    assert.ok(wireOf(a).some(e => e.request.method === 'tools/list' && e.status === 200));
+    await a.stop();
+    const text = readFileSync(join(a.dir, 'raw/relay-refusals.json'), 'utf8');
+    for (const secret of ['body-secret', 'private-id', 'private-path', 'path-secret', 'header-secret', 'cookie-secret',
+      'session-secret', 'origin-secret', 'ownership-private-detail', ...Object.values(a.secrets)]) assert.equal(text.includes(secret), false, secret);
+    assert.equal(statSync(join(a.dir, 'raw/relay-refusals.json')).mode & 0o777, 0o600);
+    const recorded = JSON.parse(readFileSync(join(a.dir, 'attempt.json'), 'utf8'));
+    assert.equal(recorded.diagnostics.relayRefusals.total, cases.length + 2);
+    assert.equal(recorded.diagnostics.relayRefusals.withinTurn, 2);
+    assert.equal(recorded.diagnostics.relayRefusals.outsideTurn, cases.length);
+    assert.deepEqual(recorded.diagnostics.relayRefusals.byStatus, { 400: 12, 403: 1, 404: 1, 405: 2, 413: 1, 503: 3 });
+    assert.equal(recorded.raw.files.includes('relay-refusals.json'), true);
+    const { diagnostics: _, ...shared } = a.record;
+    assert.deepEqual(judgeAttempt(options.scenario, a.record), judgeAttempt(options.scenario, shared));
+  } finally { await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }
+}, 30_000);
+
+test('a header refusal is durable before an unfinished body and stop retains its unknown shape', async () => {
+  const f = await cliFixture();
+  const socket = connect(f.port, '127.0.0.1');
+  socket.on('error', () => {});
+  try {
+    await once(socket, 'connect');
+    const reply = once(socket, 'data');
+    socket.write('POST /private-path HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n{');
+    assert.match(String((await reply)[0]), /404/); // Still refuses before waiting for the full request body.
+    const dir = join(f.batchDir, 'F11-1');
+    assert.equal(refusalsOf(dir).length, 1);
+    assert.equal(refusalsOf(dir)[0]!.bodyShape, 'unavailable');
+    f.child.stdin.write('stop\n'); await f.exited;
+    assert.equal(refusalsOf(dir).length, 1);
+    const record = JSON.parse(readFileSync(join(dir, 'attempt.json'), 'utf8'));
+    assert.equal(record.diagnostics.relayRefusals.total, 1);
+    const report = JSON.parse(readFileSync(join(f.batchDir, 'report.json'), 'utf8'));
+    assert.deepEqual(report.chatgptAcceptance.visibility[0].relayRefusals, record.diagnostics.relayRefusals);
+    assert.match(readFileSync(join(f.batchDir, 'report.md'), 'utf8'), /1 refused; reasons: path_mismatch=1; HTTP: 404=1/);
+  } finally { socket.destroy(); await f.cleanup(); }
+}, 30_000);
+
 test('aborted POST and tools/call without params do not crash the full fake-tunnel CLI', async () => {
   const f = await cliFixture();
   try {
@@ -646,6 +744,8 @@ test('aborted POST and tools/call without params do not crash the full fake-tunn
     socket.on('error', () => {});
     await once(socket, 'connect');
     socket.write('POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n{');
+    socket.end();
+    await eventually(() => refusalsOf(join(f.batchDir, 'F11-1')).some(r => r.reason === 'body_interrupted'));
     socket.destroy();
     f.child.stdin.write('begin\n'); await f.waitFor(/Send this Scenario message/);
     for (const params of [undefined, null, [], { name: null }]) {
@@ -658,21 +758,36 @@ test('aborted POST and tools/call without params do not crash the full fake-tunn
     assert.equal(existsSync(join(f.batchDir, 'tunnel.yml')), false);
     assert.equal(existsSync(join(runRoot, `opencode-${f.config.id}.lock`)), false);
     assert.equal(existsSync(join(f.root, 'fake-connector.json')), false);
+    const refusals = refusalsOf(join(f.batchDir, 'F11-1'));
+    assert.equal(refusals.length, 5);
+    assert.equal(refusals[0]!.bodyShape, 'unavailable');
+    assert.equal(refusals[0]!.status, 400);
+    assert.equal(refusals.slice(1).every(r => r.reason === 'invalid_tool_params' && r.withinTurn), true);
   } finally { await f.cleanup(); }
 }, 30_000);
 
 for (const fault of ['throw', 'reject', 'exit'] as const) test(`${fault} path stops the owned connector and removes the lease/config`, async () => {
   const f = await cliFixture(fault);
   try {
+    for (const path of ['/first-private-path', '/second-private-path']) {
+      const response = await fetch(`http://127.0.0.1:${f.port}${path}`, { method: 'POST', body: '{"private":"body-secret"}' });
+      assert.equal(response.status, 404); await response.text();
+    }
+    const dir = join(f.batchDir, 'F11-1');
+    await eventually(() => refusalsOf(dir).every(r => r.bodyShape === 'object'));
+    const before = refusalsOf(dir);
+    assert.equal(before.length, 2);
     writeFileSync(f.trigger, 'go'); await f.exited;
     assert.equal(f.child.exitCode, fault === 'exit' ? 7 : 1, f.output());
     await eventually(() => !existsSync(join(f.root, 'fake-connector.json')));
     assert.equal(existsSync(join(runRoot, `opencode-${f.config.id}.lock`)), false);
     assert.equal(existsSync(join(f.batchDir, 'tunnel.yml')), false);
+    assert.deepEqual(refusalsOf(dir), before);
     if (fault !== 'exit') {
       const record = JSON.parse(readFileSync(join(f.batchDir, 'F11-1/attempt.json'), 'utf8'));
       assert.equal(record.run.completeness, 'driver-failed');
       assert.ok(record.events.some((e: { action?: string }) => e.action === (fault === 'throw' ? 'uncaught-exception' : 'unhandled-rejection')));
+      assert.equal(record.diagnostics.relayRefusals.total, 2);
     }
   } finally { await f.cleanup(); }
 }, 30_000);
@@ -691,6 +806,8 @@ test('new competing connector is rejected before forwarding, recorded, and abort
     const record = JSON.parse(readFileSync(join(f.batchDir, 'F11-1/attempt.json'), 'utf8'));
     assert.equal(record.run.completeness, 'driver-failed');
     assert.match(record.run.detail, /ownership lost/);
+    assert.equal(refusalsOf(join(f.batchDir, 'F11-1')).at(-1)!.reason, 'ownership_check_failed');
+    assert.equal(record.diagnostics.relayRefusals.byReason.ownership_check_failed, 1);
     assert.equal(existsSync(join(f.batchDir, 'tunnel.yml')), false);
   } finally { await f.cleanup(); }
 }, 30_000);
@@ -720,7 +837,12 @@ test('SIGINT cleans up; SIGKILL leftovers are refused with owner inspection inst
   } finally { await graceful.cleanup(); }
   const killed = await cliFixture();
   try {
+    assert.equal((await fetch(`http://127.0.0.1:${killed.port}/private-path`)).status, 404);
+    const dir = join(killed.batchDir, 'F11-1');
+    await eventually(() => refusalsOf(dir)[0]?.bodyShape === 'empty');
+    const before = refusalsOf(dir);
     killed.child.kill('SIGKILL'); await killed.exited;
+    assert.deepEqual(refusalsOf(dir), before);
     assert.equal(existsSync(join(killed.root, 'fake-connector.json')), true);
     await assert.rejects(acquireTunnel({ ...killed.config, root: runRoot, dir: killed.batchDir }), /inspect .*owner.json.*confirmed orphan/);
     const owner = JSON.parse(readFileSync(join(runRoot, `opencode-${killed.config.id}.lock/owner.json`), 'utf8'));
