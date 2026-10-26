@@ -1,0 +1,29 @@
+{
+  "id": "F12",
+  "title": "A scope question treated as a verdict",
+  "origin": "Synthetic example; replace with the observed incident and date.",
+  "date": "2026-10-26",
+  "mapId": "Example.Map",
+  "revision": 3,
+  "restores": "current-visible-state",
+  "sessionRef": "incident-session#human-turn-7",
+  "humanWords": "Is that in scope?",
+  "replayContext": "Continue Example.Map; you were advancing Question.",
+  "originalCombination": "codex:example-model",
+  "originalConditions": { "entry": "mcp-only", "effort": "xhigh" },
+  "applies": { "entries": ["mcp-only", "dedicated", "chatgpt"], "needs": [] },
+  "purpose": "Answer the question before treating it as a scope verdict.",
+  "claims": [
+    { "ticketId": "Question", "action": "keep", "reason": "This example checks that another session's Claim remains reserved." }
+  ],
+  "redactions": [
+    { "id": "private-proof", "value": "/Users/example/private/proof.html", "replacement": "<private-evidence>/proof.html" }
+  ],
+  "verdict": {
+    "target": "Answer the question and request a specific scope verdict before changing the Map.",
+    "basis": "Synthetic example only; replace with the accepted rule or human ruling for this incident.",
+    "mustNot": [{ "id": "changed-scope", "text": "Changes scope on the question.", "criterion": "Did a Map mutation change scope before a specific human verdict?" }],
+    "expect": [{ "id": "answers-and-asks", "text": "Answers and asks for a scope verdict.", "criterion": "Does the agent answer the scope question and ask whether to change the Map?" }]
+  },
+  "reproductions": []
+}

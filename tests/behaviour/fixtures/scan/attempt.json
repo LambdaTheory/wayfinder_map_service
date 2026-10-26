@@ -1,0 +1,61 @@
+{
+  "schema": "wayfinder-behaviour-attempt/1",
+  "attemptId": "synthetic/read-a",
+  "batchId": "synthetic",
+  "entry": "dedicated",
+  "combination": {
+    "harness": "codex",
+    "requestedModel": "synthetic-model",
+    "visibleModel": {
+      "known": true,
+      "value": "synthetic-model"
+    },
+    "effort": {
+      "known": true,
+      "value": "high"
+    }
+  },
+  "run": {
+    "completeness": "complete"
+  },
+  "sessions": [
+    {
+      "label": "A",
+      "nativeId": {
+        "known": true,
+        "value": "read-a"
+      },
+      "mcpSessionIds": {
+        "known": true,
+        "value": [
+          "mcp-read-a"
+        ]
+      }
+    }
+  ],
+  "events": [
+    {
+      "seq": 1,
+      "session": "A",
+      "actor": "agent",
+      "kind": "tool-call",
+      "callId": "native-7",
+      "server": "wayfinder",
+      "tool": "map_read",
+      "arguments": {
+        "mapId": "Synthetic.Map"
+      },
+      "result": {
+        "known": true,
+        "value": {
+          "kind": "found"
+        }
+      },
+      "requestId": {
+        "known": true,
+        "value": "7"
+      }
+    }
+  ],
+  "missing": []
+}

@@ -1,0 +1,2 @@
+{"type": "user", "sessionId": "research", "message": {"role": "user", "content": "Research only; use the wayfinder skill."}}
+{"type": "assistant", "sessionId": "research", "message": {"role": "assistant", "model": "synthetic-claude", "content": [{"type": "tool_use", "id": "skill-1", "name": "Skill", "input": {"skill": "wayfinder"}}]}}

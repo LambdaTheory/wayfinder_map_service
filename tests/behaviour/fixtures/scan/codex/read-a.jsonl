@@ -1,0 +1,6 @@
+{"type": "session_meta", "payload": {"id": "read-a", "cli_version": "synthetic"}}
+{"type": "turn_context", "payload": {"model": "synthetic-model", "effort": "high"}}
+{"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Read the Map for this synthetic test."}]}}
+{"type": "response_item", "payload": {"type": "function_call", "call_id": "native-7", "name": "mcp__wayfinder__map_read", "arguments": "{\"mapId\": \"Synthetic.Map\"}"}}
+{"type": "response_item", "payload": {"type": "function_call_output", "call_id": "native-7", "output": "{\"kind\": \"found\"}"}}
+{"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Synthetic recorded response."}]}}

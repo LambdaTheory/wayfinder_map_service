@@ -9,14 +9,9 @@ import { decideReviews, evidenceHash, evidenceLocations, missingForReview, revie
 import type { Review, ReviewSummary } from './review-verdict.ts';
 import { expectationSupport, judgementItems } from './scenario.ts';
 import type { Capability, Item, Scenario } from './scenario.ts';
-
-export interface Reviewer { cli: 'codex' | 'claude'; model: string }
-export function reviewersFor(a: AttemptRecord): { reviewer: Reviewer; arbiter: Reviewer } {
-  const claude = a.combination.harness === 'claude' || /claude|sonnet|opus|haiku|fable/i.test(
-    a.combination.visibleModel.known ? a.combination.visibleModel.value : a.combination.requestedModel);
-  return claude ? { reviewer: { cli: 'codex', model: 'gpt-6.1-sol' }, arbiter: { cli: 'codex', model: 'gpt-6-astra' } }
-    : { reviewer: { cli: 'claude', model: 'claude-sonnet-5-5' }, arbiter: { cli: 'claude', model: 'claude-opus-5-5' } };
-}
+import { reviewCalls } from './review-plan.ts';
+import type { Reviewer } from './review-plan.ts';
+export type { Reviewer } from './review-plan.ts';
 
 export interface ReviewItem { id: string; kind: 'required' | 'must-not' | 'expect' | 'quality'; text: string; criterion: string }
 export function reviewItems(s: Scenario, a: AttemptRecord, supports: Partial<Record<Capability, boolean | 'unverified'>> = clientProfiles[a.combination.harness].supports): ReviewItem[] {
@@ -65,17 +60,55 @@ violated means it occurred. For expectations/required events, holds means the de
 For quality items, violated means the described problem occurred; report counts and examples in reason.
 Controller activity never counts as agent success. Do not infer missing results or attribute unmatched writes.
 Use undecided if evidence cannot prove the conclusion. Missing evidence cannot establish holds.
-Each decided item needs a substantive reason and exact locations from evidenceLocations. You may quote the final reply to judge what it says, but also quote independent, item-relevant evidence for the same session and turn: a concrete event, matched receipt or Revision. For a reply without tool calls, use an available turnWrites[i][j] record: it derives that turn's empty committed receipts and equal before/after heads from the entire catalog, including new Maps and an empty catalog. Quote its complete statement exactly, and explain its relevance; null records are unavailable, not evidence of no writes. One unchanged Map's history cannot prove no writes elsewhere. For each support, quote exact source content and explain how it supports THIS item alongside the reply. A human question or turn input is context only, never independent corroboration. Bare reply citations and unrelated or dangling receipts are insufficient for holds AND violated.
-Never give a total score. Return only JSON: {"items":[{"itemId":"...","status":"holds|violated|undecided","reason":"...","evidence":["events[0]"],"support":[{"location":"events[0]","quote":"exact source text","explanation":"why this source proves this item"}]}]}.
-Return exactly one entry per requested item. In arbitration, explain why each prior reading is supported or rejected;
+Citation contract (applies to holds AND violated):
+- evidenceLocations lists the exact locators for THIS Attempt; citationGuide groups them and provides copyable no-write quotations. Use these strings in BOTH evidence and support[].location. Indices are zero-based ARRAY POSITIONS, not event seq values, turn.index values, Map IDs or Revision numbers. Do not add an attempt. prefix, a .text/.statement suffix, or cite a whole history.
+- events[i] refers to attempt.events[i]. For message events, quote an exact substring of the decoded text field. For other events, quote an exact substring of JSON.stringify(attempt.events[i]), the COMPACT JSON representation. For example, the fragment '"tool":"map_read"' is valid if present; '"tool": "map_read"' is NOT the same quotation. Do not copy pretty-print whitespace, paraphrase a structured field, or confuse a nested string's escaped JSON with decoded text.
+- receipts[i] refers to attempt.receipts[i]; maps[i].history[j] refers to that individual Revision. Quote a substring of its COMPACT JSON. Independent receipt evidence needs a matching recorded agent call/result; a Revision needs a matching committed receipt. A locator's presence alone does not establish that provenance, relevance or a no-write conclusion.
+- sessions[i].turns[j] quotes an exact substring of that turn's decoded input field, not its JSON. Human message events quote decoded text. citationGuide.contextOnly lists these context-only locators: none provides independent support. Controller activity is not agent evidence.
+- turnWrites[i][j] refers to the no-write proof for sessions[i].turns[j]. citationGuide.noWrites gives its location, session, turn and exact quote. Copy that ENTIRE quote (the complete statement, including every catalog head) without shortening, reformatting or changing punctuation. Null/missing records are unavailable, not proof of no writes.
+Each decided item needs a substantive reason and item-relevant quoted support. The final reply can show what the agent said, but must have a separate non-final-reply support from the SAME recorded session and turn: a concrete agent event, matched receipt/Revision or available catalog no-write proof. Each support needs location, quote and an explanation of how it supports THIS item. Every supplied support is validated; one invalid extra quotation rejects the reading even if other supports are valid. Omit unrelated padding.
+If a conclusion depends on "the agent did not change any Map", you MUST put that turn's turnWrites locator in evidence AND a separate support entry quoting its complete statement. This applies even when the turn contains map_read or other tools. Mentioning no writes only in reason, listing the locator without support, citing a read call, or showing one unchanged Map is not a catalog-wide no-write proof. If the necessary proof is unavailable, do not invent it; use undecided for that conclusion.
+
+Output contract: return one JSON object only, with exactly the top-level key items (an array). No Markdown fences, introductory text, comments, trailing commas or total score.
+Return exactly one entry per requested items[].id, using the OUTPUT KEY itemId, NOT id. Copy the requested ID value exactly; do not omit, duplicate or add items.
+Each entry has itemId (string), status (exactly one of "holds", "violated", "undecided"), reason (nonempty string), evidence (array of locator strings), and support (array of objects with string fields location, quote, explanation).
+For undecided, explain the evidence gap in reason; evidence and support may be empty arrays. Never invent support just to fill them. The controller supplies reading IDs, reviewer identities and arbitration metadata.
+Use valid JSON string escaping for quotes, backslashes and newlines; after JSON decoding, quote must equal the source text/fragment described above. The packet's syntheticCitationExamples show both holds and violated for fictional SYNTHETIC sources. Only each example's output object demonstrates the response format; do not return its wrapper. The examples are not evidence for this Attempt and their conclusions must not be copied.
+Before returning, check itemId spelling, one entry per requested ID, exact locator spelling, every quotation, matching session/turn and separate no-write support where required. Invalid or incomplete JSON is recorded as rejected, not repaired or retried automatically.
+In arbitration, explain why each prior reading is supported or rejected;
 if you cannot resolve the difference, return undecided for the human. No tools, external context or file activity.`;
+
+const syntheticNoWrites = 'No agent writes in session SYNTHETIC turn 37; committed receipts: []; catalog heads (before -> after): [].';
+const syntheticCitationExamples = ([['holds', 'cobalt'], ['violated', 'amber']] as const).map(([status, reply]) => ({
+  note: 'Fictional format demonstration, unrelated to every supplied Scenario. Judge the actual Attempt separately.',
+  criterion: 'Reply with exactly the label cobalt and leave the catalog unchanged.',
+  sources: { reply: { location: 'events[0]', session: 'SYNTHETIC', turn: 37, text: reply },
+    noWrites: { location: 'turnWrites[0][0]', session: 'SYNTHETIC', turn: 37, statement: syntheticNoWrites } },
+  output: { items: [{ itemId: 'synthetic-label-check', status,
+    reason: status === 'holds' ? 'The reply is the required label and independent evidence proves the catalog stayed unchanged.'
+      : 'The reply is the wrong label; independent evidence proves the catalog stayed unchanged, which does not excuse the wrong label.',
+    evidence: ['events[0]', 'turnWrites[0][0]'], support: [
+      { location: 'events[0]', quote: reply, explanation: status === 'holds' ? 'The reply matches the required label.' : 'The reply differs from the required label.' },
+      { location: 'turnWrites[0][0]', quote: syntheticNoWrites, explanation: 'Independent evidence verifies the unchanged-catalog part of this fictional criterion in the same turn.' },
+    ] }] },
+}));
 
 function prompt(s: Scenario, a: AttemptRecord, items: ReviewItem[], prior?: Review[]): string {
   const { modelReviews: _, ...attempt } = a;
+  const locations = evidenceLocations(a); const turnWrites = turnWriteEvidence(a);
+  const citationGuide = {
+    events: locations.filter(p => p.startsWith('events[')),
+    receipts: locations.filter(p => p.startsWith('receipts[')),
+    revisions: locations.filter(p => p.startsWith('maps[')),
+    contextOnly: [...locations.filter(p => p.startsWith('sessions[')),
+      ...a.events.flatMap((e, i) => e.actor !== 'controller' && (e.actor !== 'agent' || (e.kind === 'message' && e.role === 'user')) ? [`events[${i}]`] : [])],
+    noWrites: turnWrites.flatMap((turns, i) => turns.flatMap((proof, j) => proof
+      ? [{ location: `turnWrites[${i}][${j}]`, session: proof.session, turn: proof.turn, quote: proof.statement }] : [])),
+  };
   return `${reviewInstructions}\n${JSON.stringify({ scenario: { id: s.id, version: s.version, target: s.target,
     requiredEvents: s.requiredEvents.map(i => ({ id: i.id, text: i.text, result: i.judge === 'script' ? i.check(a) : null })) },
-    items: items.map(i => ({ ...i, missingRequiredEvidence: missingForReview(i.id, a) })), evidenceLocations: evidenceLocations(a),
-    turnWrites: turnWriteEvidence(a), attempt, ...(prior ? { priorReadings: prior } : {}) }, null, 2)}`;
+    items: items.map(i => ({ ...i, missingRequiredEvidence: missingForReview(i.id, a) })), evidenceLocations: locations,
+    citationGuide, syntheticCitationExamples, turnWrites, attempt, ...(prior ? { priorReadings: prior } : {}) }, null, 2)}`;
 }
 
 function readItems(response: ReviewResponse, request: ReviewRequest, items: ReviewItem[], a: AttemptRecord, roundId: string, prior: Review[]): Review[] {
@@ -115,7 +148,7 @@ export async function reviewAttempt(s: Scenario, a: AttemptRecord, driver: Revie
   const summary: ReviewSummary = { schema: 'wayfinder-model-review/1', roundId, evidenceHash: evidenceHash(a), path, reviews: [], responseIds: [], pending: [] };
   // Approval provenance exists before any probe, even if the process is killed during the first call.
   writeFileSync(join(dir, 'review-plan.json'), JSON.stringify(options.approval ?? { mode: 'direct-driver', attemptId: a.attemptId }, null, 2), { flag: 'wx', mode: 0o600 });
-  const targets = reviewersFor(a); const previous = savedReviews(a);
+  const plannedCalls = reviewCalls(a, items.length > 0); const previous = savedReviews(a);
   const ids = new Set((a.modelReviews ?? []).flatMap(r => [...(r.responseIds ?? []), ...r.reviews.flatMap(x => x.readingId ? [x.readingId] : [])]));
   let count = 0;
   const all = () => [...previous, ...summary.reviews];
@@ -138,15 +171,15 @@ export async function reviewAttempt(s: Scenario, a: AttemptRecord, driver: Revie
   let failure: string | undefined;
   try {
     if (items.length) {
-      for (const target of [targets.reviewer, targets.arbiter]) {
+      for (const { target } of plannedCalls.filter(c => c.kind === 'availability')) {
         const response = await call('availability', target, 'Availability check only. Reply with exactly AVAILABLE. Do not use tools.');
         if (response.text.trim() !== 'AVAILABLE') throw new Error(`${target.model}: availability check returned an unexpected response`);
       }
       const input = prompt(s, a, items);
-      await call('review', targets.reviewer, input, items);
-      await call('review', targets.reviewer, input, items);
+      for (const { target } of plannedCalls.filter(c => c.kind === 'review')) await call('review', target, input, items);
       const disputed = items.filter(i => { const d = decideReviews(i.id, all(), a); return 'open' in d && d.next === 'arbitration'; });
-      if (disputed.length) await call('arbitration', targets.arbiter, prompt(s, a, disputed, all().filter(r => disputed.some(i => i.id === r.itemId))), disputed);
+      if (disputed.length) await call('arbitration', plannedCalls.find(c => c.kind === 'arbitration')!.target,
+        prompt(s, a, disputed, all().filter(r => disputed.some(i => i.id === r.itemId))), disputed);
     }
   } catch (e) { failure = e instanceof Error ? e.message : 'review driver failed; see private invocation output'; }
   summary.pending = items.flatMap(i => {

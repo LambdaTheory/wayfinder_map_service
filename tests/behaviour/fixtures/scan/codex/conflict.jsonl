@@ -1,0 +1,6 @@
+{"type": "session_meta", "payload": {"id": "conflict", "cli_version": "synthetic"}}
+{"type": "turn_context", "payload": {"model": "synthetic-model", "effort": "high"}}
+{"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Apply my accepted change."}]}}
+{"type": "response_item", "payload": {"type": "function_call", "call_id": "native-7", "name": "mcp__wayfinder__map_apply", "arguments": "{\"mapId\": \"Synthetic.Map\", \"expectedRevision\": 2, \"commands\": [{\"kind\": \"map.update\", \"destination\": \"Expanded scope\"}]}"}}
+{"type": "response_item", "payload": {"type": "function_call_output", "call_id": "native-7", "output": "{\"kind\": \"conflict\", \"currentRevision\": 4}"}}
+{"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Synthetic recorded response."}]}}
