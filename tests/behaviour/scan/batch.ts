@@ -15,14 +15,16 @@ export interface Work {
 export interface BatchPlan {
   schema: 'wayfinder-scan-batch/1'; id: string; work: Work[]; ceiling: number;
   /** Present only after explicit B01 evidence binding; the scan proposal itself is not executable. */
-  reviewRuns?: { leadId: string; scanEvidenceHash: string; plan: ReturnType<typeof reviewPlan>[number]; retry: boolean }[];
+  reviewRuns?: { leadId: string; plan: ReturnType<typeof reviewPlan>[number]; retry: boolean }[];
 }
 export interface Approval { planHash: string; reference: string; by: string }
 export interface Reservation { id: string; workId: string; status: 'reserved' | 'complete' | 'failed'; result: unknown }
 export interface Ledger { schema: 'wayfinder-scan-ledger/1'; planHash: string; approval: Approval; results: Reservation[] }
 
+export const reviewWorkId = (leadId: string, callId: string) => `${leadId}-${callId}`;
+
 export function reviewWork(leadId: string, evidenceHash: string, calls: ReviewCall[]): Work[] {
-  return calls.map(call => ({ id: `${leadId}-${call.id}`, kind: call.kind === 'review' ? 'reading' : call.kind,
+  return calls.map(call => ({ id: reviewWorkId(leadId, call.id), kind: call.kind === 'review' ? 'reading' : call.kind,
     combination: { harness: call.target.cli, model: call.target.model, effort: 'client-default', entry: 'review' },
     scope: [leadId], repetitions: 1, extraReviews: 0, evidenceHash,
     prerequisites: [call.conditional ? 'Only if independent readings disagree; otherwise leave unspent' : 'Bind complete B01 evidence and obtain exact Batch approval'] }));
@@ -36,7 +38,7 @@ export function proposeBatch(report: ScanReport): { plan: BatchPlan; deferred: {
       deferred.push({ leadId: lead.id, reason: 'Original words or Combination unavailable; collect evidence before a model Batch' }); continue;
     }
     const calls = reviewCalls({ combination: { harness: session.harness, requestedModel: session.model,
-      visibleModel: { known: true, value: session.model }, effort: { known: false, reason: 'Reviewer plan only' } } });
+      visibleModel: { known: true, value: session.model } } });
     work.push(...reviewWork(lead.id, lead.evidenceHash, calls));
   }
   return { plan: { schema: 'wayfinder-scan-batch/1', id: `scan-${digest(work).slice(0,16)}`, work,

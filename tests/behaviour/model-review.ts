@@ -11,7 +11,6 @@ import { expectationSupport, judgementItems } from './scenario.ts';
 import type { Capability, Item, Scenario } from './scenario.ts';
 import { reviewCalls } from './review-plan.ts';
 import type { Reviewer } from './review-plan.ts';
-export { reviewersFor } from './review-plan.ts';
 export type { Reviewer } from './review-plan.ts';
 
 export interface ReviewItem { id: string; kind: 'required' | 'must-not' | 'expect' | 'quality'; text: string; criterion: string }

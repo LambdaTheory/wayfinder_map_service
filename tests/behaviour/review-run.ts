@@ -7,11 +7,11 @@ import { attemptSchema } from './evidence.ts';
 import type { AttemptRecord } from './evidence.ts';
 import { library } from './library.ts';
 import { CliReviewDriver } from './review-cli.ts';
-import { reviewAttempt, reviewersFor, reviewItems } from './model-review.ts';
+import { reviewAttempt, reviewItems } from './model-review.ts';
 import type { ReviewDriver } from './model-review.ts';
 import { decideReviews, evidenceHash, savedReviews } from './review-verdict.ts';
 import { asScenario, upgradeChecks } from './upgrade-checks.ts';
-import { reviewCalls } from './review-plan.ts';
+import { reviewCalls, reviewersFor } from './review-plan.ts';
 
 function load(dir: string) {
   const text = readFileSync(join(dir, 'attempt.json'), 'utf8');

@@ -61,10 +61,11 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
   const message = (s: Session, role: unknown, value: unknown, ref: string) => {
     const text = textContent(value);
     if ((role !== 'user' && role !== 'assistant') || !text) return;
-    if (role === 'user' && /^(?:# AGENTS\.md instructions|<environment_context>|<permissions instructions>|<INSTRUCTIONS>)/.test(text.trim())) return;
+    if (role === 'user' && /^(?:# AGENTS\.md instructions|<environment_context>|<permissions instructions>|<INSTRUCTIONS>|<user_instructions>)/.test(text.trim())) return;
     s.fragments.push({ ref, role, text });
     // A directory's Skill catalog and server instructions are not a Skill invocation.
-    if (role === 'user' && /^(?:[@$]wayfinder\b|(?:please )?use (?:the )?wayfinder skill\b|<command-name>\/wayfinder<\/command-name>)/i.test(text.trim())) s.skill.push(ref);
+    if (role === 'user' && (/^(?:[@$]wayfinder\b|(?:please )?use (?:the )?wayfinder skill\b)/i.test(text.trim())
+      || harness === 'claude' && /<command-name>\/wayfinder<\/command-name>/.test(text))) s.skill.push(ref);
   };
   const setting = (s: Session, field: 'model' | 'effort', value: unknown, ref: string) => {
     const next = str(value);
@@ -103,7 +104,7 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
       }
     } else {
       // Bookkeeping rows such as summary/file-history-snapshot do not create conversations.
-      if (row.type !== 'user' && row.type !== 'assistant') continue;
+      if ((row.type !== 'user' && row.type !== 'assistant') || row.isCompactSummary === true) continue;
       const id = str(row.sessionId);
       const sidechain = row.isSidechain === true;
       // Claude subagents share the parent's sessionId: never attach their calls to the parent's launch.

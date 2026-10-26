@@ -53,7 +53,9 @@ function incidentFragments(session: Session, refs: string[]): Fragment[] {
   for (const call of session.calls.filter(c => refs.includes(c.ref))) if (call.resultRef) selected.add(call.resultRef);
   const indices = session.fragments.flatMap((f, i) => selected.has(f.ref) ? [i] : []);
   for (const index of indices) {
-    for (let i = index - 1; i >= 0; i--) if (session.fragments[i]!.role === 'user') { selected.add(session.fragments[i]!.ref); break; }
+    if (session.fragments[index]!.role !== 'user') {
+      for (let i = index - 1; i >= 0; i--) if (session.fragments[i]!.role === 'user') { selected.add(session.fragments[i]!.ref); break; }
+    }
     for (let i = index + 1; i < session.fragments.length; i++) {
       const next = session.fragments[i]!;
       if (next.role === 'user') break;
@@ -177,13 +179,16 @@ export function analyze(inputs: Inputs, manifest: Manifest, previous: ScanState 
         evidenceRefs: fragments.map(({ ref, role }) => ({ ref, role })), hasHumanWords: fragments.some(f => f.role === 'user'),
         status: 'pending', reason: 'Screening candidate only; metadata and missing evidence do not establish a behaviour violation', requestHumanWords: false, reminder: false };
       const decisions = reviews.filter(r => r.leadId === id);
+      const quotedFragment = (q: Review['quotes'][number]) => typeof q.quote === 'string' && q.quote.trim()
+        ? fragments.find(f => f.ref === q.ref && f.text.includes(q.quote)) : undefined;
       if (decisions.length > 1) gaps.push(`${id}: multiple review decisions; reconcile explicitly`);
       else if (decisions.length === 1) {
         const review = decisions[0]!;
         const quotes = Array.isArray(review.quotes) ? review.quotes : [];
-        const exact = quotes.length > 0 && quotes.every(q => typeof q.quote === 'string' && q.quote.trim() && fragments.some(f => f.ref === q.ref && f.text.includes(q.quote)));
-        const human = quotes.some(q => fragments.some(f => f.role === 'user' && f.ref === q.ref && f.text.includes(q.quote)));
-        const action = quotes.some(q => fragments.some(f => f.role !== 'user' && f.ref === q.ref && f.text.includes(q.quote)));
+        const quoted = quotes.map(quotedFragment);
+        const exact = quoted.length > 0 && quoted.every(f => f !== undefined);
+        const human = quoted.some(f => f?.role === 'user');
+        const action = quoted.some(f => f !== undefined && f.role !== 'user');
         if (review.evidenceHash !== evidenceHash || !review.by?.trim() || !review.reason?.trim() || !review.basis?.trim()) gaps.push(`${id}: stale or incomplete review`);
         else if (review.disposition === 'confirmed' || review.disposition === 'dismissed') {
           if (kind === 'missing-evidence' || !exact || !human || !action) gaps.push(`${id}: verdict needs original human words and native action evidence; remains pending`);
@@ -197,7 +202,7 @@ export function analyze(inputs: Inputs, manifest: Manifest, previous: ScanState 
       }
       const accepted = acceptedReviews.find(r => r.leadId === id);
       // Export only explicitly selected exact excerpts, never the incident window or a whole conversation.
-      if (accepted) lead.fragments = accepted.quotes.map(q => ({ ref: q.ref, role: fragments.find(f => f.ref === q.ref && f.text.includes(q.quote))!.role, text: q.quote }));
+      if (accepted) lead.fragments = accepted.quotes.map(q => ({ ref: q.ref, role: quotedFragment(q)!.role, text: q.quote }));
       const confirmation = accepted?.disposition === 'confirmed' ? accepted : state.confirmations.find(c => c.leadId === id);
       if (confirmation) {
         lead.confirmation = confirmation; lead.status = 'confirmed'; lead.reason = confirmation.reason;

@@ -151,8 +151,26 @@ describe('native usage inventory and conservative correlation', () => {
       { ref: 'meta#3', value: { type: 'assistant', sessionId: 'meta', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: 'wayfinder/SKILL.md' } }] } } },
     ], 'claude', 'meta')[0]!;
     expect(claude.fragments).toEqual([]); expect(claude.skill).toEqual([]);
-    const slash = nativeSessions([{ ref: 'slash#1', value: { type: 'user', sessionId: 'slash', message: { content: '<command-name>/wayfinder</command-name>' } } }], 'claude', 'slash')[0]!;
+    const slash = nativeSessions([{ ref: 'slash#1', value: { type: 'user', sessionId: 'slash', message: { content: '<command-message>wayfinder is running…</command-message>\n<command-name>/wayfinder</command-name>' } } }], 'claude', 'slash')[0]!;
     expect(slash.skill).toEqual(['slash#1']);
+  });
+
+  it.each(['codex', 'claude'] as const)('does not accept %s injected instructions or compaction as human evidence', harness => {
+    const text = harness === 'codex' ? '<user_instructions>Injected approval</user_instructions>' : 'This session is being continued from a previous conversation. Injected approval.';
+    const rows = harness === 'codex' ? [
+      { type: 'session_meta', payload: { id: 'injected-only' } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ text }] } },
+      { type: 'response_item', payload: { type: 'function_call', call_id: 'write', name: 'mcp__wayfinder__map_apply', arguments: '{}' } },
+    ] : [
+      { type: 'user', sessionId: 'injected-only', isCompactSummary: true, message: { content: text } },
+      { type: 'assistant', sessionId: 'injected-only', message: { content: [{ type: 'tool_use', id: 'write', name: 'mcp__wayfinder__map_apply', input: {} }] } },
+    ];
+    const sessions = nativeSessions(rows.map((value, index) => ({ value, ref: `injected-only#${index}` })), harness, 'injected-only');
+    const report = analyze({ sessions, calls: [], launches: [], gaps: [], sources: [] }, manifest);
+    const lead = report.leads.find(l => l.kind === 'write')!;
+    expect(lead.hasHumanWords).toBe(false);
+    expect(lead.evidenceRefs.some(e => e.role === 'user')).toBe(false);
+    expect(sessions[0]!.fragments.some(f => f.text.includes('Injected approval'))).toBe(false);
   });
 
   it('states the fresh-launch gap instead of inventing a native-session association', () => {
@@ -246,8 +264,33 @@ describe('screening, evidence-bound verdicts and B04 intake', () => {
     expect(resumed.summary).toMatchObject({ confirmed: 1, newFailures: 0 });
     expect(resumed.captureDrafts).toEqual([]);
     expect(proposeBatch(resumed).plan.work).toEqual([]);
+    const session = data.sessions.find(s => s.key === 'codex:question-write')!;
+    session.calls.push({ ...session.calls[0]!, id: 'resumed-write', ref: 'resume#3' });
+    session.fragments.push({ ref: 'resume#3', role: 'tool', text: 'Another map_apply in the resumed incident' });
+    const changed = analyze(data, manifest, confirmed.state);
+    const changedLead = changed.leads.find(l => l.kind === 'write' && l.session === session.key)!;
+    expect(changedLead.evidenceHash).not.toBe(first.leads.find(l => l.id === changedLead.id)!.evidenceHash);
+    expect(changedLead).toMatchObject({ status: 'confirmed', change: 'changed' });
+    expect(changedLead.confirmation!.evidenceHash).toBe(first.leads.find(l => l.id === changedLead.id)!.evidenceHash);
+    expect(changed.summary.newFailures).toBe(0);
     expect(analyze({ sessions: [], calls: [], launches: [], gaps: ['sources missing'], sources: [] }, manifest, confirmed.state).summary.confirmed).toBe(1);
     expect(confirmed.captureDrafts[0]!.humanQuoteRefs.length).toBeGreaterThan(0);
+  });
+
+  it('starts a user Skill signal at its invocation without admitting the earlier unrelated human turn', () => {
+    const sessions = nativeSessions([
+      { type: 'session_meta', payload: { id: 'skill-context' } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ text: 'EARLIER-UNRELATED-SKILL-SENTINEL' }] } },
+      { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ text: 'Unrelated answer' }] } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ text: '$wayfinder Help plan this' }] } },
+      { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ text: 'Wayfinder plan reply' }] } },
+    ].map((value, i) => ({ value, ref: `skill-context#${i}` })), 'codex', 'skill-context');
+    const data = { sessions, calls: [], launches: [], gaps: [], sources: [] };
+    const first = analyze(data, manifest); const lead = first.leads.find(l => l.kind === 'skill-only')!;
+    expect(lead.evidenceRefs).not.toContainEqual({ ref: 'skill-context#1', role: 'user' });
+    const report = analyze(data, manifest, first.state, [{ leadId: lead.id, evidenceHash: lead.evidenceHash, disposition: 'screened', by: 'synthetic', basis: 'synthetic', reason: 'synthetic',
+      quotes: [{ ref: 'skill-context#1', quote: 'EARLIER-UNRELATED-SKILL-SENTINEL' }] }]);
+    expect(JSON.stringify(report)).not.toContain('EARLIER-UNRELATED-SKILL-SENTINEL');
   });
 
   it('exports only selected incident excerpts, including after screening, and rejects unrelated quotes', () => {

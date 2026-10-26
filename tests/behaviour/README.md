@@ -16,13 +16,13 @@ Listing and validation start no service or model. Manual runners start isolated 
 | `upgrade-checks.ts` | Upgrade compatibility checks, listed apart from the 26 |
 | `seeds/` | Seed Maps and the shared capture/Controller write plan (`steps.ts`); `f11.json` is the redacted capture of a real Map |
 | `capture/`, `captures/` | Read-only problem capture tool, synthetic verification and admitted/paused capture traces (B04) |
-| `scan/` | Explicit-source usage inventory, pending leads, B04 input drafts and unapproved Batch lists (B08); no model execution |
+| `scan/` | Quota-free usage scan CLI, pending leads, B04 drafts and Batch proposals (B08); `scan/review.ts` separately executes explicitly approved B03b work |
 | `fixtures/` | Working-directory fixtures copied into the agent's directory |
 | `interactive/` | Manual Codex/Claude interactive acceptance, native import and fixed fixtures (B09b); see its [runbook](interactive/README.md) |
 | `runner/` | The runner: isolated service, Controller, Codex Driver, normalizer (B02a) |
 | `chatgpt/` | Manual isolated ChatGPT Batch preparation, relay capture and operator checklist (B09a; real acceptance pending) |
 | `verdict.ts`, `report.ts` | Verdicts of Attempts and cells, and the comparison report (B03a) |
-| `model-review.ts`, `review-verdict.ts`, `review-no-writes.ts`, `review-types.ts`, `review-cli.ts`, `review-run.ts` | Other-vendor model readings, their evidence boundary, isolated CLI Driver and manual command (B03b) |
+| `model-review.ts`, `review-plan.ts`, `review-verdict.ts`, `review-no-writes.ts`, `review-types.ts`, `review-cli.ts`, `review-run.ts` | Other-vendor model readings, shared invocation plan, evidence boundary, isolated CLI Driver and manual command (B03b) |
 
 ```sh
 node tests/behaviour/cli.ts list       # candidates, readiness, item counts, capture inventory
