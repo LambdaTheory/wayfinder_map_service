@@ -44,7 +44,7 @@ if (process.env.CODEX_HOME.endsWith('/.codex-wayfinder')) {
   const instructions = readFileSync(join(process.env.CODEX_HOME, 'AGENTS.md'), 'utf8');
   const skill = readFileSync(join(process.env.HOME, '.agents/skills/wayfinder/SKILL.md'), 'utf8');
   writeFileSync('entry-probe.json', JSON.stringify({ privateHome: process.env.HOME, codexHome: process.env.CODEX_HOME,
-    authTarget: readlinkSync(join(process.env.CODEX_HOME, 'auth.json')), instructionsAvailable: Boolean(instructions), skillAvailable: Boolean(skill),
+    authTarget: readlinkSync(join(process.env.CODEX_HOME, 'auth.json')), authReadable: Boolean(readFileSync(join(process.env.CODEX_HOME, 'auth.json'), 'utf8')), instructionsAvailable: Boolean(instructions), skillAvailable: Boolean(skill),
     bootstrapKeys: Object.keys(process.env).filter(k => k.startsWith('WAYFINDER_AGENT_')), args, resumed: Boolean(resume) }));
 }
 if (prompt.includes('FAKE-REFRESH')) {

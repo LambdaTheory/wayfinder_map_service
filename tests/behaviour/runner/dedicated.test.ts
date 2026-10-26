@@ -73,7 +73,7 @@ test.skipIf(!sandbox)('real launcher runs and resumes inside the allowlist, reco
   const probe = JSON.parse(readFileSync(join(path, 'raw/work/entry-probe.json'), 'utf8'));
   expect(probe.privateHome).toBe(first.home);
   expect(probe.authTarget.replace(homedir(), '~')).toBe(`${first.overrides.WAYFINDER_AGENT_SERVICE_DIR}/launcher-home/.codex/auth.json`);
-  expect(probe.instructionsAvailable && probe.skillAvailable).toBe(true);
+  expect(probe.instructionsAvailable && probe.skillAvailable && probe.authReadable).toBe(true);
   expect(probe.bootstrapKeys).toEqual([]);
   expect(probe.resumed).toBe(true);
   expect(readFileSync(join(path, 'raw/work/fake-note.txt'), 'utf8')).toBe('note\n');
@@ -150,7 +150,7 @@ async function launcherFixture() {
   const request = { options, session, port: service.port, workdir, profile: setup.profile, prompt: 'start' };
   return { dir, own, setup, session, service, request,
     sandboxed: (code: string) => spawnSync('/usr/bin/sandbox-exec', ['-f', setup.profile, process.execPath, '-e', code],
-      { cwd: workdir, encoding: 'utf8', timeout: 10_000 }),
+      { cwd: workdir, env: { PATH: process.env.PATH, HOME: join(setup.state, 'home'), CODEX_HOME: setup.state }, encoding: 'utf8', timeout: 10_000 }),
     close: async () => { await service.stop(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
@@ -229,7 +229,7 @@ test.skipIf(!sandbox).each(['symlink', 'inode'])('private source login %s substi
     // The sandbox rejects this mutation; inject it as the runner to exercise the second, identity guard.
     renameSync(f.setup.sourceAuth, `${f.setup.sourceAuth}.saved`);
     if (kind === 'symlink') symlinkSync(sentinel, f.setup.sourceAuth);
-    else writeFileSync(f.setup.sourceAuth, '{}');
+    else writeFileSync(f.setup.sourceAuth, '{}', { mode: 0o600 });
     await expect(runDedicatedTurn(f.request, f.setup)).rejects.toThrow(/isolation failure/);
     expect(readFileSync(sentinel, 'utf8')).toBe('untouched');
   } finally { await f.close(); }
