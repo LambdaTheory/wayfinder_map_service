@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { clientProfiles } from './clients.ts';
+import { turnWriteEvidence } from './review-no-writes.ts';
 import type { AttemptRecord } from './evidence.ts';
 import { decideReviews, evidenceHash, evidenceLocations, missingForReview, reviewProblem, savedReviews } from './review-verdict.ts';
 import type { Review, ReviewSummary } from './review-verdict.ts';
@@ -64,7 +65,7 @@ violated means it occurred. For expectations/required events, holds means the de
 For quality items, violated means the described problem occurred; report counts and examples in reason.
 Controller activity never counts as agent success. Do not infer missing results or attribute unmatched writes.
 Use undecided if evidence cannot prove the conclusion. Missing evidence cannot establish holds.
-Each decided item needs a substantive reason and exact locations from evidenceLocations. You may quote the final reply to judge what it says, but also quote independent, item-relevant evidence for the same session and turn: a concrete event, matched receipt or Revision. For a reply without tool calls, a complete maps[i].history still at its seed head can corroborate that the Map was unchanged; an empty or missing history cannot. For each support, quote exact source content and explain how it supports THIS item alongside the reply. A human question or turn input is context only, never independent corroboration. Bare reply citations and unrelated or dangling receipts are insufficient for holds AND violated.
+Each decided item needs a substantive reason and exact locations from evidenceLocations. You may quote the final reply to judge what it says, but also quote independent, item-relevant evidence for the same session and turn: a concrete event, matched receipt or Revision. For a reply without tool calls, use an available turnWrites[i][j] record: it derives that turn's empty committed receipts and equal before/after heads from the entire catalog, including new Maps and an empty catalog. Quote its complete statement exactly, and explain its relevance; null records are unavailable, not evidence of no writes. One unchanged Map's history cannot prove no writes elsewhere. For each support, quote exact source content and explain how it supports THIS item alongside the reply. A human question or turn input is context only, never independent corroboration. Bare reply citations and unrelated or dangling receipts are insufficient for holds AND violated.
 Never give a total score. Return only JSON: {"items":[{"itemId":"...","status":"holds|violated|undecided","reason":"...","evidence":["events[0]"],"support":[{"location":"events[0]","quote":"exact source text","explanation":"why this source proves this item"}]}]}.
 Return exactly one entry per requested item. In arbitration, explain why each prior reading is supported or rejected;
 if you cannot resolve the difference, return undecided for the human. No tools, external context or file activity.`;
@@ -73,7 +74,8 @@ function prompt(s: Scenario, a: AttemptRecord, items: ReviewItem[], prior?: Revi
   const { modelReviews: _, ...attempt } = a;
   return `${reviewInstructions}\n${JSON.stringify({ scenario: { id: s.id, version: s.version, target: s.target,
     requiredEvents: s.requiredEvents.map(i => ({ id: i.id, text: i.text, result: i.judge === 'script' ? i.check(a) : null })) },
-    items: items.map(i => ({ ...i, missingRequiredEvidence: missingForReview(i.id, a) })), evidenceLocations: evidenceLocations(a), attempt, ...(prior ? { priorReadings: prior } : {}) }, null, 2)}`;
+    items: items.map(i => ({ ...i, missingRequiredEvidence: missingForReview(i.id, a) })), evidenceLocations: evidenceLocations(a),
+    turnWrites: turnWriteEvidence(a), attempt, ...(prior ? { priorReadings: prior } : {}) }, null, 2)}`;
 }
 
 function readItems(response: ReviewResponse, request: ReviewRequest, items: ReviewItem[], a: AttemptRecord, roundId: string, prior: Review[]): Review[] {

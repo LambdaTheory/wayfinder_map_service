@@ -11,8 +11,9 @@ import { buildReport, renderMarkdown } from './report.ts';
 import { CliReviewDriver, codexReviewSandbox, decodeResponse, reviewArgs } from './review-cli.ts';
 import { reviewDirectories, reviewPlan } from './review-run.ts';
 import { reviewAttempt, reviewersFor, reviewItems } from './model-review.ts';
+import { turnWriteEvidence } from './review-no-writes.ts';
 import type { ReviewDriver, ReviewRequest, ReviewResponse } from './model-review.ts';
-import { decideReviews, evidenceHash, missingForReview, reportReason, reviewProblem } from './review-verdict.ts';
+import { decideReviews, evidenceHash, evidenceLocations, missingForReview, reportReason, reviewProblem } from './review-verdict.ts';
 import type { Review, ReviewSummary } from './review-verdict.ts';
 import { judgeAttempt } from './verdict.ts';
 
@@ -263,21 +264,135 @@ describe('final replies with independent same-turn evidence', () => {
     a.events = [{ seq: 1, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'message', role: 'assistant', text }];
     if (context !== 'unchanged-map') a.events.unshift({ seq: 0, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'tool-call',
       callId: 'scope-call', server: 'wayfinder', tool: context === 'event' ? 'map_read' : 'map_apply', arguments: { mapId },
-      result: { known: true, value: context === 'event' ? { question: 'Agent policy and Feishu access' } : { code: 'version_mismatch' } },
+      result: { known: true, value: context === 'event' ? { question: 'Agent policy and Feishu access' } : { kind: 'rejected', code: 'version_mismatch' } },
       failed: context === 'receipt', requestId: unknown });
     if (context === 'receipt') a.receipts = [{ callId: 'scope-call', session: 'A', turn: 0, tool: 'map_apply', mapId,
       outcome: { kind: 'not-written', because: 'version-mismatch' } }];
     const reply = `events[${a.events.length - 1}]`;
-    const location = context === 'event' ? 'events[0]' : context === 'receipt' ? 'receipts[0]' : 'maps[0].history';
+    const location = context === 'event' ? 'events[0]' : context === 'receipt' ? 'receipts[0]' : 'turnWrites[0][0]';
     const support = [{ location: reply, quote: text,
       explanation: status === 'holds' ? 'The reply explains the two permission layers and asks before moving scope.' : 'The reply neither answers the question nor asks whether to move scope.' },
-    { location, quote: context === 'event' ? 'Agent policy and Feishu access' : context === 'receipt' ? 'not-written' : 'Permission boundaries',
+    { location, quote: context === 'event' ? 'Agent policy and Feishu access' : context === 'receipt' ? 'not-written'
+      : noWriteClaim(0, [{ mapId, before: 1, after: 1 }]),
       explanation: context === 'event' ? 'The read in this turn identifies the permission issue that the reply must answer.'
-        : 'The recorded unchanged Map corroborates the asks-scope requirement that the reply precede any Map change.' }];
+        : 'The recorded receipts and catalog heads corroborate the asks-scope requirement that the reply precede any Map change in this turn.' }];
     const reviews: Review[] = ['first', 'second'].map(readingId => ({ itemId: 'asks-scope', status, reason: support[0]!.explanation,
       by: 'fixture', role: 'review', roundId: 'fixed', readingId, evidence: [reply, location], support: structuredClone(support) }));
     return { a, reviews, reply };
   }
+
+  const noWriteClaim = (turn: number, heads: { mapId: string; before: number | null; after: number | null }[]) =>
+    `No agent writes in session A turn ${turn}; committed receipts: []; catalog heads (before -> after): ${JSON.stringify(heads)}.`;
+  function noWriteReadings(a: AttemptRecord, itemId: string, status: 'holds' | 'violated', heads: Parameters<typeof noWriteClaim>[1] = [], replyIndex = 0, turnIndex = 0): Review[] {
+    const reply = a.events[replyIndex]!;
+    if (reply.kind !== 'message') throw new Error('fixture requires a reply');
+    const location = `turnWrites[0][${turnIndex}]`;
+    return ['first', 'second'].map(readingId => ({ itemId, status, readingId, roundId: 'fixed', by: 'fixture', role: 'review',
+      reason: `${itemId}: the reply ${status === 'holds' ? 'meets' : 'does not meet'} the requested behaviour, with no Map write in its turn.`,
+      evidence: [`events[${replyIndex}]`, location], support: [
+        { location: `events[${replyIndex}]`, quote: reply.text, explanation: `This is the reply judged by ${itemId}.` },
+        { location, quote: noWriteClaim(a.sessions[0]!.turns[turnIndex]!.index, heads),
+          explanation: `The complete catalog and receipts corroborate that ${itemId} is judged before any write in this turn.` },
+      ] }));
+  }
+  function createMap(a: AttemptRecord, turn: number, mapId = 'Fixture.Created') {
+    const state = { id: mapId, title: 'Agent permissions', destination: 'Agent permission scope', notes: '', currentRevision: 1,
+      fog: [], scopeExclusions: [], tickets: [] };
+    a.maps.push({ mapId, seedHeadRevision: null, history: [{ mapId, revision: 1, priorRevision: null, kind: 'create',
+      author: { actorId: 'fixture', clientId: a.sessions[0]!.clientId, occurredAt: '' },
+      changes: [{ commandIndex: 0, command: 'map.create', subjectId: mapId }], state }] });
+    a.receipts.push({ callId: `create-${turn}`, session: 'A', turn, tool: 'map_create', mapId, outcome: { kind: 'committed', revision: 1 } });
+    a.events.push({ seq: turn * 10, at: '', actor: 'agent', session: 'A', turn, kind: 'tool-call', callId: `create-${turn}`,
+      server: 'wayfinder', tool: 'map_create', arguments: { version: '2.0.2', mapId, title: state.title, destination: state.destination },
+      result: { known: true, value: { kind: 'committed', mapId, revision: 1 } }, failed: false, requestId: unknown });
+    a.events.sort((x, y) => x.seq - y.seq);
+  }
+
+  test.each(['S12', 'S0'])('catalog-wide no-write proof decides %s replies with an empty catalog', id => {
+    const s = library.find(s => s.id === id)!;
+    for (const status of ['holds', 'violated'] as const) {
+      const a = sample(); a.subject = { kind: 'scenario', id, version: s.version };
+      a.events = [{ seq: 1, at: '', actor: 'agent', session: 'A', turn: 0, kind: 'message', role: 'assistant',
+        text: status === 'holds' ? id === 'S12' ? 'I recommend explicitly invoking Wayfinder. Shall we do that?'
+          : 'Should the Destination be a Feishu access design with the Agent system treated as given?' : 'Okay, I will start working.' }];
+      const reviews = noWriteReadings(a, id === 'S12' ? 'recommends' : 'asks-destination', status);
+      if (id === 'S0') reviews.push(...noWriteReadings(a, 'state-outside-mcp', 'holds'));
+      expect(judgeAttempt(s, a, { reviews }).outcome).toBe(status === 'holds' ? 'pass' : 'fail');
+    }
+  });
+  test('catalog-wide no-write proof decides S0b turn 0 when the Map is created only in turn 1', () => {
+    const s = library.find(s => s.id === 'S0b')!; const a = sample();
+    a.subject = { kind: 'scenario', id: s.id, version: s.version };
+    a.sessions[0]!.turns.push({ index: 1, input: 'Confirmed. Create it.', startedAt: '', endedAt: '', durationMs: 0 });
+    a.events = [{ seq: 1, at: '', actor: 'agent', session: 'A', turn: 0, kind: 'message', role: 'assistant', text: 'Should the Destination cover only Feishu access?' }];
+    createMap(a, 1);
+    const reviews = noWriteReadings(a, 'proposal-before-reply', 'holds', [{ mapId: 'Fixture.Created', before: null, after: null }]);
+    expect(judgeAttempt(s, a, { reviews }).required.find(i => i.id === 'proposal-before-reply')?.status).toBe('holds');
+    expect(evidenceLocations(a)).toContain('turnWrites[0][0]');
+    expect(evidenceLocations(a)).not.toContain('turnWrites[0][1]');
+    expect(turnWriteEvidence(a)[0]![0]).toMatchObject({ heads: [{ mapId: 'Fixture.Created', before: null, after: null }], committedReceipts: [] });
+  });
+  test('catalog-wide no-write proof cannot ignore a new Map beside the unchanged seed Map', () => {
+    const { a, reviews } = fixture('unchanged-map', 'holds');
+    createMap(a, 0, 'Agent.Permissions');
+    for (const r of reviews) {
+      r.evidence = ['events[1]', 'maps[0].history']; r.support![0]!.location = 'events[1]';
+      r.support![1] = { location: 'maps[0].history', quote: 'Permission boundaries', explanation: 'The seed Map did not change.' };
+    }
+    expect(reviewProblem(reviews[0]!, a)).not.toBeNull();
+    expect(judgeAttempt(f11, a, { reviews }).outcome).toBe('insufficient-evidence');
+    expect(evidenceLocations(a)).not.toContain('turnWrites[0][0]');
+    const catalogReviews = noWriteReadings(a, 'asks-scope', 'holds', [
+      { mapId: 'Fixture.Scope', before: 1, after: 1 }, { mapId: 'Agent.Permissions', before: null, after: 1 },
+    ], 1);
+    expect(reviewProblem(catalogReviews[0]!, a)).not.toBeNull();
+  });
+  test('a later reply can cite equal heads after an earlier turn created the Map', () => {
+    const a = sample(); a.events = [];
+    a.sessions[0]!.turns.push({ index: 1, input: 'Do not change anything yet.', startedAt: '', endedAt: '', durationMs: 0 });
+    createMap(a, 0);
+    a.events.push({ seq: 11, at: '', actor: 'agent', session: 'A', turn: 1, kind: 'message', role: 'assistant', text: 'I am waiting for your confirmation.' });
+    const reviews = noWriteReadings(a, 'recommends', 'holds', [{ mapId: 'Fixture.Created', before: 1, after: 1 }], 1, 1);
+    expect(reviewProblem(reviews[0]!, a)).toBeNull();
+    expect(turnWriteEvidence(a)[0]![1]?.heads).toEqual([{ mapId: 'Fixture.Created', before: 1, after: 1 }]);
+    expect(evidenceLocations(a)).not.toContain('turnWrites[0][0]');
+  });
+  test.each(['maps', 'receipts', 'maps[0].history', 'receipts[0].turn', 'sessions[0].turns[0]'])(
+    'missing %s withholds no-write evidence for both review conclusions', marker => {
+      for (const status of ['holds', 'violated'] as const) {
+        const { a, reviews } = fixture('unchanged-map', status); a.missing = [marker];
+        expect(evidenceLocations(a)).not.toContain('turnWrites[0][0]');
+        expect(reviewProblem(reviews[0]!, a)).not.toBeNull();
+      }
+    });
+  test.each(['unknown-receipt', 'unplaced-revision', 'orphan-commit', 'history-gap', 'unplaced-controller-change', 'receipt-disagrees-with-result'] as const)(
+    '%s cannot be converted into a no-write proof', shape => {
+      const a = sample(); a.events = [{ seq: 1, at: '', actor: 'agent', session: 'A', turn: 0, kind: 'message', role: 'assistant', text: 'Please confirm the scope.' }];
+      a.sessions[0]!.turns.push({ index: 1, input: 'Create it.', startedAt: '', endedAt: '', durationMs: 0 });
+      createMap(a, 1);
+      if (shape === 'unknown-receipt') a.receipts[0]!.outcome = { kind: 'unknown', reason: 'lost result' };
+      if (shape === 'unplaced-revision') a.receipts = [];
+      if (shape === 'orphan-commit') a.maps = [];
+      if (shape === 'history-gap') { a.maps[0]!.history[0]!.revision = 2; a.maps[0]!.history[0]!.state.currentRevision = 2; }
+      if (shape === 'unplaced-controller-change') a.maps[0]!.history[0]!.author.clientId = a.controller.clientId;
+      if (shape === 'receipt-disagrees-with-result') { a.maps = []; a.receipts[0]!.outcome = { kind: 'not-written', because: 'input-error' }; }
+      expect(evidenceLocations(a)).not.toContain('turnWrites[0][0]');
+    });
+  test('a no-write quote must include the entire checked statement, not decorative JSON', () => {
+    const { a, reviews } = fixture('unchanged-map', 'holds');
+    reviews[0]!.support![1]!.quote = '{';
+    expect(reviewProblem(reviews[0]!, a)).not.toBeNull();
+  });
+  test('separate sessions need unambiguous boundaries; timestamps never substitute for missing receipts', () => {
+    const a = sample(); a.sessions.push({ ...structuredClone(a.sessions[0]!), label: 'B', clientId: 'B',
+      turns: [{ index: 1, input: 'Wait for confirmation.', startedAt: '', endedAt: '', durationMs: 0 }] });
+    expect(turnWriteEvidence(a)).toEqual([[null], [null]]);
+    Object.assign(a.sessions[0]!.turns[0]!, { startedAt: '2026-01-01T00:00:00Z', endedAt: '2026-01-01T00:00:01Z' });
+    Object.assign(a.sessions[1]!.turns[0]!, { startedAt: '2026-01-01T00:00:02Z', endedAt: '2026-01-01T00:00:03Z' });
+    expect(turnWriteEvidence(a)[1]![0]).toMatchObject({ session: 'B', turn: 1, heads: [], committedReceipts: [] });
+    a.sessions[1]!.turns[0]!.startedAt = '2026-01-01T00:00:00Z';
+    expect(turnWriteEvidence(a)).toEqual([[null], [null]]);
+  });
 
   test.each(['event', 'receipt', 'unchanged-map'] as const)('F11 final reply plus %s supports both agreement outcomes', context => {
     for (const status of ['holds', 'violated'] as const) {
@@ -322,10 +437,14 @@ describe('final replies with independent same-turn evidence', () => {
     const { a, reviews } = fixture('unchanged-map', 'holds'); a.missing = ['given[0].instructions'];
     expect(judgeAttempt(f11, a, { reviews }).outcome).toBe('insufficient-evidence');
   });
-  test('the fake-driver review decides a reply without tools using its unchanged Map, with four calls', async () => {
+  test('the fake-driver review decides a reply without tools using the catalog no-write record, with four calls', async () => {
     const { a, reviews } = fixture('unchanged-map', 'holds');
     const fake = new Fake((req, out) => {
       if (req.kind === 'availability') return out;
+      const packet = JSON.parse(req.input.slice(req.input.indexOf('\n{') + 1));
+      expect(packet.turnWrites[0][0].statement).toBe(reviews[0]!.support![1]!.quote);
+      expect(packet.evidenceLocations).toContain('turnWrites[0][0]');
+      expect(packet.evidenceLocations).not.toContain('maps[0].history');
       const body = JSON.parse(out.text);
       body.items = body.items.map((item: Review) => ({ ...reviews[0], itemId: item.itemId }));
       return { ...out, text: JSON.stringify(body) };

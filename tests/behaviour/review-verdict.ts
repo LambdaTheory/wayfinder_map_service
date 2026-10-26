@@ -1,6 +1,7 @@
 // Evidence validation and one cross-round decision rule shared by the review runner and the report.
 import { createHash } from 'node:crypto';
 import { agentRevisions } from './checks.ts';
+import { turnWriteEvidence } from './review-no-writes.ts';
 import type { AttemptRecord, EventRecord } from './evidence.ts';
 import type { Review } from './review-types.ts';
 export type { Review, ReviewSummary } from './review-types.ts';
@@ -13,7 +14,8 @@ export function evidenceHash(record: AttemptRecord): string {
 export function evidenceLocations(a: AttemptRecord): string[] {
   return [...a.events.flatMap((e, i) => e.actor !== 'controller' ? [`events[${i}]`] : []),
     ...a.sessions.flatMap((s, i) => s.turns.map((_, j) => `sessions[${i}].turns[${j}]`)),
-    ...a.maps.flatMap((m, i) => [`maps[${i}].history`, ...m.history.map((_, j) => `maps[${i}].history[${j}]`)]),
+    ...a.maps.flatMap((m, i) => m.history.map((_, j) => `maps[${i}].history[${j}]`)),
+    ...turnWriteEvidence(a).flatMap((turns, i) => turns.flatMap((proof, j) => proof ? [`turnWrites[${i}][${j}]`] : [])),
     ...a.receipts.flatMap((r, i) => r.outcome.kind === 'unknown' ? [] : [`receipts[${i}]`])];
 }
 
@@ -51,13 +53,14 @@ function finalMessage(a: AttemptRecord, e: EventRecord): boolean {
 interface ReviewSource {
   value: unknown;
   kind: 'reply' | 'context' | 'independent';
-  scope: { session: string | null; turn: number | null } | 'attempt';
+  scope: { session: string | null; turn: number | null };
   text?: string;
+  exactQuote?: boolean;
 }
 
 /** Final replies and questions are citable content, but neither supplies its own corroboration.
- * Receipts/revisions need a recorded call. Complete history still at the seed head proves no Map change,
- * including in a reply-only turn; an empty or partial history never proves that absence.
+ * Receipts/revisions need a recorded call. No-write evidence covers the whole catalog at this turn,
+ * including an empty catalog; an empty or partial Map history never proves absence of writes.
  */
 function reviewSource(location: string, a: AttemptRecord): ReviewSource | null {
   const event = /^events\[(\d+)\]$/.exec(location);
@@ -79,16 +82,11 @@ function reviewSource(location: string, a: AttemptRecord): ReviewSource | null {
       && e.callId === r.callId && e.session === r.session && e.turn === r.turn && e.result.known)
       ? { value: r, kind: 'independent', scope: { session: r.session, turn: r.turn } } : null;
   }
-  const history = /^maps\[(\d+)\]\.history$/.exec(location);
-  if (history) {
-    const i = Number(history[1]); const m = a.maps[i];
-    if (!m || m.seedHeadRevision === null || !m.history.length || a.missing.some(p => p === 'maps'
-      || p.startsWith(`maps[${i}]`) || p.startsWith(`maps.${m.mapId}`))) return null;
-    const head = m.history.at(-1)!;
-    const unchanged = head.revision === m.seedHeadRevision && head.state.currentRevision === m.seedHeadRevision
-      && m.history.every(r => r.mapId === m.mapId && r.revision <= m.seedHeadRevision!)
-      && !a.receipts.some(r => r.mapId === m.mapId && r.outcome.kind === 'committed');
-    return unchanged ? { value: m.history, kind: 'independent', scope: 'attempt' } : null;
+  const writes = /^turnWrites\[(\d+)\]\[(\d+)\]$/.exec(location);
+  if (writes) {
+    const proof = turnWriteEvidence(a)[Number(writes[1])]?.[Number(writes[2])];
+    return proof ? { value: proof, kind: 'independent', scope: { session: proof.session, turn: proof.turn },
+      text: proof.statement, exactQuote: true } : null;
   }
   const revision = /^maps\[(\d+)\]\.history\[(\d+)\]$/.exec(location);
   if (revision) {
@@ -112,18 +110,17 @@ export function reviewProblem(r: Review, a: AttemptRecord): string | null {
   const supported = (r.support ?? []).map(s => {
     if (!r.evidence!.includes(s.location) || !s.quote?.trim() || !s.explanation?.trim()) return null;
     const source = reviewSource(s.location, a);
-    return source && (source.text ?? JSON.stringify(source.value)).includes(s.quote) ? source : null;
+    return source && (source.exactQuote ? source.text === s.quote : (source.text ?? JSON.stringify(source.value)).includes(s.quote)) ? source : null;
   });
   const independent = supported.filter((s): s is ReviewSource => s?.kind === 'independent');
   const replies = r.evidence.map(p => reviewSource(p, a)).filter((s): s is ReviewSource => s?.kind === 'reply');
   const sameTurn = (source: ReviewSource, reply: ReviewSource) => {
-    if (reply.scope === 'attempt') return false;
     const { session, turn } = reply.scope;
     return session !== null && turn !== null && a.sessions.some(s => s.label === session && s.turns.some(t => t.index === turn))
-      && (source.scope === 'attempt' || source.scope.session === session && source.scope.turn === turn);
+      && source.scope.session === session && source.scope.turn === turn;
   };
   if (supported.some(s => !s) || !independent.length || replies.some(reply => !independent.some(source => sameTurn(source, reply))))
-    return 'review needs quoted, item-relevant independent evidence for the same turn beyond the final reply (a concrete event, matched receipt/revision or unchanged Map history)';
+    return 'review needs quoted, item-relevant independent evidence for the same turn beyond the final reply (a concrete event, matched receipt/revision or complete catalog no-write proof)';
   const missing = r.status === 'holds' ? missingForReview(r.itemId, a) : [];
   return missing.length ? `missing required evidence: ${missing.join(', ')}` : null;
 }
