@@ -128,11 +128,21 @@ export function executeTurn({ options: o, session: s, workdir, prompt, profile, 
     let cleanupFailure: string | undefined;
     const cleanup = () => tree?.terminate().catch(() => { cleanupFailure = 'isolation failure: owned client processes could not be cleared'; });
     let drain: ReturnType<typeof setTimeout> | undefined;
+    let drainCheck: ReturnType<typeof setImmediate> | undefined;
     child.once('exit', () => {
       onClientExit?.(); clearTimeout(timer);
       drain = setTimeout(() => {
-        cleanupFailure = 'isolation failure: client output pipes remained open after exit';
-        child.stdout.destroy(); child.stderr.destroy();
+        // Synchronous process scans can make this deadline overdue while EOF is already queued.
+        // Give pending pipe I/O a poll phase, then inspect the pipes rather than callback timing.
+        drainCheck = setImmediate(() => {
+          // The first check phase may still belong to the iteration delivering the deadline.
+          drainCheck = setImmediate(() => {
+            const open = [child.stdout, child.stderr].filter(pipe => !pipe.readableEnded && !pipe.closed);
+            if (!open.length) return;
+            cleanupFailure = 'isolation failure: client output pipes remained open after exit';
+            for (const pipe of open) pipe.destroy();
+          });
+        });
       }, 250);
       signal('SIGKILL'); void cleanup();
     });
@@ -157,7 +167,7 @@ export function executeTurn({ options: o, session: s, workdir, prompt, profile, 
     child.stderr.on('data', d => { stderr += d; });
     child.once('error', error => { stderr += String(error); });
     child.once('close', async (code, childSignal) => {
-      clearTimeout(drain); onClientExit?.();
+      clearTimeout(drain); clearImmediate(drainCheck); onClientExit?.();
       signal('SIGKILL');
       await cleanup(); // Observed descendants in other groups; the shared cwd sweep runs at Attempt end.
       clearTimeout(timer); clearTimeout(force); unregister?.(); process.off('exit', onExit);

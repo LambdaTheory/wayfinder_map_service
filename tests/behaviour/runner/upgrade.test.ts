@@ -19,6 +19,7 @@ import { syntheticClientState } from './test-state.ts';
 import { classifyResult } from '../evidence.ts';
 import { zeroWriteRefusals, exactUpgradeHistory, upgradeLifecycle } from '../upgrade-evidence.ts';
 import * as services from './service.ts';
+import * as codex from './codex.ts';
 import { upgradeRules } from './upgrade.ts';
 import * as canaryBuild from '../../helpers/canary-release.mjs';
 
@@ -33,15 +34,32 @@ afterAll(() => { rmSync(scratch, { recursive: true, force: true }); rmSync(recor
 const subject = (id = 'U-codex-process') => asScenario(upgradeChecks.find(u => u.id === id)!);
 const options = (id: string, model = 'fake-upgrade'): BatchOptions => ({ batchId: id, scenarios: [], upgradeChecks: ['U-codex-process'], count: 1, ceiling: 1,
   out: join(records, id), scratchRoot: scratch, ...state, codex: { bin: driver, model, effort: 'low', timeoutMs: 20_000, sandbox: true } });
-const run = async (id: string, mode = 'U-codex-process', model = 'fake-upgrade', timeoutMs = 20_000) => {
-  return runScenario(id, subject(mode), model, timeoutMs);
-};
-const runScenario = async (id: string, scenario: Scenario, model = 'fake-upgrade', timeoutMs = 20_000) => {
+const run = async (id: string, mode = 'U-codex-process', model = 'fake-upgrade') => runScenario(id, subject(mode), model);
+const runScenario = async (id: string, scenario: Scenario, model = 'fake-upgrade') => {
   const o = options(id, model);
-  o.codex.timeoutMs = timeoutMs;
-  const outcome = await runAttempt(o, { attemptId: 'attempt', scenario }, () => false, () => undefined);
-  const record = JSON.parse(readFileSync(join(o.out, 'attempt/attempt.json'), 'utf8')) as AttemptRecord & { isolation: AttemptIsolation };
-  return { record, outcome, o };
+  const nativeSetTimeout = globalThis.setTimeout;
+  const nativeRun = codex.runTurn;
+  let ready = false;
+  let expire: (() => void) | undefined;
+  // This distinct deadline identifies only the native-turn timer, not startup/cleanup watchdogs.
+  const deadlineMs = 20_123;
+  const controlled = model.endsWith('-timeout');
+  if (controlled) o.codex.timeoutMs = deadlineMs;
+  const timer = controlled ? vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, ms, ...args) => {
+    const handle = nativeSetTimeout(callback, ms, ...args);
+    if (ms === deadlineMs) expire = () => { clearTimeout(handle); callback(...args); };
+    return handle;
+  }) : undefined;
+  const driver = controlled ? vi.spyOn(codex, 'runTurn').mockImplementation(request => nativeRun({ ...request, onLine: line => {
+    request.onLine?.(line);
+    if (line.type === 'fixture.timeout-ready') { ready = true; expire?.(); }
+  } })) : undefined;
+  try {
+    const outcome = await runAttempt(o, { attemptId: 'attempt', scenario }, () => false, () => undefined);
+    if (controlled) { expect(ready).toBe(true); expect(expire).toBeDefined(); }
+    const record = JSON.parse(readFileSync(join(o.out, 'attempt/attempt.json'), 'utf8')) as AttemptRecord & { isolation: AttemptIsolation };
+    return { record, outcome, o };
+  } finally { driver?.mockRestore(); timer?.mockRestore(); }
 };
 const scripts = (a: AttemptRecord) => Object.fromEntries(itemsOf(subject(a.subject.id)).flatMap(i => i.judge === 'script' ? [[i.id, i.check(a).status]] : []));
 // Fixed verdict-engine fixture for the unrelated qualitative item, never a real review or acceptance record.
@@ -166,7 +184,7 @@ describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrad
     }
   }, 60_000);
   test('a witnessed stale retry remains forbidden when unrelated trace gaps follow', async () => {
-    const { record: a, outcome } = await run('stale-recovered', 'U-codex-process', 'fake-upgrade-stale-recovered-timeout', 3000);
+    const { record: a, outcome } = await run('stale-recovered', 'U-codex-process', 'fake-upgrade-stale-recovered-timeout');
     expect(outcome.completeness).toBe('timeout');
     expect(scripts(a)).toMatchObject({ 'upgrade-lifecycle': 'holds', 'reads-new-rules': 'holds', 'invalid-recovery': 'violated', 'writes-new-version': 'violated' });
     const passed = reviewedVerdict((await run('stale-recovered-pass')).record);
@@ -192,7 +210,7 @@ describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrad
     }
   }, 60_000);
   test('a pre-exposure reply is not retroactively judged by the canary after timeout', async () => {
-    const { record: a, outcome } = await run('pre-exposure', 'U-codex-process', 'fake-upgrade-pre-exposure-timeout', 3000);
+    const { record: a, outcome } = await run('pre-exposure', 'U-codex-process', 'fake-upgrade-pre-exposure-timeout');
     expect(outcome.completeness).toBe('timeout');
     expect(scripts(a)['canary-reply-violation']).toBe('holds');
     expect(scripts(a)['canary-reply']).toBe('unknown');
@@ -207,7 +225,7 @@ describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrad
   const capture = async (id: string, model: string) => {
     const key = `${id}-${model}`;
     const scenario = id.startsWith('U-') ? subject(id) : library.find(s => s.id === id)!;
-    if (!captured.has(key)) captured.set(key, runScenario(`order-${key}`, scenario, model, 3000));
+    if (!captured.has(key)) captured.set(key, runScenario(`order-${key}`, scenario, model));
     return { scenario, ...structuredClone(await captured.get(key)!) };
   };
   const decision = (itemId: string, status: 'holds' | 'violated'): Review =>
@@ -276,7 +294,7 @@ describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrad
   }, 60_000);
   test.each(['U-codex-process', 'U-codex-resume'].flatMap(mode => ['two-tickets', 'wrong-ticket'].map(fault => [mode, fault])))
   ('an observed %s / %s violation inside one commit survives timeout and reruns', async (mode, fault) => {
-    const { record: a, outcome } = await run(`${mode}-${fault}`, mode, `fake-upgrade-${fault}-timeout`, 3000);
+    const { record: a, outcome } = await run(`${mode}-${fault}`, mode, `fake-upgrade-${fault}-timeout`);
     expect(outcome.completeness).toBe('timeout');
     expect(a.maps[0]!.history).toHaveLength(2);
     expect(a.maps[0]!.history[1]!.state.tickets.map(t => t.id)).toEqual(fault === 'two-tickets' ? ['Probe.One', 'Probe.Two'] : ['Probe.Uno']);
@@ -289,7 +307,7 @@ describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrad
     expect(judgeCell(subject(mode), [failed, passed, passed], 2).outcome).toBe('flaky');
   }, 60_000);
   test.each(['U-codex-process', 'U-codex-resume'])('combined Conflict replay and wrong committed state survive unknown receipts and timeout in %s', async mode => {
-    const { record: a, outcome } = await run(`combined-${mode}`, mode, 'fake-upgrade-conflict-two-tickets-timeout', 3000);
+    const { record: a, outcome } = await run(`combined-${mode}`, mode, 'fake-upgrade-conflict-two-tickets-timeout');
     expect(outcome.completeness).toBe('timeout');
     expect(a.maps[0]!.history).toHaveLength(2);
     expect(a.maps[0]!.history[1]!.state.tickets).toHaveLength(2);
@@ -300,7 +318,7 @@ describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrad
     expect(reviewedVerdict(a).outcome).toBe('fail');
   }, 60_000);
   test.each(['U-codex-process', 'U-codex-resume'])('confirmed Conflict replay survives a later missing native result and timeout in %s', async mode => {
-    const { record: a, outcome } = await run(`conflict-unknown-${mode}`, mode, 'fake-upgrade-conflict-unknown-timeout', 3000);
+    const { record: a, outcome } = await run(`conflict-unknown-${mode}`, mode, 'fake-upgrade-conflict-unknown-timeout');
     expect(outcome.completeness).toBe('timeout');
     expect(a.maps[0]!.history).toHaveLength(2);
     const writes = a.events.filter(e => e.kind === 'tool-call' && e.tool === 'map_apply');
@@ -370,7 +388,7 @@ describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrad
     expect(reviewedVerdict(a).outcome).toBe('fail');
   }, 60_000);
   test('timeout preserves observed extra commits as a failure', async () => {
-    const { record: a, outcome } = await run('extra-timeout', 'U-codex-process', 'fake-upgrade-extra-timeout', 3000);
+    const { record: a, outcome } = await run('extra-timeout', 'U-codex-process', 'fake-upgrade-extra-timeout');
     expect(outcome.completeness).toBe('timeout');
     expect(a.maps[0]!.history).toHaveLength(3);
     expect(reviewedVerdict(a).outcome).toBe('fail');

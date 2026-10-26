@@ -325,8 +325,31 @@ The updated comparison manifest retains all previous **101 entries / 118 changed
 
 The process failed-read cases and both pre-restart guesses are `fail` on main too, so they need no exceptions. All earlier proof-preservation and genuine missing-result comparisons retain their counts. The comparison corpus includes the newly merged main tests and these four new regressions. These are fixed-input judgements, not real Attempts.
 
-The [updated saved comparison](behaviour-upgrade-main-comparison.json) judges code commit `ceee62c` against main `f8b3900`: **1222 outcomes, 1100 unchanged, 122 changed outcomes in 105 exact entries**, with **zero unlisted changes, stale entries or count mismatches**. All 32 stock definitions and existing interactive fixed evidence are covered; **29 files / 947 tests** passed in 200.63 seconds. All prior 101 entries / 118 outcomes retain their exact reasons and counts. Only this report and verification text were added after the compared code commit.
+The [eighth-round comparison](https://github.com/kun-g/wayfinder_map_service/blob/43fc3f5/docs/implementation/behaviour-upgrade-main-comparison.json) judges code commit `ceee62c` against main `f8b3900`: **1222 outcomes, 1100 unchanged, 122 changed outcomes in 105 exact entries**, with **zero unlisted changes, stale entries or count mismatches**. All 32 stock definitions and existing interactive fixed evidence are covered; **29 files / 947 tests** passed in 200.63 seconds. All prior 101 entries / 118 outcomes retain their exact reasons and counts. Only this report and verification text were added after the compared code commit.
 
 Eighth-round verification on Node 26.3.0 after `npm ci`: `npm run build`, full `npm test` (**45 files / 2167 tests**, 200.48 seconds), `npm run typecheck` and `git diff --check` pass. This includes the four new regressions, all prior proof-preservation fixtures and the newly merged proxy/privacy/cleanup tests; the four earlier CLI refusal-format failures are resolved with their original assertions intact.
 
 Standards: no new package dependency, product code or sandbox permission; service ownership and cleanup remain explicit; raw evidence is redacted and kept outside the repository. Spec: R2 lifecycle and isolation, R3 actual client exposure and independent persistence evidence, R4 no false green or W5 conflation, separate upgrade accounting. Only tests and documentation change, so the Release Version stays 2.1.0 under mcp-sqlite §14.3; this changes no shipped mandatory rule or client tool contract and requires no pre-merge ChatGPT run. The outstanding gate is Kun's approval for real Codex quota, followed by the approved verdict reviews.
+
+
+### Pre-merge test stabilization
+
+Main `318e97d` (including #122's interactive proxy forwarding) was merged in `e48b89a` before this work. A full-suite reproduction failed the reported S6 missing-trigger case: **2190 passed / 1 failed, 47 files, 210.46 seconds**. Both native clients had exited normally with code 0; the recorded reason was `isolation failure: client output pipes remained open after exit`, not a turn timeout or a missing Controller trigger. A temporary 20-case concurrent reproduction then hit the same failure in 18 cases. The original assertion remains `precondition-not-met`, with safe process/failure details added to its assertion message.
+
+The exit path arms a 250 ms pipe watchdog and performs synchronous owned-process scans. Under load, those scans can leave the watchdog overdue while normal EOF/close callbacks are queued. The old watchdog unconditionally reported a leak before those callbacks ran. `turn.test.ts` now reproduces that ordering using a real child with no descendants and controlled timer delivery, for short and 256 KiB output. Before the fix it produced **1 failed / 1 passed** despite a normal exit and complete output; after the fix both pass. The watchdog now crosses a full I/O poll phase before checking each pipe's `readableEnded` / `closed` state, and destroys only pipes still open. Its 250 ms deadline, immediate client-exit forwarding revocation, owned-process cleanup and failure for genuinely inherited open pipes remain. This changes the shared native-capture path, not S6's prerequisite classification or the verdict engine.
+
+The same audit found upgrade fixtures that required their restart/read/write sequence to finish before a fixed three-second turn deadline. They now emit a fake-only synchronization marker after the intended evidence and remain alive until the parent expires the actual native-turn timer. The tests assert that the marker and timer were reached, then retain their existing timeout, failure and flaky assertions. No timer threshold serves as evidence of scenario progress, and the marker is not normalized into behavioural proof. Startup and cleanup watchdogs retain real clocks; a bounded native fallback still prevents a hung fixture. No new real-model execution path or sandbox permission was added.
+
+After the fix the temporary concurrent S6 reproduction passed **20/20** and was removed. The focused native-drain, upgrade timeout/proof-preservation and inherited-pipe/proxy controls passed **39 tests**, followed by typecheck. The new two-case pipe regression remains in the ordinary fake-only suite. The verdict baseline advances to the merged main; its checks and definitions are unchanged, so no comparison exception is added for this stabilization.
+
+Node 26.3.0 validation after the fix, without intervening code/test edits or rerun filtering:
+
+| Full `npm test` run | Start (Asia/Singapore, 2026-10-27) | Files | Tests | Duration |
+| --- | --- | --- | --- | --- |
+| 1 | 05:42:58 | 48 passed | 2193 passed | 203.00 s |
+| 2 | 05:46:21 | 48 passed | 2193 passed | 203.03 s |
+| 3 | 05:49:45 | 48 passed | 2193 passed | 204.37 s |
+
+`npm run build`, `npm run typecheck` and `git diff --check` also pass. These are complete ordinary suites, including original S6, both new pipe cases, all upgrade invariants and #122's interactive forwarding tests. Only fake clients and owned services were used; no real model, daily service or real database was accessed.
+
+Standards: two-phase I/O scheduling is local to native capture; timer cancellation and cleanup stay explicit, with no new dependency or permissions. Spec: R2 still rejects actual containment failures and cleans owned resources; R3 retains complete native output; R4's prerequisite/must-not/expectation rules are unchanged. Real-model Batch acceptance remains behind Kun's quota gate.

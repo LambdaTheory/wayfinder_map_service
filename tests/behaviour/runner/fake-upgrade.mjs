@@ -51,6 +51,11 @@ if (definitions && model !== 'fake-upgrade-no-native-tools') record({ type: 'res
 emit({ type: 'thread.started', thread_id: thread }); emit({ type: 'turn.started' });
 const say = text => emit({ type: 'item.completed', item: { id: `item_${item++}`, type: 'agent_message', text } });
 const done = () => emit({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } });
+// Tests expire the parent deadline only after the intended evidence has actually been emitted.
+const pauseForTimeout = () => {
+  emit({ type: 'fixture.timeout-ready' });
+  return new Promise(() => { setInterval(() => {}, 60_000); }); // Stay alive until the owned parent terminates us.
+};
 async function call(name, arguments_, resource = false, nativeComplete = true) {
   const base = { id: `item_${item++}`, type: 'mcp_tool_call', server: 'wayfinder', tool: name, arguments: arguments_ };
   emit({ type: 'item.started', item: base });
@@ -71,7 +76,7 @@ async function call(name, arguments_, resource = false, nativeComplete = true) {
 }
 if (model.startsWith('fake-upgrade-no-trigger')) {
   say('Stopped without creating the Map.');
-  if (model.endsWith('-timeout')) await new Promise(resolve => setTimeout(resolve, 30_000));
+  if (model.endsWith('-timeout')) await pauseForTimeout();
   done(); process.exit(0);
 }
 if (!resume) {
@@ -115,18 +120,18 @@ if (conflictReplay && result.kind === 'conflict') {
 if (model === 'fake-upgrade-bad-reply') say('Recovered under the new rules.');
 if (model !== 'fake-upgrade-pre-exposure-timeout') say(`${learned.includes('LANTERN') ? 'LANTERN ' : ''}Added the probe Ticket (${result.kind}).`);
 if (model === 'fake-upgrade-pre-exposure-timeout' || model === 'fake-upgrade-stale-recovered-timeout')
-  await new Promise(resolve => setTimeout(resolve, 30_000));
+  await pauseForTimeout();
 if (model === 'fake-upgrade-conflict-unknown-timeout' || model === 'fake-upgrade-conflict-two-tickets-timeout') {
   // The server rejects this duplicate Ticket, but its native completion is deliberately lost.
   await call('map_apply', { version, mapId: 'Upgrade.Probe', expectedRevision: result.revision,
     commands: [{ kind: 'ticket.create', ticket: { id: 'Probe.One', title: 'v2: Duplicate', question: 'Again?', type: 'research' } }] }, false, false);
-  await new Promise(resolve => setTimeout(resolve, 30_000));
+  await pauseForTimeout();
 }
 if (model === 'fake-upgrade-two-tickets-timeout' || model === 'fake-upgrade-wrong-ticket-timeout')
-  await new Promise(resolve => setTimeout(resolve, 30_000));
+  await pauseForTimeout();
 if (model === 'fake-upgrade-extra-timeout') {
   await call('map_apply', { version, mapId: 'Upgrade.Probe', expectedRevision: result.revision,
     commands: [{ kind: 'ticket.create', ticket: { id: 'Probe.Two', title: 'v2: Extra', question: 'An extra write?', type: 'research' } }] });
-  await new Promise(resolve => setTimeout(resolve, 30_000));
+  await pauseForTimeout();
 }
 done();
