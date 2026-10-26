@@ -112,8 +112,7 @@ export async function runBatch(options: Options, input: AsyncIterable<string>, l
       await tunnel.start(attempt.relay.port);
       if (cancelled) return;
       const current = tunnel;
-      let checking: Promise<void> | undefined;
-      const check = () => checking ??= current.check().finally(() => { checking = undefined; });
+      const check = () => current.check(); // The lease shares concurrent inspections, including direct begin calls.
       attempt.relay.beforeForward = check;
       attempt.relay.onFailure = error => fail(error, 'relay-or-ownership-failure');
       timer = setInterval(() => {
