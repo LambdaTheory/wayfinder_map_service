@@ -10,6 +10,8 @@ GitHub implementation and planning Issues use the canonical triage vocabulary. A
 | ready-for-human | ready-for-human | Requires human execution |
 | wontfix | wontfix | Deliberately declined |
 
+Orchestration adds two state labels beside the triage role: `needs-user` while an Issue waits for Kun's decision or approval, and `gate` on an Issue that is itself an acceptance node. See [orchestration.md](orchestration.md).
+
 GitHub uses `bug` or `enhancement` labels independently of open/closed state and native blocking edges. Archived local records may use `Category: bug` or `Category: enhancement` independently from historical execution `Status`. Each triaged ticket has one category and one triage role.
 
 Tickets produced from an approved specification are already specified: apply `ready-for-agent` directly, without an additional triage interview. A blocker still prevents starting work even with that label.
