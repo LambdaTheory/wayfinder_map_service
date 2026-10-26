@@ -474,13 +474,17 @@ test.each([
 test('capture modules can be imported without a build; only conversion loads the built domain', () => {
   const root = directory();
   const behaviour = join(root, 'tests/behaviour');
-  mkdirSync(join(behaviour, 'seeds'), { recursive: true });
-  cpSync(fileURLToPath(new URL('./', import.meta.url)), join(behaviour, 'capture'), { recursive: true });
-  for (const file of ['scenario.ts', 'evidence.ts', 'seeds/steps.ts']) {
-    cpSync(fileURLToPath(new URL('../' + file, import.meta.url)), join(behaviour, file));
-  }
+  // Keep the whole test source tree, including transitive imports and shared helpers, without a file allowlist.
+  cpSync(fileURLToPath(new URL('../../', import.meta.url)), join(root, 'tests'), { recursive: true });
   expect(existsSync(join(root, 'dist'))).toBe(false);
-  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', 'await import(process.argv[1])', join(behaviour, 'capture/capture.ts')], { encoding: 'utf8' });
+  const probe = String.raw`
+    import assert from 'node:assert/strict';
+    const { captureProblem } = await import(process.argv[1]);
+    assert.throws(() => captureProblem(process.argv[2], JSON.parse(process.argv[3])),
+      error => error.code === 'MODULE_NOT_FOUND' && /[/\\]dist[/\\]/.test(error.message));
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', probe,
+    join(behaviour, 'capture/capture.ts'), database(), JSON.stringify(input())], { encoding: 'utf8' });
   expect(result.stderr).toBe('');
   expect(result.status).toBe(0);
 });
