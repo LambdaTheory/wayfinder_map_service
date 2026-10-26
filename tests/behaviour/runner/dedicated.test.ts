@@ -6,7 +6,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, expect, test } from 'vitest';
+import { afterAll, expect, test, vi } from 'vitest';
 import { clientProfiles, supportsFor } from '../clients.ts';
 import type { AttemptRecord } from '../evidence.ts';
 import { library } from '../library.ts';
@@ -14,6 +14,7 @@ import { prepareClient, prepareSandbox, prepareSession } from './codex.ts';
 import { dedicatedContext, dedicatedLauncher, dedicatedServiceDirectory, prepareDedicated, runDedicatedTurn } from './dedicated.ts';
 import { isolationSnapshot, preflight, runAttempt, runBatch } from './run.ts';
 import { newToken, startService } from './service.ts';
+import * as services from './service.ts';
 
 const scratch = realpathSync(mkdtempSync('/private/tmp/wf-dedicated-test-'));
 const caches = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests');
@@ -29,11 +30,28 @@ const clientState = syntheticClientState(scratch);
 const options = { model: 'fake-model', effort: 'low', bin: fake, sandbox, timeoutMs: 60_000 };
 afterAll(() => { rmSync(scratch, { recursive: true, force: true }); rmSync(records, { recursive: true, force: true }); });
 
-test('Dedicated planning is explicit, and synthetic evidence does not onboard the Entry', () => {
+test('Dedicated planning uses the approved B02d-onboarding-20261026 evidence (#68)', () => {
   expect(preflight({ entry: 'dedicated', batchId: 'D', scenarios: ['S0b', 'F11'], count: 2, ceiling: 4 }).refusals).toEqual([]);
-  expect(clientProfiles.codex.onboarded).not.toContain('dedicated');
-  expect(supportsFor('codex', 'dedicated')['multi-turn']).toBe('unverified');
+  expect(clientProfiles.codex.onboarded).toContain('dedicated');
+  expect(supportsFor('codex', 'dedicated')['multi-turn']).toBe(true);
   expect(supportsFor('codex', 'mcp-only')['multi-turn']).toBe(true);
+  expect(supportsFor('codex', 'matt')['multi-turn']).toBe('unverified');
+});
+
+test.each(['mcp-only', 'dedicated'] as const)('%s preserves a service start failure through catalog export', async entry => {
+  const start = vi.spyOn(services, 'startService').mockRejectedValueOnce(new Error('synthetic service startup failure'));
+  const out = join(records, `service-failure-${entry}`);
+  try {
+    const outcome = await runAttempt({ entry, batchId: 'ServiceFailure', scenarios: [], count: 1, ceiling: 1, out,
+      codex: { ...options, sandbox: true }, scratchRoot: scratch, ...clientState },
+    { attemptId: 'S0b-1', scenario: library.find(s => s.id === 'S0b')! }, () => false, () => undefined);
+    expect(start).toHaveBeenCalledOnce();
+    expect(outcome.completeness, outcome.detail).toBe('service-failed');
+    const record = JSON.parse(readFileSync(join(out, 'S0b-1/attempt.json'), 'utf8')) as AttemptRecord;
+    expect(record.run.completeness).toBe('service-failed');
+    expect(record.missing).toContain('maps');
+    expect(record.sessions.every(s => s.turns.length === 0)).toBe(true);
+  } finally { start.mockRestore(); }
 });
 
 test.skipIf(!sandbox)('real launcher runs and resumes inside the allowlist, records its context and never reaches everyday state', async () => {

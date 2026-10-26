@@ -131,11 +131,11 @@ Model-free tests attempt cross-Attempt and private-tree read grants, implicit pr
 
 For ChatGPT, use the separate [isolated Batch command and operating checklist](chatgpt/README.md). `plan` prints approval impacts and messages without starting anything; `run` requires the approval reference and owns a fresh database, service, relay and exclusive tunnel. The initial five and upgrade checks still need a real approved run; App, web and mobile remain separate. `chatgpt/chatgpt.test.ts` runs the fake-tunnel, no-model regression checks in `npm test`; the real Batch command remains manual.
 
-Native exit regressions use real child pipes and controlled deadline delivery. Upgrade timeout fixtures emit `fixture.timeout-ready` after the required evidence, then the test expires the actual native-turn timer; they do not assume restart, reads and writes finish within a three-second window. The marker is fake-driver synchronization only and contributes no behavioural proof. Genuine inherited-pipe, process cleanup and proxy-revocation tests retain their assertions.
+Native exit regressions use real child pipes: they hold both drained pipes’ close notifications, deliver the overdue watchdog, then release those notifications. This forces the old callback-order failure for both short and 256 KiB output without depending on OS scheduling. Upgrade timeout fixtures emit `fixture.timeout-ready` after the required evidence, then the test expires the actual native-turn timer; they do not assume restart, reads and writes finish within a three-second window. The marker is fake-driver synchronization only and contributes no behavioural proof. Genuine inherited-pipe, process cleanup and proxy-revocation tests retain their assertions.
 
 ## Codex Dedicated Entry
 
-Select `--entry dedicated` to drive the repository's `scripts/wayfinder-agent/wayfinder` through its documented noninteractive passthrough. The default stays `--entry mcp-only`. Both Entries use the same Scenario inputs, Controller, native-output normalizer, receipts and allowlist sandbox. Dedicated Batches refuse `--no-sandbox`. Dedicated support remains **unverified** in `clients.ts` until its five onboarding checks have evidence from a Batch Kun approved; synthetic tests do not onboard it.
+Select `--entry dedicated` to drive the repository's `scripts/wayfinder-agent/wayfinder` through its documented noninteractive passthrough. The default stays `--entry mcp-only`. Both Entries use the same Scenario inputs, Controller, native-output normalizer, receipts and allowlist sandbox. Dedicated Batches refuse `--no-sandbox`. Codex Dedicated is onboarded in `clients.ts` from the approved `B02d-onboarding-20261026` Batch ([#68 evidence](https://github.com/kun-g/wayfinder_map_service/issues/68#issuecomment-6418579634)): four Attempts met the five R2 checks. Scenario verdicts remained insufficient-evidence without model reviews; onboarding does not establish a full-library behaviour baseline, and synthetic tests never promote capabilities.
 
 | Context | MCP-only | Dedicated |
 | --- | --- | --- |
@@ -158,9 +158,9 @@ Each Attempt records `entry=dedicated`, the launcher surface, the additional con
 
 The report keys and compares cells by Entry, labels anomalous cells with their Entry and renders separate Entry tables. A Batch/Attempt Entry mismatch is refused, including when other records in that Batch are missing.
 
-### Proposed onboarding Batch (not authorized or run)
+### Approved onboarding Batch and future reruns
 
-After Kun approves **Codex · gpt-6-astra · xhigh · Dedicated**, run S0b and F11 twice each, ceiling four Attempts, no model reviews or arbitration in this Batch. S0b proves same-session resume and native capture; F11 adds seeded Map/receipt evidence. The model-free sandbox test supplies fixture permissions and denied-personal-context evidence, as in B02a. A behavioural failure remains a failure and does not prevent proving that the Driver records it correctly.
+The approved `B02d-onboarding-20261026` Batch ran **Codex · gpt-6-astra · xhigh · Dedicated**, S0b and F11 twice each, ceiling four Attempts, with no model reviews or arbitration ([#68 closeout](https://github.com/kun-g/wayfinder_map_service/issues/68#issuecomment-6418579634)). Future reruns require a new approved Batch; the following commands are templates, not authorization. S0b proves same-session resume and native capture; F11 adds seeded Map/receipt evidence. The model-free sandbox test supplies fixture permissions and denied-personal-context evidence, as in B02a. A behavioural failure remains a failure and does not prevent proving that the Driver records it correctly.
 
 ```sh
 npm run build

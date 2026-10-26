@@ -1,6 +1,6 @@
 # Codex Dedicated behaviour Driver
 
-Issue: [#68](https://github.com/kun-g/wayfinder_map_service/issues/68). Implementation evidence on 2026-10-26; **not** an approved model Batch, Driver onboarding or product behaviour acceptance.
+Issue: [#68](https://github.com/kun-g/wayfinder_map_service/issues/68). The original implementation evidence below uses fake clients. Subsequent approved Driver onboarding is linked in the evidence table; neither establishes product behaviour acceptance.
 
 The manual runner now accepts `--entry dedicated`. It invokes the repository's real `wayfinder` launcher with its existing path/port overrides and a private `HOME`. The Controller owns the temporary service; the launcher configures Codex and registers its per-launch credential. A private shim captures that credential for redaction and enters the shared allowlist sandbox; the shared sandbox stores the policy outside scratch and stages the launcher, shim and projected checkout in immutable children; shared integrity checks run before and after every turn. No shipped code or workflow changed, so the Release Version stays unchanged under §14.3.
 
@@ -24,8 +24,8 @@ The manual runner now accepts `--entry dedicated`. It invokes the repository's r
 | Native isolation | `dedicated-security.test.ts` reuses the shared C probes for TIOCSTI, own/peer ptys, Mach/process information and signal denial, plus HOME/login identity replacement and post-turn integrity |
 | Failure and refusal paths | Timeout cleanup, an existing Batch directory, direct Attempt sandbox opt-out, altered control/auth identities and a stopped service are tested without a model |
 | Separate reporting | Dedicated and MCP-only retain separate cells, baseline slots and Markdown tables; mismatched Batch/Attempt Entries are refused |
-| Approved five-check onboarding | **Requires a separately approved real-session Batch.** `clients.ts` still lists Dedicated as unverified |
+| Approved five-check onboarding | Completed by approved `B02d-onboarding-20261026`: four Attempts and all five checks ([#68 evidence](https://github.com/kun-g/wayfinder_map_service/issues/68#issuecomment-6418579634)); `clients.ts` now includes Dedicated. This is Driver onboarding, not product behaviour acceptance |
 
 The [shared-sandbox alignment record](b02d-shared-sandbox-alignment.md) documents the #94 integration and deny-only tests; the [credential-boundary record](b02d-credential-boundary.md) documents the fallback, artifact and database regressions. Local proxies remain fail-closed pending #101.
 
-Build, full test suite and strict type checking pass with Node 26.3.0. No model, ChatGPT app, tunnel or everyday service operation was run. The proposed four-Attempt Batch and exact commands are in [the runner README](../../tests/behaviour/README.md#proposed-onboarding-batch-not-authorized-or-run): Codex · gpt-6-astra · xhigh · Dedicated, S0b and F11 twice each, ceiling four, zero model reviews/arbitrations. This sample does not establish the full-library baseline.
+Build, full test suite and strict type checking pass with Node 26.3.0. No model, ChatGPT app, tunnel or everyday service operation was run. The approved four-Attempt Batch and templates for separately approved reruns are in [the runner README](../../tests/behaviour/README.md#approved-onboarding-batch-and-future-reruns): Codex · gpt-6-astra · xhigh · Dedicated, S0b and F11 twice each, ceiling four, zero model reviews/arbitrations. This sample does not establish the full-library baseline.

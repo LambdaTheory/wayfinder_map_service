@@ -43,8 +43,14 @@ function isConnectorCommand(command: string): boolean {
   const tunnel = /(?:^|\s)tunnel(?:\s|$)/.exec(args);
   if (tunnel) {
     // Only options may precede "run"; never skip a diagnostic action to find a later "run" argument.
-    const option = String.raw`--[\w-]+(?:=${value}|\s+${value})?`;
-    return new RegExp(String.raw`^(?:${option}\s+)*run(?:\s|$)`).test(args.slice(tunnel.index + tunnel[0].length));
+    const option = String.raw`--?[\w-]+(?:=${value}|\s+${value})?`;
+    const tail = args.slice(tunnel.index + tunnel[0].length);
+    if (new RegExp(String.raw`^(?:${option}\s+)*run(?:\s|$)`).test(tail)) return true;
+    // Named ad hoc launches need no "run". Consume only supported launch options so a
+    // diagnostic action before/after --name can never be mistaken for a connector.
+    const namedOption = String.raw`(?:--(?:no-autoupdate|hello-world)|(?:--(?:name|url|config|credentials-file|protocol|loglevel)|-n|-p|-config)(?:=|\s+)${value})`;
+    return /(?:^|\s)(?:--name|-n)(?:=|\s+)/.test(tail)
+      && new RegExp(String.raw`^${namedOption}(?:\s+${namedOption})*$`).test(tail);
   }
   // Legacy config-only launch: known options, no positional subcommand such as "service".
   const option = String.raw`(?:--(?:no-autoupdate|hello-world)|--(?:config|credentials-file|token|token-file)(?:=|\s+)${value})`;
@@ -72,7 +78,8 @@ export async function assertNoLocalConnector(target: LocalTunnelTarget, ownPid?:
 /** Unknown remote state fails closed; pending reconnects also count as occupied. */
 export function connectorsFrom(text: string, id: string): string[] {
   const info = JSON.parse(text) as { id?: unknown; name?: unknown; conns?: { id?: unknown; conns?: unknown }[] | null };
-  if (info.id !== id || info.name !== 'opencode' || !(info.conns === null || Array.isArray(info.conns)))
+  if (typeof info.id !== 'string' || info.id.toLowerCase() !== id.toLowerCase()
+    || info.name !== 'opencode' || !(info.conns === null || Array.isArray(info.conns)))
     throw new Error('Cannot confirm the opencode tunnel identity and connectors');
   const ids: string[] = [];
   for (const c of info.conns ?? []) {

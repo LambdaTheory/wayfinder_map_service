@@ -565,7 +565,7 @@ async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: ()
       seedHeadRevision: seedingComplete ? seedHeads[m.mapId] ?? null : m.history.at(-1)?.revision ?? null, history: m.history }));
   } catch (error) {
     missing.push('maps');
-    if (entry === 'dedicated') completeness = 'driver-failed';
+    if (entry === 'dedicated' && completeness === 'complete') completeness = 'driver-failed';
     detail = `${detail ?? ''} catalog export failed: ${String(error instanceof Error ? error.message : error)}`.trim(); }
   for (const session of sessions) await session.route?.close().catch(() => undefined);
   for (const [label, log] of relayLogs) writeRaw(`relay-${label}.jsonl`, log.map(e => JSON.stringify(e)).join('\n'));

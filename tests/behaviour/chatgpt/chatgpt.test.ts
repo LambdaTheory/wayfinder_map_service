@@ -10,7 +10,7 @@ import { test } from 'vitest';
 import { createHttpTestClient } from '../../helpers/mcp-http-client.mjs';
 import { ChatGPTAttempt } from './attempt.ts';
 import type { Capture } from './attempt.ts';
-import type { Exchange, RelayRefusal } from './relay.ts';
+import type { Exchange, RelayRefusal, RelayRefusalEvent } from './relay.ts';
 import { checklist, initialFive, selectScenarios } from './plan.ts';
 import { connectorsFrom, acquireTunnel, hasLocalConnector, readTunnelConfig } from './tunnel.ts';
 import { clientVisibility, runBatch, runRoot } from './run.ts';
@@ -32,8 +32,70 @@ const attemptOptions = (root: string, id: string) => ({ dir: join(root, 'attempt
 const fixedUpgradeDecision = [{ itemId: 'mismatch-as-outage', status: 'holds' as const, by: 'fixture-human', role: 'human' as const,
   reason: 'Synthetic human decision for the model-only item; rule-source checks must still decide from captured evidence.' }];
 const wireOf = (a: ChatGPTAttempt): Exchange[] => JSON.parse(readFileSync(join(a.dir, 'raw/wire.json'), 'utf8'));
-const refusalsOf = (dir: string): RelayRefusal[] => JSON.parse(readFileSync(join(dir, 'raw/relay-refusals.json'), 'utf8'));
+const refusalsOf = (dir: string): RelayRefusal[] => {
+  const rows = readFileSync(join(dir, 'raw/relay-refusals.jsonl'), 'utf8').split('\n').slice(0, -1);
+  return [...new Map(rows.map(line => {
+    const event = JSON.parse(line) as RelayRefusalEvent;
+    return [event.index, event.refusal] as const;
+  })).values()];
+};
 const listedSource = (a: ChatGPTAttempt) => `raw/wire.json#${wireOf(a).findLast(e => e.httpMethod === 'POST' && e.request.method === 'tools/list')!.id}`;
+
+test('refusal persistence appends without replacing earlier bytes, including late body updates', async () => {
+  const root = fresh();
+  const a = await ChatGPTAttempt.start(attemptOptions(root, 'F11'));
+  const socket = connect(a.relay.port, '127.0.0.1');
+  socket.on('error', () => {});
+  try {
+    const path = join(a.dir, a.record.diagnostics.relayRefusals.path);
+    const inode = statSync(path).ino;
+    await once(socket, 'connect');
+    const reply = once(socket, 'data');
+    socket.write('POST /private-path HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{');
+    assert.match(String((await reply)[0]), /404/);
+    const initial = readFileSync(path, 'utf8');
+    assert.equal(refusalsOf(a.dir)[0]!.bodyShape, 'unavailable');
+    socket.write('}');
+    await eventually(() => refusalsOf(a.dir)[0]!.bodyShape === 'object');
+    const updated = readFileSync(path, 'utf8');
+    assert.equal(updated.startsWith(initial), true, 'body updates must append without rewriting the initial observation');
+    assert.equal(statSync(path).ino, inode, 'persistence must keep the same log file');
+    for (let i = 0; i < 12; i++) {
+      const response = await fetch(`http://127.0.0.1:${a.relay.port}/mcp`, { method: 'POST', body: 'null' });
+      assert.equal(response.status, 400); await response.text();
+    }
+    const final = readFileSync(path, 'utf8');
+    assert.equal(final.startsWith(updated), true);
+    assert.equal(statSync(path).ino, inode);
+    assert.equal(refusalsOf(a.dir).length, 13);
+    assert.equal(a.record.diagnostics.relayRefusals.total, 13);
+    assert.deepEqual(a.record.diagnostics.relayRefusals.byReason, { path_mismatch: 1, non_object_json: 12 });
+  } finally { socket.destroy(); await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }
+}, 30_000);
+
+test('local connector check recognizes named launches without run but excludes diagnostic actions', () => {
+  const target = { id: randomUUID(), credentialsFile: '/synthetic/credentials.json', configPath: '/synthetic/config.yml' };
+  for (const flag of ['--name opencode', '--name=opencode', '-n opencode', '-n=opencode']) {
+    for (const options of [flag, `--no-autoupdate ${flag} --url http://localhost:8080`]) {
+      assert.equal(hasLocalConnector(`42 cloudflared tunnel ${options}`, target), true, options);
+      assert.equal(hasLocalConnector(`42 cloudflared tunnel ${options}`, target, 42), false);
+    }
+    for (const action of ['info', 'list', 'route dns', 'ingress validate', 'token']) {
+      assert.equal(hasLocalConnector(`42 cloudflared tunnel ${action} ${flag}`, target), false, action);
+      assert.equal(hasLocalConnector(`42 cloudflared tunnel ${flag} ${action}`, target), false, action);
+    }
+  }
+  assert.equal(hasLocalConnector('42 cloudflared tunnel --name opencode-other', target), false);
+  assert.equal(hasLocalConnector('42 cloudflared tunnel --name opencode --help', target), false);
+});
+
+test('remote tunnel UUID comparison ignores case and still rejects a different identity', () => {
+  const id = 'abcdef01-2345-4678-9abc-def012345678';
+  for (const [configured, observed] of [[id.toUpperCase(), id], [id, id.toUpperCase()]]) {
+    assert.deepEqual(connectorsFrom(JSON.stringify({ id: observed, name: 'opencode', conns: [] }), configured!), []);
+  }
+  assert.throws(() => connectorsFrom(JSON.stringify({ id: randomUUID(), name: 'opencode', conns: [] }), id));
+});
 
 async function eventually(check: () => boolean, detail: () => string = () => 'condition not observed') {
   const deadline = Date.now() + 15_000;
@@ -700,16 +762,16 @@ test('every relay refusal persists only diagnostic metadata, with unchanged guar
     assert.equal(refusalsOf(a.dir).at(-1)!.reason, 'method_not_allowed');
     assert.ok(wireOf(a).some(e => e.request.method === 'tools/list' && e.status === 200));
     await a.stop();
-    const text = readFileSync(join(a.dir, 'raw/relay-refusals.json'), 'utf8');
+    const text = readFileSync(join(a.dir, 'raw/relay-refusals.jsonl'), 'utf8');
     for (const secret of ['body-secret', 'private-id', 'private-path', 'path-secret', 'header-secret', 'cookie-secret',
       'session-secret', 'origin-secret', 'ownership-private-detail', ...Object.values(a.secrets)]) assert.equal(text.includes(secret), false, secret);
-    assert.equal(statSync(join(a.dir, 'raw/relay-refusals.json')).mode & 0o777, 0o600);
+    assert.equal(statSync(join(a.dir, 'raw/relay-refusals.jsonl')).mode & 0o777, 0o600);
     const recorded = JSON.parse(readFileSync(join(a.dir, 'attempt.json'), 'utf8'));
     assert.equal(recorded.diagnostics.relayRefusals.total, cases.length + 2);
     assert.equal(recorded.diagnostics.relayRefusals.withinTurn, 2);
     assert.equal(recorded.diagnostics.relayRefusals.outsideTurn, cases.length);
     assert.deepEqual(recorded.diagnostics.relayRefusals.byStatus, { 400: 12, 403: 1, 404: 1, 405: 2, 413: 1, 503: 3 });
-    assert.equal(recorded.raw.files.includes('relay-refusals.json'), true);
+    assert.equal(recorded.raw.files.includes('relay-refusals.jsonl'), true);
     const { diagnostics: _, ...shared } = a.record;
     assert.deepEqual(judgeAttempt(options.scenario, a.record), judgeAttempt(options.scenario, shared));
   } finally { await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }
