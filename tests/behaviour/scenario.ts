@@ -3,6 +3,7 @@
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { entries } from './evidence.ts';
+import { common } from './common.ts';
 import type { AttemptRecord, Entry, TicketType, WireReference, WireSettlement } from './evidence.ts';
 
 export const scenarioKinds = ['real-problem', 'design-hazard', 'diagnostic-probe'] as const;
@@ -154,6 +155,14 @@ export const fixturesRoot = fileURLToPath(new URL('./fixtures/', import.meta.url
 
 /** Every verdict item of a Scenario: required events, must-nots and the ways of every expectation group. */
 export const itemsOf = (s: Scenario): Item[] => [...s.requiredEvents, ...s.mustNot, ...s.expect.flatMap(g => g.anyOf)];
+
+/** One classification shared by the review runner and the verdict engine. */
+export function judgementItems(s: Scenario) {
+  const shared = s.common.map(id => common[id]);
+  return { required: s.requiredEvents, mustNot: [...s.mustNot, ...shared.filter(i => !i.quality)],
+    quality: shared.filter(i => i.quality), expect: s.expect };
+}
+export const expectationSupport = (g: ExpectGroup, supports: Partial<Record<Capability, boolean | 'unverified'>>) => g.onlyWith ? supports[g.onlyWith] : true;
 
 /** The re-judged precondition of a reply turn: was the proposal it answers really there? */
 export const precondition = (id: string, text: string, question: string): Item => ({ id, judge: 'model', text,

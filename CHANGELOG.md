@@ -10,6 +10,12 @@ Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Rel
 - F11 reproduced three times on Release Version 2.0.2: agents treated the human's question as their own discovery that work was beyond the Destination, then changed the Map before the human answered. The former self-discovery rule allowed that path, so the new boundary covers both a human question and the agent's own finding ([#87 root cause and proposed wording](https://github.com/kun-g/wayfinder_map_service/issues/87#issuecomment-6405351705), [Kun's approval](https://github.com/kun-g/wayfinder_map_service/issues/87#issuecomment-6405899011)). This is a major release because it changes a mandatory rule.
 - F11 Scenario v2 limits its scope-change check to Scope Exclusion additions, updates and removals and Dependency removals; Fog changes no longer fail that item. Earlier Attempts keep their recorded Scenario version and are not re-judged under the revised check.
 
+## 2.1.0 (2026-10-26)
+
+- Record private call metadata by default for every local MCP service entry, including reads, refusals, Conflicts and failures. Failed metadata writes preserve business results and expose cumulative missing observations.
+- Distinguish the SDK's expected GET stream probe from transport failures, retain HTTP and stale-session/request correlation, and persist missing-observation markers plus shutdown summaries. Observation faults preserve client response bytes; the launcher no longer injects service author configuration into the harness environment and marks unstated usage unknown.
+- Record dedicated-agent and ChatGPT launcher correlation using the existing Client ID and per-launch credential fingerprint, with explicit gaps for unavailable native session IDs. MCP instructions, tool metadata, results and workflow rules are unchanged apart from the required Release Version.
+
 ## 2.0.2 (2026-10-25)
 
 - Behaviour unchanged. The `wayfinder` launcher (the dedicated Codex and Claude Code entry) moved from the workspace into this repository as `scripts/wayfinder-agent/`, so it is versioned with the service and is the entry the behaviour tests exercise. It serves from the repository it lives in by default (`WAYFINDER_AGENT_CHECKOUT` still overrides), and its instruction files are now `agent-instructions.md` and `agent-instructions.matt.md`, installed into each state directory under the name its harness expects. Upstream Matt skills path is overridable with `WAYFINDER_AGENT_MATT_SKILLS`.
