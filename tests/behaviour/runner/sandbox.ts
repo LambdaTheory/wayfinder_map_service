@@ -134,6 +134,7 @@ function sandboxProfile(p: Policy): string {
     ...p.controlDirectories.map(root => `(deny file-read* (subpath ${q(root)}))`),
     // A deny filtered by "others" leaves same-session processes accessible in an attached launch.
     '(deny sysctl-read (sysctl-name-prefix "kern.proc"))', '(deny process-info*)', '(allow process-info* (target self))',
+    '(deny mach-task-name)', '(allow mach-task-name (target self) (target same-sandbox))',
     '(deny signal)', '(allow signal (target self) (target same-sandbox))',
     '(deny network-outbound (remote tcp "localhost:*") (remote udp "localhost:*"))',
     ...p.localPorts.map(port => `(allow network-outbound (remote tcp "localhost:${port}"))`),

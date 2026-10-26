@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, expect, test } from 'vitest';
 import { prepareClient, prepareSandbox, prepareSession, prepareWorkdir, runTurn, writeProfile } from './codex.ts';
 import { newToken, startService } from './service.ts';
@@ -101,6 +102,46 @@ console.log(JSON.stringify({ inspections, envToken: !!process.env.WAYFINDER_TOKE
     expect(JSON.parse(attached.stdout)).toEqual({ inspections: [{ executed: true, bytes: 0 }, { executed: true, bytes: 0 }], envToken: false, status: 401, fileReadable: false });
     expect(readFileSync(join(serviceDir, 'credentials.json'), 'utf8')).not.toContain(controller.token);
   } finally { victim.kill(); await service.stop(); rmSync(serviceDir, { recursive: true, force: true }); }
+}, 20_000);
+
+attack('Mach task-name inspection denies an outside process but permits the client and its child in either launch mode', async () => {
+  const { a, work, control, readOnlyDir } = setup();
+  const driverDir = mkdtempSync(join(readOnlyDir, 'task-name-'));
+  const driver = join(driverDir, 'probe');
+  const source = fileURLToPath(new URL('./task-name-probe.c', import.meta.url));
+  const compiled = spawnSync('/usr/bin/clang', ['-Wall', '-Wextra', '-Werror', source, '-o', driver], { encoding: 'utf8' });
+  expect(compiled.status, compiled.stderr).toBe(0);
+  const victim = spawn('/bin/sleep', ['30'], { stdio: 'ignore' });
+  type Observation = { portResult: number; words: number[] };
+  type Probe = { external: Observation; self: Observation; child: Observation; childSignal: number };
+  const readable = (result: Observation) => {
+    expect(result.portResult).toBe(0);
+    expect(result.words).toHaveLength(4);
+    expect(result.words.every(count => count > 0)).toBe(true);
+  };
+  const isolated = (text: string) => {
+    const result = JSON.parse(text) as Probe;
+    expect(result.external.portResult).not.toBe(0);
+    expect(result.external.words).toEqual([0, 0, 0, 0]);
+    readable(result.self); readable(result.child);
+    expect(result.childSignal).toBe(15);
+  };
+  try {
+    await new Promise<void>(resolve => victim.once('spawn', resolve));
+    const prompt = String(victim.pid);
+    const env = { PATH: process.env.PATH, HOME: a.home, CODEX_HOME: a.codexHome, TMPDIR: join(a.home, 'tmp') };
+    const outside = spawnSync(driver, [], { input: prompt, env, encoding: 'utf8', timeout: 5000 });
+    expect(outside.status, outside.stderr).toBe(0);
+    readable((JSON.parse(outside.stdout) as Probe).external);
+    const profile = writeProfile(control, a, work, driver);
+    const attached = spawnSync('sandbox-exec', ['-f', profile.path, driver], { cwd: work, input: prompt, env, encoding: 'utf8', timeout: 5000 });
+    expect(attached.status, attached.stderr).toBe(0);
+    const detached = await runTurn({ options: { model: 'fake', effort: 'low', bin: driver, sandbox: true, timeoutMs: 5000 },
+      session: a, port: 1, workdir: work, profile, prompt });
+    expect(detached.exitCode, detached.stderr).toBe(0);
+    isolated(attached.stdout); isolated(detached.stdout);
+    expect(victim.exitCode).toBeNull(); expect(victim.signalCode).toBeNull();
+  } finally { victim.kill(); }
 }, 20_000);
 
 attack('a client can use only its own relay, whose credential overrides client-supplied Authorization', async () => {
