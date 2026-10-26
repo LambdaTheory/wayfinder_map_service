@@ -14,8 +14,8 @@ Kun chose an Answer Desk inside the local Wayfinder service on 2026-10-26 ([#108
 
 ## Consequences
 
-This is a narrow amendment to [ADR 0002](0002-mcp-tools-are-the-primary-interface.md): the viewer is no longer exclusively a projection, but it does not become a general Map editor or an embedded assistant. One keyed route accepts a human's response to a particular Question Version; it cannot post questions, change Dependencies, reopen a Ticket or settle it. Read-only access remains available without the key. The service validates answers and subsequent agent Settlements against the same authoritative state.
+This narrowly amends [ADR 0002](0002-mcp-tools-are-the-primary-interface.md): the viewer becomes a second write entry for Desk Answers and Reopen Requests, including changes and permitted cancellation, while agent MCP operations retain Map editing. The [browser boundary](../spec/answer-desk.md#7-keyed-browser-boundary) defines the one route, its key and the exact permitted actions; the [Reopen Request contract](../spec/answer-desk.md#reopen-requests) defines the affected-decision authorization.
 
-The `wayfinder` launcher opens the desk with a key in a URL fragment, and the page sends the key in a request header on the answer route. Fragments are not sent in HTTP requests; this does not by itself exclude them from browser history. Keys stay out of Map state, logs and errors. The loopback Host, same-origin and tunnel exclusions remain; this does not deliver OAuth, sharing or public access.
+The service remains the sole state authority. [Revision and storage boundaries](../spec/answer-desk.md#8-revisions-storage-and-required-evidence) distinguish human responses from agent-authored Map history; [Settlement validation](../spec/answer-desk.md#agent-settlement) keeps the second write entry from bypassing the agent's acceptance checks.
 
 The viewer's original acceptance and implementation record remain evidence for the read-only release. This ADR authorizes no implementation or release until the specification gate is satisfied.

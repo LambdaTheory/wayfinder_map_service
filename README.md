@@ -51,7 +51,8 @@ npm run --silent backup -- <absolute-source> <fresh-absolute-destination>
 - [v1 可执行规格](docs/spec/v1.md)
 - [已接受的 M1 实现规格](docs/spec/m1.md)
 - [已接受的本地 MCP/SQLite 实现规格](docs/spec/mcp-sqlite.md)
-- [已接受的本地只读查看页规格](docs/spec/map-viewer.md)
+- [Local Map viewer specification and Answer Desk amendment](docs/spec/map-viewer.md)
+- [Answer Desk specification — accepted 2026-10-26; implementation pending](docs/spec/answer-desk.md)
 - [已接受的行为测试与验收需求](docs/spec/behaviour-testing.md)（场景库和 Codex 运行器已实现，其余按工单推进）
 - [行为测试运行结果](docs/implementation/behaviour-runs.md)
 - [专用 Wayfinder Agent 启动器](scripts/wayfinder-agent/README.md)（`wayfinder` 命令）
@@ -63,6 +64,9 @@ npm run --silent backup -- <absolute-source> <fresh-absolute-destination>
 - [ADR 0002：MCP 工具是主要接口](docs/adr/0002-mcp-tools-are-the-primary-interface.md)
 - [ADR 0003：MCP 服务携带版本化探索工作流](docs/adr/0003-mcp-service-carries-the-versioned-exploration-workflow.md)
 - [ADR 0004：服务和工作流共用一个版本号](docs/adr/0004-one-release-version.md)
+- [ADR 0005: writes attest the rules version](docs/adr/0005-writes-attest-the-rules-version.md)
+- [ADR 0006: keyed answers in the Map viewer](docs/adr/0006-answer-desk-in-the-map-viewer.md)
+- [ADR 0007: task-capable Answer Desk delivery](docs/adr/0007-map-wait-for-answer-delivery.md)
 - [智能体工作流与项目本地技能](AGENTS.md)
 - [Matt Pocock 技能出处](docs/agents/skills-provenance.md)
 

@@ -16,3 +16,5 @@ The MCP service carries the cross-tool exploration workflow in initialization in
 ## Consequences
 
 The first 512 characters of server instructions must be independently safe, tool descriptions must remain locally actionable, and Resources/Prompts remain optional. Workflow changes require a SemVer increase, deterministic rebuild, process restart and cross-client acceptance appropriate to their compatibility impact. This decision reinforces [ADR 0001](0001-remote-map-is-authoritative.md) and [ADR 0002](0002-mcp-tools-are-the-primary-interface.md); it changes neither Map authority nor the four business tools.
+
+[ADR 0007](0007-map-wait-for-answer-delivery.md), accepted on 2026-10-26, adds a fifth business tool for Answer Desk delivery; it does not add a workflow-retrieval tool or change the single authored workflow source.
