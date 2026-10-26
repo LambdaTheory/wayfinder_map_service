@@ -1,5 +1,7 @@
 # On-demand local ChatGPT test session
 
+For isolated **behaviour Scenarios**, use the [B09a Batch command](../../tests/behaviour/chatgpt/README.md). It creates fresh databases on independent ports and leaves the daily local service running. Its approval still covers app/window takeover and exclusive use of the existing tunnel hostname. The workflow below remains the existing daily/legacy acceptance procedure; it is not evidence of B09a runner isolation. Real B09a ChatGPT acceptance is pending.
+
 This is a durable **local test-data** workflow, not the production Dokploy/OAuth/PostgreSQL deployment. The existing private SQLite database remains authoritative. The foreground connection is started by the operator and stays up until Ctrl-C, SIGTERM, or SIGHUP; it does not create, reset, or replace a database and it has no two-hour timeout or login auto-start.
 
 From the repository with pinned Node.js 26.3.0:

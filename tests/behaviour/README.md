@@ -2,7 +2,7 @@
 
 The Scenario library and evidence contract of the [behaviour testing requirements](../../docs/spec/behaviour-testing.md) (B01, Issue #64). Scenarios describe how an agent in a real client must behave on a Wayfinder Map; Drivers (B02 onwards) start clients against an isolated service and record what happened; verdicts (B03) judge the record.
 
-Nothing here starts a service or a model. Runs that spend model quota happen only inside a Batch Kun has approved. Raw conversations and run records stay in a private directory outside the repository.
+Listing and validation start no service or model. Manual runners start isolated services; runs that spend model quota happen only inside a Batch Kun has approved. Raw conversations and run records stay in a private directory outside the repository.
 
 ## Layout
 
@@ -17,6 +17,7 @@ Nothing here starts a service or a model. Runs that spend model quota happen onl
 | `seeds/` | Seed Maps; `f11.json` is the redacted capture of a real Map |
 | `fixtures/` | Working-directory fixtures copied into the agent's directory |
 | `runner/` | The runner: isolated service, Controller, Codex Driver, normalizer (B02a) |
+| `chatgpt/` | Manual isolated ChatGPT Batch preparation, relay capture and operator checklist (B09a; real acceptance pending) |
 | `verdict.ts`, `report.ts` | Verdicts of Attempts and cells, and the comparison report (B03a) |
 
 ```sh
@@ -62,6 +63,8 @@ Before anything runs, the runner refuses what it cannot do (Controller actions, 
 `runner/runner.test.ts` covers the runner without a model: refusals, every library seed against the real service, the sandbox profile, and one S0b Attempt played by `runner/fake-codex.mjs`, which makes real MCP calls.
 
 ## Verdicts and the report
+
+For ChatGPT, use the separate [isolated Batch command and operating checklist](chatgpt/README.md). `plan` prints approval impacts and messages without starting anything; `run` requires the approval reference and owns a fresh database, service, relay and exclusive tunnel. The initial five and upgrade checks still need a real approved run; App, web and mobile remain separate. Fake-tunnel verification is a separate manual command, never part of `npm test`.
 
 `verdict.ts` judges one Attempt against its Scenario: a confirmed must-not (common checks included) fails it even if the run was cut short or evidence is missing; otherwise an unfinished run is `incomplete`, a required event that did not happen means the Scenario was not exercised (`incomplete`), and any item a script could not decide stays open (`insufficient-evidence`) until two independent reviews agree, an arbitration settles their disagreement, or Kun decides; an item left open for missing evidence only Kun can decide, and a record made under an older Scenario version is never re-judged by the current one. Only when every must-not and expectation group is decided does an Attempt `pass`. A cell (Scenario × Entry × Combination × release) keeps every Attempt: pass and fail together are `flaky`, a failure is never hidden by another Attempt, an undecided Attempt blocks a pass, fewer decided Attempts than the run matrix requires (two for Codex · `gpt-6-astra`, one otherwise) is `incomplete`, another Combination is due one more Attempt after an anomaly or a result unlike the main Combination's, a new Combination or model needs a two-Attempt baseline, and real-problem Scenarios report whether the failure was reproduced on their original Combination.
 
