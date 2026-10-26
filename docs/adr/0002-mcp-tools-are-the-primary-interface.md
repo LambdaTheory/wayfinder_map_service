@@ -15,3 +15,5 @@ The stable product seam is a small set of headless MCP tools. ChatGPT skills, Co
 ## Consequences
 
 Every operation must remain usable without embedded UI. Visual editing is deferred until it can call the same semantic commands rather than introduce a second mutation path.
+
+[ADR 0006](0006-answer-desk-in-the-map-viewer.md), accepted on 2026-10-26, amends this boundary for the viewer's keyed Answer Desk; general Map editing remains with MCP agents.

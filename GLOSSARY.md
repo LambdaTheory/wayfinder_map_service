@@ -76,6 +76,46 @@ _Avoid_: Save, version, snapshot
 The single SemVer that names one build of the Map service together with the exploration workflow it carries. It describes the software, never a Map.
 _Avoid_: workflowVersion, server version, Revision
 
+### Answer Desk
+
+**Answer Desk**:
+The place within a Map where a human considers posted questions and gives answers for an agent to work through.
+_Avoid_: Chat, workbench, approval board
+
+**Desk Question**:
+A versioned request on a Decision Ticket that presents options, a recommendation and the reason human judgment is needed.
+_Avoid_: Ticket question, questionnaire, message
+
+**Question Version**:
+The identity of one published formulation of a Desk Question, to which a human's answer applies.
+_Avoid_: Revision, Release Version, latest question
+
+**Desk Answer**:
+A human's response to a particular Question Version, retained separately from the Ticket's accepted Settlement.
+_Avoid_: Decision, Settlement, agent recommendation
+
+**Quiet Window**:
+The interval after the human's most recent change to answers or Reopen Requests on a Map during which responses remain open to change before being released to an agent.
+_Avoid_: Approval deadline, answer expiry
+
+**Taken**:
+The delivery state of a Desk Answer or Reopen Request released to an agent for processing, distinct from Settlement or completion of the requested work.
+_Avoid_: Settled, approved, claimed
+
+**Reopen Request**:
+A human's request to change a settled Decision, awaiting the agent's explicit reopening of the Decision Ticket.
+_Avoid_: Reopen, rollback, replacement Settlement
+
+**Unlock Count**:
+The number of dependent Decision Tickets whose other prerequisites are already settled, so they enter the Frontier when the given Ticket settles.
+_Avoid_: Frontier size, downstream count, agent priority
+
+**Downstream Count**:
+The number of distinct unsettled Decision Tickets that depend directly or transitively on a given Ticket.
+_Avoid_: Unlock Count, path count, ready work
+
+### Workflows and access
+
 **Grilling Session**:
 A bounded interview that works through a decision tree in frontier order and periodically checks for convergence.
 _Avoid_: Brainstorm, questionnaire
