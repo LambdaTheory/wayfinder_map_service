@@ -16,6 +16,7 @@ Listing and validation start no service or model. Manual runners start isolated 
 | `upgrade-checks.ts` | Upgrade compatibility checks, listed apart from the 26 |
 | `seeds/` | Seed Maps and the shared capture/Controller write plan (`steps.ts`); `f11.json` is the redacted capture of a real Map |
 | `capture/`, `captures/` | Read-only problem capture tool, synthetic verification and admitted/paused capture traces (B04) |
+| `scan/` | Explicit-source usage inventory, pending leads, B04 input drafts and unapproved Batch lists (B08); no model execution |
 | `fixtures/` | Working-directory fixtures copied into the agent's directory |
 | `runner/` | The runner: isolated service, Controller, Codex Driver, normalizer (B02a) |
 | `chatgpt/` | Manual isolated ChatGPT Batch preparation, relay capture and operator checklist (B09a; real acceptance pending) |
@@ -30,6 +31,16 @@ node tests/behaviour/cli.ts validate   # structural validation and capture inven
 ```
 
 Use Node 26.3.0. `library.test.ts` runs in `npm test`; it validates the library and pins check semantics on small fixed evidence.
+
+## Usage scans
+
+Run the [manual usage scan](../../docs/implementation/behaviour-usage-scan.md) weekly and before releases with explicit private sources and a fresh private output directory. It starts no model and creates no schedule. Its safe synthetic example is:
+
+```sh
+node tests/behaviour/scan/cli.ts --input tests/behaviour/fixtures/scan/input.json --out "$FRESH_SCAN_OUTPUT"
+```
+
+For subsequent scans, pass `--state "$PREVIOUS_SCAN_OUTPUT/state.json"` to retain once-only reminders. Inspect pending evidence and Batch proposals before asking for quota approval; metadata alone never establishes a failure or human authorization. Complete the generated input drafts through B04 before admission to this library.
 
 ## A Scenario
 

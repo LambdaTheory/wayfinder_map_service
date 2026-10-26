@@ -1,0 +1,2 @@
+{"type": "user", "sessionId": "normal-write", "agentId": "sub-1", "isSidechain": true, "message": {"role": "user", "content": "Read the facts."}}
+{"type": "assistant", "sessionId": "normal-write", "agentId": "sub-1", "isSidechain": true, "message": {"role": "assistant", "model": "synthetic-claude", "content": [{"type": "tool_use", "id": "sub-tool-1", "name": "mcp__wayfinder__map_read", "input": {"mapId": "Synthetic.Map"}}]}}
