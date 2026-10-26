@@ -1,0 +1,148 @@
+{
+  "schema": "wayfinder-interactive-assessment/1",
+  "scenario": "W7",
+  "confirmations": {
+    "async-question": {
+      "status": "supported",
+      "clientVersion": "synthetic-1",
+      "surface": "interactive-cli",
+      "checkedAt": "2026-01-01T01:02:00.000Z",
+      "documentation": [
+        "https://developers.openai.com/codex/app-server/"
+      ],
+      "reason": "Synthetic support assertion for adapter tests only; not a real client capability claim.",
+      "probe": {
+        "path": "codex-probe.jsonl",
+        "sha256": "36c1144854e83b1914b4c2472329168ccf676b322a4fca307be9cb2bfe85fdce",
+        "endedAt": "2026-01-01T01:01:00.000Z",
+        "locations": [
+          "codex-probe.jsonl:1"
+        ],
+        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface."
+      }
+    },
+    "prepare-while-waiting": {
+      "status": "supported",
+      "clientVersion": "synthetic-1",
+      "surface": "interactive-cli",
+      "checkedAt": "2026-01-01T01:02:00.000Z",
+      "documentation": [
+        "https://developers.openai.com/codex/app-server/"
+      ],
+      "reason": "Synthetic support assertion for adapter tests only; not a real client capability claim.",
+      "probe": {
+        "path": "codex-probe.jsonl",
+        "sha256": "36c1144854e83b1914b4c2472329168ccf676b322a4fca307be9cb2bfe85fdce",
+        "endedAt": "2026-01-01T01:01:00.000Z",
+        "locations": [
+          "codex-probe.jsonl:1"
+        ],
+        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface."
+      }
+    },
+    "adjust-recommendation": {
+      "status": "supported",
+      "clientVersion": "synthetic-1",
+      "surface": "interactive-cli",
+      "checkedAt": "2026-01-01T01:02:00.000Z",
+      "documentation": [
+        "https://developers.openai.com/codex/app-server/"
+      ],
+      "reason": "Synthetic support assertion for adapter tests only; not a real client capability claim.",
+      "probe": {
+        "path": "codex-probe.jsonl",
+        "sha256": "36c1144854e83b1914b4c2472329168ccf676b322a4fca307be9cb2bfe85fdce",
+        "endedAt": "2026-01-01T01:01:00.000Z",
+        "locations": [
+          "codex-probe.jsonl:1"
+        ],
+        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface."
+      }
+    },
+    "continue-same-turn": {
+      "status": "supported",
+      "clientVersion": "synthetic-1",
+      "surface": "interactive-cli",
+      "checkedAt": "2026-01-01T01:02:00.000Z",
+      "documentation": [
+        "https://developers.openai.com/codex/app-server/"
+      ],
+      "reason": "Synthetic support assertion for adapter tests only; not a real client capability claim.",
+      "probe": {
+        "path": "codex-probe.jsonl",
+        "sha256": "36c1144854e83b1914b4c2472329168ccf676b322a4fca307be9cb2bfe85fdce",
+        "endedAt": "2026-01-01T01:01:00.000Z",
+        "locations": [
+          "codex-probe.jsonl:1"
+        ],
+        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface."
+      }
+    }
+  },
+  "selection": {
+    "question": 1,
+    "preparation": 2,
+    "answer": 3,
+    "revisedRecommendation": 4,
+    "continuation": 5
+  },
+  "reviews": [
+    {
+      "itemId": "async-question.content",
+      "status": "holds",
+      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
+      "by": "fixture-review-1",
+      "role": "review"
+    },
+    {
+      "itemId": "async-question.content",
+      "status": "holds",
+      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
+      "by": "fixture-review-2",
+      "role": "review"
+    },
+    {
+      "itemId": "prepare-while-waiting.content",
+      "status": "holds",
+      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
+      "by": "fixture-review-1",
+      "role": "review"
+    },
+    {
+      "itemId": "prepare-while-waiting.content",
+      "status": "holds",
+      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
+      "by": "fixture-review-2",
+      "role": "review"
+    },
+    {
+      "itemId": "adjust-recommendation.content",
+      "status": "holds",
+      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
+      "by": "fixture-review-1",
+      "role": "review"
+    },
+    {
+      "itemId": "adjust-recommendation.content",
+      "status": "holds",
+      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
+      "by": "fixture-review-2",
+      "role": "review"
+    },
+    {
+      "itemId": "continue-same-turn.content",
+      "status": "holds",
+      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
+      "by": "fixture-review-1",
+      "role": "review"
+    },
+    {
+      "itemId": "continue-same-turn.content",
+      "status": "holds",
+      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
+      "by": "fixture-review-2",
+      "role": "review"
+    }
+  ],
+  "verdictVersion": 1
+}

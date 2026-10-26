@@ -1,0 +1,82 @@
+{
+  "schema": "wayfinder-behaviour-attempt/1",
+  "attemptId": "synthetic-codex-1",
+  "batchId": "synthetic-fixture",
+  "subject": {
+    "kind": "scenario",
+    "id": "W7",
+    "version": 1
+  },
+  "entry": "mcp-only",
+  "combination": {
+    "harness": "codex",
+    "requestedModel": "synthetic-model",
+    "visibleModel": {
+      "known": false,
+      "reason": "pending import"
+    },
+    "effort": {
+      "known": false,
+      "reason": "pending import"
+    }
+  },
+  "client": {
+    "version": {
+      "known": false,
+      "reason": "pending import"
+    },
+    "surface": {
+      "known": true,
+      "value": "interactive-cli"
+    }
+  },
+  "service": {
+    "commit": "synthetic-commit",
+    "series": "release",
+    "version": "2.0.2"
+  },
+  "given": [],
+  "run": {
+    "startedAt": "2026-01-01T02:00:00.000Z",
+    "endedAt": "2026-01-01T02:01:00.000Z",
+    "completeness": "complete"
+  },
+  "controller": {
+    "clientId": "synthetic-controller"
+  },
+  "baitClientIds": [],
+  "sessions": [
+    {
+      "label": "A",
+      "nativeId": {
+        "known": false,
+        "reason": "pending import"
+      },
+      "clientId": "synthetic-codex-credential",
+      "mcpSessionIds": {
+        "known": false,
+        "reason": "fixture has no service"
+      },
+      "turns": []
+    }
+  ],
+  "events": [],
+  "maps": [],
+  "receipts": [],
+  "usage": {
+    "known": false,
+    "reason": "synthetic fixture"
+  },
+  "raw": {
+    "path": ".",
+    "files": [
+      "codex-supported.jsonl"
+    ]
+  },
+  "missing": [
+    "given",
+    "maps",
+    "usage",
+    "sessions.mcpSessionIds"
+  ]
+}

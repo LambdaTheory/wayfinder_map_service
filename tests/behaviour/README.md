@@ -16,6 +16,7 @@ Nothing here starts a service or a model. Runs that spend model quota happen onl
 | `upgrade-checks.ts` | Upgrade compatibility checks, listed apart from the 26 |
 | `seeds/` | Seed Maps; `f11.json` is the redacted capture of a real Map |
 | `fixtures/` | Working-directory fixtures copied into the agent's directory |
+| `interactive/` | Manual Codex/Claude interactive acceptance, native import and fixed fixtures (B09b); see its [runbook](interactive/README.md) |
 | `runner/` | The runner: isolated service, Controller, Codex Driver, normalizer (B02a) |
 | `verdict.ts`, `report.ts` | Verdicts of Attempts and cells, and the comparison report (B03a) |
 
