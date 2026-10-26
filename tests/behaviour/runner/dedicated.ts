@@ -48,7 +48,7 @@ export interface DedicatedSetup {
 }
 
 export function prepareDedicated(session: CodexSession, service: IsolatedService,
-  controller: Credential, options: CodexOptions, layout: SandboxLayout, workdir: string): DedicatedSetup {
+  controller: Credential, options: CodexOptions, layout: SandboxLayout, workdir: string, proxyEnv: NodeJS.ProcessEnv = {}): DedicatedSetup {
   if (!options.sandbox) throw new IsolationError('Dedicated Entry requires the allowlist sandbox');
   if (reservedPorts.includes(service.port)) throw new IsolationError('Dedicated Entry refuses an everyday port');
   const serviceDir = dirname(service.protocolReport);
@@ -121,6 +121,7 @@ os.execvpe(command[0], command, env)
   const profile = writeProfile(control, session, workdir, binary, {
     readOnlyRoots: [checkout, launcherDir, shimDir], mutableReadOnlyFiles: [sourceAuth],
     denyWriteRoots: protectedTrees, denyWritePaths: [join(outputs, 'mcp'), join(outputs, 'matt')], localPorts: [service.port],
+    proxyEnv,
   });
   const installedFiles = new Map<string, string>();
   const expectedFiles: Record<string, string> = {
@@ -151,6 +152,7 @@ os.execvpe(command[0], command, env)
   return { state, skill, outputs, capturePath, control, launcherHome, profile, launcher, checkout, shimDir, codexHome: state, sourceAuth, verify,
     controlEvidence: { profile: readFileSync(profile.path, 'utf8'), shim, manifest: JSON.stringify(profile) }, env: {
       PATH: `${shimDir}:${process.env.PATH ?? '/usr/bin:/bin'}`, HOME: launcherHome, TMPDIR: join(session.home, 'tmp'), LANG: 'en_US.UTF-8',
+      ...profile.proxyEnvironment,
       WAYFINDER_AGENT_STATE_ROOT: root, WAYFINDER_AGENT_SERVICE_DIR: serviceDir, WAYFINDER_AGENT_OUTPUTS: outputs,
       WAYFINDER_AGENT_PORT: String(service.port), WAYFINDER_AGENT_DATABASE: service.databasePath,
       WAYFINDER_AGENT_CHECKOUT: checkout, WAYFINDER_AGENT_USAGE: 'test',

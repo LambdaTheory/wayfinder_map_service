@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { attemptSchema, classifyResult, leaks, redact } from '../evidence.ts';
+import { attemptSchema, classifyResult, leaks, redact, requiredFields } from '../evidence.ts';
 import type { AttemptRecord, Completeness, Entry, EventRecord, Field, GivenRules, SessionRecord } from '../evidence.ts';
 import { ProxyError, proxyEnvironment, proxyRouting, proxySecrets, proxySummary } from '../proxy.ts';
 import { library } from '../library.ts';
@@ -223,7 +223,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
     const workdir = prepareWorkdir(scratch, s.seed.fixtures, fixturesRoot);
     const nativeOptions = { ...o.codex, bin: prepareClient(controlDir, o.codex.bin) };
     if (entry === 'dedicated') {
-      dedicated = prepareDedicated(sessions[0]!.codex, service, controller, nativeOptions, layout, workdir);
+      dedicated = prepareDedicated(sessions[0]!.codex, service, controller, nativeOptions, layout, workdir, proxies.environment);
       sessions[0]!.codex.codexHome = dedicated.codexHome;
       profiles.set(sessions[0]!.codex.home, dedicated.profile);
     }
@@ -496,8 +496,15 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   record.missing = [...new Set([...missing, ...record.receipts.flatMap((r, i) => r.outcome.kind === 'unknown' ? [`receipts[${i}].outcome`] : []), ...unknownFields.filter(([, f]) => !f.known).map(([path]) => path)])];
   const isolation: AttemptIsolation = { ...(entry === 'dedicated' ? { dedicatedServiceRemoved: !existsSync(serviceDir), launcherInvocations: launches.length } : {}), sandbox: o.codex.sandbox, serviceStopped: stopped ?? null, servedOwnDatabase: service ? opened.has(service.databasePath) : false,
     touchedEverydayDatabase: touchedEverydayDatabase([...opened]), scratchRemoved: !existsSync(scratch), controlDirectoryRemoved: !existsSync(controlDir), databaseDirectoryRemoved: databaseCleanup.removed, retainedDatabase: databaseCleanup.retained, failures: isolationFailures, clientSkills: skills, attribution: attribution(record) };
-  const text = tilde(redact(JSON.stringify({ ...record, isolation }, null, 1), secrets));
-  if (leaks(text, secrets).length) return { attemptId: p.attemptId, scenario: s.id, completeness: 'driver-failed', detail: 'a credential survived redaction; record withheld' };
+  let text: string;
+  try {
+    text = tilde(redact(JSON.stringify({ ...record, isolation }, null, 1), secrets));
+    const saved = JSON.parse(text) as AttemptRecord;
+    const missingField = requiredFields.some(path => path.split('.').reduce<unknown>((value, key) =>
+      value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined, saved) === undefined);
+    if (missingField || saved.schema !== attemptSchema || saved.run.completeness !== completeness || leaks(text, secrets).length)
+      throw new Error('invalid scrubbed evidence');
+  } catch { return { attemptId: p.attemptId, scenario: s.id, completeness: 'driver-failed', detail: 'redaction could not preserve safe evidence; record withheld' }; }
   writeFileSync(join(dir, 'attempt.json'), text, { mode: 0o600 });
   return { attemptId: p.attemptId, scenario: s.id, completeness, ...(detail ? { detail } : {}), record: join(p.attemptId, 'attempt.json') };
 }

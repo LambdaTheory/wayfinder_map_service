@@ -232,10 +232,37 @@ export const requiredFields = ['subject.kind', 'subject.id', 'subject.version', 
 const regexLiteral = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const knownPlaceholders = (secrets: Record<string, string>) => Object.entries(secrets)
   .filter(([, value]) => value).map(([name]) => regexLiteral(`<${name}>`)).join('|');
+const protocolKeys = new Set(['schema', 'role', 'kind', 'actor', 'completeness', 'entry', 'harness', 'type', 'status', 'series', 'phase', 'surface']);
+interface TextContext { structured: boolean; key?: string }
 
-export function redact(text: string, secrets: Record<string, string>): string {
+/** JSON/JSONL is parsed first: keys, numbers and booleans never enter a text scrubber. */
+export function mapTextValues(text: string, scrub: (value: string, context: TextContext) => string): string {
+  const visit = (value: unknown, key?: string): unknown => {
+    if (typeof value === 'string') {
+      const changed = scrub(value, { structured: true, ...(key === undefined ? {} : { key }) });
+      if (key && protocolKeys.has(key) && changed !== value) throw new Error('redaction would change a protocol value; record withheld');
+      return changed;
+    }
+    if (Array.isArray(value)) return value.map(item => visit(item, key));
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, visit(v, k)]));
+    return value;
+  };
+  const parse = (source: string): { value: unknown } | null => {
+    if (!/^[\s]*[\[{]/.test(source)) return null;
+    try { return { value: JSON.parse(source) }; } catch { return null; }
+  };
+  const document = parse(text);
+  if (document) return JSON.stringify(visit(document.value), null, text.trim().includes('\n') ? 2 : undefined) + (text.endsWith('\n') ? '\n' : '');
+  return text.split('\n').map(line => {
+    const json = parse(line);
+    return json ? JSON.stringify(visit(json.value)) : scrub(line, { structured: false });
+  }).join('\n');
+}
+
+function scrubCredentials(text: string, secrets: Record<string, string>, found: Set<string>, parseJson = true): string {
   const entries = Object.entries(secrets).filter(([, value]) => value).sort((a, b) => b[1].length - a[1].length);
   if (!entries.length) return text;
+  const placeholders = knownPlaceholders(secrets);
   const patterns = entries.map(([name, secret]) => {
     if (name === 'bait-address') {
       const port = new URL(secret).port;
@@ -243,17 +270,42 @@ export function redact(text: string, secrets: Record<string, string>): string {
     }
     return `(${regexLiteral(secret)})`;
   });
-  // One pass, longest values first; neither generated nor previously known placeholders are scanned again.
-  const pattern = new RegExp(`(${knownPlaceholders(secrets)})|${patterns.join('|')}`, 'g');
-  return text.replace(pattern, (match: string, ...captures: unknown[]) => {
+  const pattern = new RegExp(`(${placeholders})|${patterns.join('|')}`, 'g');
+  const credentialOnly = new RegExp(`(?:${placeholders}|${entries.map(([, value]) => regexLiteral(value)).join('|')})`, 'g');
+  const scrub = (value: string, context: TextContext) => value.replace(pattern, (match: string, ...captures: unknown[]) => {
     if (captures[0] !== undefined) return match;
-    const index = captures.slice(1, entries.length + 1).findIndex(value => value !== undefined);
-    return `<${entries[index]![0]}>`;
+    const index = captures.slice(1, entries.length + 1).findIndex(part => part !== undefined);
+    const [name, secret] = entries[index]!;
+    if (/^proxy-.*-(?:username|password)(?:-|$)/.test(name)) {
+      const offset = captures[entries.length + 1] as number;
+      const key = context.key ?? '';
+      const credentialField = /^(?:proxy[_-]?)?(?:username|password|userinfo|user|pass)$/i.test(key);
+      const prose = !context.structured || /^(?:text|content|message|input|output|stdout|stderr|detail|reason|command|prompt|summary|description)$/.test(key);
+      const line = value.slice(value.lastIndexOf('\n', offset - 1) + 1, value.indexOf('\n', offset) < 0 ? undefined : value.indexOf('\n', offset));
+      const isolatedEcho = prose && !line.replace(credentialOnly, '').trim();
+      const labelled = /(?:proxy[-_ ]?)?(?:username|password|userinfo|user|pass)\s*[:=]\s*["']?$/i.test(value.slice(0, offset));
+      // Common words in prose and protocol values are not evidence of a credential echo.
+      if (!credentialField && !labelled && !isolatedEcho && !(prose && secret.length >= 8)) return match;
+    }
+    found.add(name);
+    return `<${name}>`;
   });
+  return parseJson ? mapTextValues(text, scrub) : scrub(text, { structured: false });
 }
 
+export function redact(text: string, secrets: Record<string, string>): string {
+  return scrubCredentials(text, secrets, new Set());
+}
+
+/** Text artifacts use UTF-8/structured scrubbing; opaque binary bytes never pass through JSON decoding. */
+export function redactBytes(bytes: Buffer, secrets: Record<string, string>): Buffer {
+  const text = bytes.toString('utf8');
+  if (Buffer.from(text).equals(bytes)) return Buffer.from(redact(text, secrets));
+  const byteSecrets = Object.fromEntries(Object.entries(secrets).map(([name, value]) => [name, Buffer.from(value).toString('latin1')]));
+  return Buffer.from(scrubCredentials(bytes.toString('latin1'), byteSecrets, new Set(), false), 'latin1');
+}
+
+/** Uses the same credential contexts as redaction; ordinary keys/words are not leak evidence. */
 export function leaks(text: string, secrets: Record<string, string>): string[] {
-  const placeholders = knownPlaceholders(secrets);
-  const unmasked = placeholders ? text.replace(new RegExp(placeholders, 'g'), '') : text;
-  return Object.entries(secrets).filter(([, secret]) => secret && unmasked.includes(secret)).map(([name]) => name);
+  const found = new Set<string>(); scrubCredentials(text, secrets, found); return [...found];
 }

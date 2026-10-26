@@ -130,7 +130,8 @@ export class CliReviewDriver implements ReviewDriver {
     if (process.platform !== 'darwin') throw new Error('CLI review isolation is implemented for macOS only');
     const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'wayfinder-review-')));
     try {
-      const proxies = proxyRouting(proxyEnvironment(target.cli === 'claude' ? this.subscriptionHome : null, process.env));
+      // B03b retains #99's approved route for both reviewers; tested Codex clients select terminal-only elsewhere.
+      const proxies = proxyRouting(proxyEnvironment(this.subscriptionHome, process.env));
       const work = join(scratch, 'work'); const runtime = join(scratch, 'runtime');
       mkdirSync(work); mkdirSync(runtime, { mode: 0o700 });
       const resolved = spawnSync('/usr/bin/which', [target.cli], { encoding: 'utf8' }).stdout?.trim();

@@ -105,7 +105,7 @@ socket.on('error', error => { console.error(error.code); process.exitCode = 1; }
       expect(result).toMatchObject({ available: false, detail: 'Proxy must use localhost or 127.0.0.1' });
     } finally { await proxy.close(); await neighbour.close(); }
   });
-  test.each(['claude'] as const)('%s refuses reserved ports and malformed settings before launching', async cli => {
+  test.each(['claude', 'codex'] as const)('%s refuses reserved ports and malformed settings before launching', async cli => {
     clearProxyEnvironment(); vi.stubEnv('PATH', '/usr/bin:/bin'); // No native model executable can be found.
     const malformed = home(); writeFileSync(join(malformed, '.claude/settings.json'), '{synthetic-private-content');
     for (const [subscriptionHome, detail] of [
@@ -127,7 +127,7 @@ socket.on('error', error => { console.error(error.code); process.exitCode = 1; }
     try {
       clearProxyEnvironment();
       const proxyUrl = `http://${hostname}:${proxy.port}`;
-      const enabled = source !== 'none' && !(cli === 'codex' && source === 'settings');
+      const enabled = source !== 'none';
       const configured = source === 'none' ? {} : Object.fromEntries(proxyVariables.map(key => [key, key.toLowerCase() === 'no_proxy' ? 'fixture.invalid' : proxyUrl]));
       const expected = !enabled ? {} : Object.fromEntries(proxyVariables.map(key => [key, key.toLowerCase() === 'no_proxy' ? 'fixture.invalid' : `http://127.0.0.1:${proxy.port}/`]));
       const subscriptionHome = home({ env: { ...(source === 'settings' ? configured : {}),
@@ -192,13 +192,13 @@ async function sendUdp(port) {
   });
 });
 
-test.skipIf(process.platform !== 'darwin')('Codex reviewer ignores malformed Claude settings inside its real sandbox', async () => {
+test.skipIf(process.platform !== 'darwin')('Codex reviewer retains the #99 malformed-settings refusal', async () => {
   clearProxyEnvironment();
   const subscriptionHome = home(); writeFileSync(join(subscriptionHome, '.claude/settings.json'), '{synthetic-invalid');
   const install = mkdtempSync(join(root, 'source-')); const binDir = join(install, 'bin'); mkdirSync(binDir);
   writeFileSync(join(binDir, 'codex'), `#!${process.execPath}\nrequire('node:assert/strict').equal(process.env.HTTPS_PROXY, undefined); console.log('Logged in using ChatGPT');\n`, { mode: 0o700 });
   vi.stubEnv('PATH', `${binDir}:/usr/bin:/bin`);
-  expect((await new CliReviewDriver(5000, subscriptionHome).checkLogin({ cli: 'codex', model: 'fixture' })).available).toBe(true);
+  expect(await new CliReviewDriver(5000, subscriptionHome).checkLogin({ cli: 'codex', model: 'fixture' })).toMatchObject({ available: false, detail: 'Proxy settings unavailable; refusing to fall back to a direct connection' });
 });
 
 test.skipIf(process.platform !== 'darwin').each([18765, 18766])('Codex reviewer refuses terminal proxy port %i before launch', async port => {
@@ -218,4 +218,52 @@ test('proxy userinfo components cannot rewrite generated redaction placeholders'
   expect(privateText(output, secrets)).toBe(output);
   // A forged known placeholder followed by a secret still has its suffix removed.
   expect(privateText('<proxy-HTTPS_PROXY>pass', secrets)).not.toMatch(/>pass$/);
+});
+
+test.each(['run', 'id', 'user', 'schema'])('private JSON/JSONL preserves structure and prose for proxy username %s', async username => {
+  const { proxySecrets } = await import('./proxy.ts');
+  const { privateText } = await import('./interactive/privacy.ts');
+  const original = { HTTPS_PROXY: `http://${username}:1@localhost:23457` };
+  const secrets = proxySecrets(original, proxyRouting(original).environment);
+  const record = { schema: 'fixture/1', run: { completeness: 'complete' }, id: 'id', seq: 1, role: 'user',
+    text: 'ordinary run id user schema text', username, password: '1', nested: [{ password: '1', enabled: true }] };
+  const safe = privateText(JSON.stringify(record) + '\n', secrets);
+  const parsed = JSON.parse(safe);
+  expect(parsed).toMatchObject({ schema: 'fixture/1', run: { completeness: 'complete' }, id: 'id', seq: 1, role: 'user', text: record.text });
+  expect(parsed.username).toMatch(/^<proxy-/); expect(parsed.password).toMatch(/^<proxy-/);
+  expect(parsed.nested[0]).toMatchObject({ password: parsed.password, enabled: true });
+  expect(safe.trim().split('\n')).toHaveLength(1); // A one-line JSONL record stays one line.
+  expect(privateText(safe, secrets)).toBe(safe);
+});
+
+test('escaped JSON, lowercase percent escapes and Proxy-Authorization Basic are scrubbed as values', async () => {
+  const { proxySecrets } = await import('./proxy.ts');
+  const { privateText } = await import('./interactive/privacy.ts');
+  const original = { HTTPS_PROXY: 'http://synthetic-user:p%40ss%3Aw%2Frd%25x%22q@localhost:23457' };
+  const secrets = proxySecrets(original, proxyRouting(original).environment);
+  const password = new URL(original.HTTPS_PROXY).password;
+  const basic = Buffer.from('synthetic-user:' + decodeURIComponent(password)).toString('base64');
+  const text = JSON.stringify({ text: decodeURIComponent(password), password }) + '\n'
+    + JSON.stringify({ text: password.replace(/%[0-9A-F]{2}/g, escape => escape.toLowerCase()) }) + '\n'
+    + `Proxy-Authorization: Basic ${basic}\n`;
+  const safe = privateText(text, secrets);
+  expect(safe).not.toContain(basic); expect(safe).not.toContain('p%40ss'); expect(safe).not.toContain('p@ss');
+  expect(JSON.parse(safe.split('\n')[0]!)).toHaveProperty('password');
+});
+
+test('scrubbing refuses a protocol-value collision instead of publishing unusable evidence', async () => {
+  const { privateText } = await import('./interactive/privacy.ts');
+  expect(() => privateText(JSON.stringify({ run: { completeness: 'complete' } }), { token: 'complete' }))
+    .toThrow('redaction would change a protocol value; record withheld');
+});
+
+test('structured scrubbing preserves protocol strings and still removes unknown login fields', async () => {
+  const { proxySecrets } = await import('./proxy.ts');
+  const { privateText } = await import('./interactive/privacy.ts');
+  const original = { HTTPS_PROXY: 'http://toolsOnly:complete@localhost:23457' };
+  const secrets = proxySecrets(original, proxyRouting(original).environment);
+  const safe = JSON.parse(privateText(JSON.stringify({ compatibilityMode: 'toolsOnly', run: { completeness: 'complete' },
+    access_token: 'synthetic-unregistered-login', username: 'toolsOnly', password: 'complete' }), secrets));
+  expect(safe).toMatchObject({ compatibilityMode: 'toolsOnly', run: { completeness: 'complete' }, access_token: '<credential>' });
+  expect(safe.username).toMatch(/^<proxy-/); expect(safe.password).toMatch(/^<proxy-/);
 });

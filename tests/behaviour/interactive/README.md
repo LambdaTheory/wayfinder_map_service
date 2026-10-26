@@ -117,6 +117,8 @@ The shared B03 review gate also requires native reading IDs, explained source qu
 
 All host and offline-import outputs use the scrubber, and known secrets keep the same placeholder in headers and other references. This is not proof of complete credential removal: the client can read its own subscription credentials, and an unfamiliar bare login value printed without a recognizable key/prefix may survive generic scrubbing. The worker never opens real login contents to build a secret list. Keep raw evidence private; the coordinator must check it before any export and must not treat `leaks()` (which checks known Wayfinder/proxy values) as an exhaustive login audit.
 
+JSON/JSONL scrubbing preserves keys, numbers, booleans and protocol fields; text values are escaped again when serialized. Proxy components are removed from credential fields, labelled text and standalone echoes, with opaque components also scrubbed in free text. Common short words in prose are preserved: their appearance alone cannot establish a credential leak. This is contextual scrubbing, not proof that arbitrary transformations or unknown fields are safe.
+
 Only complete named placeholders survive generic Bearer/token-field scrubbing; a placeholder prefix cannot hide an unknown credential suffix. HTTP(S) proxy URLs remain private values for redaction, while `NO_PROXY` and `no_proxy` are routing lists, not credentials: their loopback host names stay readable in captured MCP URLs.
 
 Rules seen only by the Controller are never claimed to be shown to the model. Missing usage, file/delegation classes or process evidence remain explicit. Native formats and subscription operation still need the approved real probes; synthetic fixtures prove only the testing tool. Validate without models:

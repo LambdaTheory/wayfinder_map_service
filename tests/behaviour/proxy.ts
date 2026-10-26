@@ -6,7 +6,7 @@ export class ProxyError extends Error {}
 
 export const proxyVariables = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] as const;
 
-/** null selects terminal-only routing (Codex); Claude additionally supplies its settings HOME. */
+/** null selects tested Codex clients' terminal-only route; Claude and both B03b reviewers supply settings HOME. */
 export function proxyEnvironment(subscriptionHome: string | null, inherited: NodeJS.ProcessEnv): Record<string, string> {
   let settings: { env?: Record<string, unknown> } = {};
   try {
@@ -73,14 +73,19 @@ export function proxySecrets(original: NodeJS.ProcessEnv, normalized: NodeJS.Pro
       const label = `proxy-${key}${suffix}`;
       add(label, value);
       const url = new URL(value); // Callers have already validated the selected routing.
-      const userinfo = url.username + (url.password ? `:${url.password}` : '');
+      const userinfo = url.password ? `${url.username}:${url.password}` : '';
       for (const [field, part] of [['userinfo', userinfo], ['username', url.username], ['password', url.password]]) {
         add(`${label}-${field}`, part);
+        add(`${label}-${field}-lowercase-escapes`, part?.replace(/%[0-9A-F]{2}/g, escape => escape.toLowerCase()));
         try {
           const decoded = decodeURIComponent(part!);
           add(`${label}-${field}-decoded`, decoded);
           add(`${label}-${field}-encoded`, encodeURIComponent(decoded));
         } catch { /* An invalid percent escape has only its literal representation. */ }
+      }
+      if (userinfo) {
+        try { add(`${label}-basic`, `Basic ${Buffer.from(decodeURIComponent(userinfo)).toString('base64')}`); }
+        catch { /* Invalid escapes are already registered literally. */ }
       }
     }
   }

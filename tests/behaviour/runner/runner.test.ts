@@ -201,13 +201,13 @@ describe('inside the sandbox', () => {
   }, 60_000);
 });
 
-test.skipIf(!sandboxAvailable).each(['plain', 'encoded'])('an entire Batch forwards normalized proxies and scrubs URL and userinfo echo forms (%s)', async style => {
+test.skipIf(!sandboxAvailable).each(['plain', 'encoded', 'run', 'id', 'user', 'schema', 'dedicated'])('an entire Batch forwards normalized proxies and scrubs URL and userinfo echo forms (%s)', async style => {
   let connections = 0;
   const proxy = createServer(socket => { connections++; socket.end('fixture'); });
   const port = await freePort();
   await new Promise<void>(resolve => proxy.listen(port, '127.0.0.1', resolve));
-  const user = style === 'plain' ? 'synthetic-user' : 'synthetic%20user';
-  const password = style === 'plain' ? 'synthetic-password' : 'synthetic%20password';
+  const user = style === 'plain' ? 'synthetic-user' : style === 'encoded' ? 'synthetic%20user' : style;
+  const password = style === 'plain' ? 'synthetic-password' : style === 'encoded' ? 'synthetic%20password' : '1';
   const bin = join(scratch, 'proxy-client.mjs');
   writeFileSync(bin, readFileSync(fakeCodex, 'utf8').replace('const url =', `
 const proxy = new URL(process.env.HTTPS_PROXY);
@@ -218,6 +218,7 @@ await new Promise((resolve, reject) => {
     socket.once('end', resolve); socket.once('error', reject);
   });
 });
+console.error('ordinary run id user schema text');
 console.error(process.env.HTTPS_PROXY);
 console.error(process.env.HTTPS_PROXY.slice(0, -1));
 console.error('CONNECT via ' + process.env.HTTPS_PROXY.slice(0, -1) + ' failed');
@@ -225,7 +226,7 @@ for (const value of [proxy.username + ':' + proxy.password, proxy.username, prox
 const url =`), { mode: 0o700 });
   const out = join(records, 'proxy-batch-' + style);
   try {
-    const result = await runBatch({ batchId: 'T-proxy', scenarios: ['S0b'], count: 1, ceiling: 1, out,
+    const result = await runBatch({ entry: style === 'dedicated' ? 'dedicated' : 'mcp-only', batchId: 'T-proxy', scenarios: ['S0b'], count: 1, ceiling: 1, out,
       codex: { model: 'fake-model', effort: 'low', bin, sandbox: true, timeoutMs: 10_000 }, scratchRoot: scratch, ...clientState,
       proxyEnv: { HTTPS_PROXY: `http://${user}:${password}@localhost:${port}`, NO_PROXY: '127.0.0.1,localhost' } });
     expect(result.refusals).toEqual([]); expect(result.outcomes[0]?.completeness).toBe('complete');
@@ -233,9 +234,19 @@ const url =`), { mode: 0o700 });
     const metadata = { enabled: true, variables: ['HTTPS_PROXY', 'NO_PROXY'] };
     expect(JSON.parse(readFileSync(join(out, 'batch.json'), 'utf8')).proxy).toEqual(metadata);
     const attempt = readFileSync(join(out, 'S0b-1/attempt.json'), 'utf8');
+    const record = JSON.parse(attempt) as AttemptRecord;
+    expect(record.run.completeness).toBe('complete');
+    expect(record.schema).toBe('wayfinder-behaviour-attempt/1');
+    expect(record.events.some(e => e.kind === 'message' && e.role === 'user')).toBe(true);
+    const { buildReport } = await import('../report.ts');
+    expect(buildReport([out]).cells[0]!.key.scenario).toBe('S0b');
+    expect(readFileSync(join(out, 'S0b-1/raw/turn-0-A.stderr.txt'), 'utf8')).toContain('ordinary run id user schema text');
     expect(JSON.parse(attempt).events.filter((e: { action: string }) => e.action === 'isolation-check')[0].detail.proxy).toEqual(metadata);
     for (const text of [attempt, ...[0, 1].map(turn => readFileSync(join(out, `S0b-1/raw/turn-${turn}-A.stderr.txt`), 'utf8'))]) {
-      for (const secret of [user, password, decodeURIComponent(user), decodeURIComponent(password)]) expect(text).not.toContain(secret);
+      for (const secret of [user, password, decodeURIComponent(user), decodeURIComponent(password)]) {
+        if (style === 'plain' || style === 'encoded') expect(text).not.toContain(secret);
+        else expect(text.split('\n')).not.toContain(secret);
+      }
     }
   } finally { await new Promise<void>(resolve => proxy.close(() => resolve())); }
 }, 30_000);
@@ -248,13 +259,13 @@ test('a Batch refuses invalid proxy settings before creating output or a service
   expect(existsSync(out)).toBe(false);
 });
 
-test.each(['settings-only', 'malformed-settings', 'invalid-terminal'])('Codex CLI selects terminal proxies only and prints safe refusals (%s)', mode => {
+test.each(['mcp-only', 'dedicated'].flatMap(entry => ['settings-only', 'malformed-settings', 'invalid-terminal'].map(mode => ({ entry, mode }))))('Codex $entry CLI selects terminal proxies only and prints safe refusals ($mode)', ({ entry, mode }) => {
   const home = mkdtempSync(join(scratch, 'cli-home-'));
   mkdirSync(join(home, '.codex')); writeFileSync(join(home, '.codex/auth.json'), '{}');
   mkdirSync(join(home, '.claude')); writeFileSync(join(home, '.claude/settings.json'), mode === 'malformed-settings'
     ? '{synthetic-private' : JSON.stringify({ env: { HTTPS_PROXY: 'http://localhost:18766' } }));
   const result = spawnSync(process.execPath, [fileURLToPath(new URL('./run.ts', import.meta.url)), '--batch', 'source-test',
-    '--scenarios', 'missing', '--ceiling', '1', '--codex', fakeCodex], { encoding: 'utf8',
+    '--entry', entry, '--scenarios', 'missing', '--ceiling', '1', '--codex', fakeCodex], { encoding: 'utf8',
     env: { PATH: process.env.PATH, HOME: home, ...(mode === 'invalid-terminal' ? { HTTPS_PROXY: 'http://localhost:18766' } : {}) } });
   expect(result.status).toBe(1);
   expect(result.stderr).toBe(mode === 'invalid-terminal' ? 'refused: Proxy uses a reserved Wayfinder port\n' : 'refused: missing: no such Scenario\n');
