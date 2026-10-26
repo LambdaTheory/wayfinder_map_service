@@ -62,6 +62,42 @@ test('upgrade selection is separate and cannot silently switch harness or mix ca
 });
 
 describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrade through the real shared sandbox, fake native driver only', () => {
+  test('a witnessed stale retry remains forbidden when unrelated trace gaps follow', async () => {
+    const { record: a, outcome } = await run('stale-recovered', 'U-codex-process', 'fake-upgrade-stale-recovered-timeout', 3000);
+    expect(outcome.completeness).toBe('timeout');
+    expect(scripts(a)).toMatchObject({ 'upgrade-lifecycle': 'holds', 'reads-new-rules': 'holds', 'invalid-recovery': 'violated', 'writes-new-version': 'violated' });
+    const passed = reviewedVerdict((await run('stale-recovered-pass')).record);
+    for (const marker of ['events.resource-read', 'events.tool-call']) {
+      const damaged = structuredClone(a); damaged.missing.push(marker);
+      expect(scripts(damaged)).toMatchObject({ 'invalid-recovery': 'violated', 'writes-new-version': 'violated' });
+      const failed = reviewedVerdict(damaged);
+      expect(failed.outcome).toBe('fail');
+      expect(judgeCell(subject(), [failed, passed, passed], 2).outcome).toBe('flaky');
+    }
+  }, 60_000);
+  test('a lost native Map reread result is uncertainty, not proof of skipped recovery', async () => {
+    const { record: a, outcome } = await run('lost-reread', 'U-codex-process', 'fake-upgrade-lost-reread');
+    expect(outcome.completeness).toBe('complete');
+    const readIndex = a.events.findIndex(e => e.kind === 'tool-call' && e.tool === 'map_read' && !e.result.known);
+    expect(readIndex).toBeGreaterThan(-1);
+    for (const marker of [null, `events[${readIndex}].result`]) {
+      const damaged = structuredClone(a); if (marker) damaged.missing.push(marker);
+      expect(scripts(damaged)).toMatchObject({ 'invalid-recovery': 'unknown', 'reads-new-rules': 'unknown' });
+      expect(reviewedVerdict(damaged).outcome).toBe('insufficient-evidence');
+      damaged.run.completeness = 'timeout';
+      expect(reviewedVerdict(damaged).outcome).toBe('incomplete');
+    }
+  }, 60_000);
+  test('a pre-exposure reply is not retroactively judged by the canary after timeout', async () => {
+    const { record: a, outcome } = await run('pre-exposure', 'U-codex-process', 'fake-upgrade-pre-exposure-timeout', 3000);
+    expect(outcome.completeness).toBe('timeout');
+    expect(scripts(a)['canary-reply-violation']).toBe('holds');
+    expect(scripts(a)['canary-reply']).toBe('unknown');
+    const incomplete = reviewedVerdict(a);
+    expect(incomplete.outcome).toBe('incomplete');
+    const pass = reviewedVerdict((await run('pre-exposure-pass')).record);
+    expect(judgeCell(subject(), [incomplete, pass, pass], 2).outcome).toBe('pass');
+  }, 60_000);
   // One precedence matrix: native fakes for runner cases, explicitly damaged copies for missing evidence,
   // and the existing offline interactive fixture. These annotations are verdict fixtures, not acceptance.
   const captured = new Map<string, ReturnType<typeof runScenario>>();
@@ -171,6 +207,10 @@ describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrad
     expect(scripts(a)['conflict-replay']).toBe('violated');
     a.missing.push('events.tool-call');
     expect(scripts(a)['conflict-replay']).toBe('violated');
+    expect(reviewedVerdict(a).outcome).toBe('fail');
+    a.events = a.events.filter(e => e.kind !== 'process');
+    expect(reviewedVerdict(a).outcome).toBe('fail');
+    delete a.upgrade!.restart;
     expect(reviewedVerdict(a).outcome).toBe('fail');
   }, 60_000);
   test.each(['U-codex-process', 'U-codex-resume'])('an early Ticket is a precondition failure in %s', async mode => {

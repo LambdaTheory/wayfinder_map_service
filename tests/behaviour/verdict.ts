@@ -63,12 +63,12 @@ export interface JudgeOptions {
 
 /**
  * Verdict order (R4/R9):
- * 1. Prove the required events/preconditions first; do not judge dependent items when they are unmet or unknown.
- *    Proven absence / precondition-not-met is incomplete; unknown prerequisites in a complete run are insufficient evidence.
- * 2. With prerequisites met, a present-evidence must-not or explicitly observed script expectation fails, even after timeout.
- *    A valid review of a must-not proves the forbidden action; a reviewed expectation only says the desired outcome did not occur.
- * 3. Otherwise an unfinished run is incomplete. Only a complete, exercised run can fail on absence or reviewed expectations.
- * Missing evidence never proves a violation and never erases a violation proved by the remaining evidence.
+ * 1. A must-not proved by present evidence (script or valid R4 review) fails regardless of prerequisites or timeout, as on main.
+ * 2. Missing records never prove a violation. Each check must distinguish a positive contradiction from an absent action.
+ * 3. Expectations, quality and absence-only must-nots require their prerequisites: unmet / precondition-not-met is incomplete;
+ *    unknown prerequisites in a complete run are insufficient evidence. Once met, observed expectation violations survive timeout.
+ * 4. Phase-specific checks guard their own applicability, e.g. canary replies only after the client sees the new rule.
+ * 5. Later gaps never erase a proved violation. Otherwise interruption is incomplete; reviewed expectation absence needs completion.
  */
 export function judgeAttempt(s: Scenario, record: AttemptRecord | null, opts: JudgeOptions = {}): AttemptVerdict {
   const reviews = [...(record ? savedReviews(record) : []), ...(opts.reviews ?? [])];
@@ -86,7 +86,10 @@ export function judgeAttempt(s: Scenario, record: AttemptRecord | null, opts: Ju
   const dependent = (i: Item): ItemResult => unmet || unconfirmed
     ? { id: i.id, judge: i.judge, status: 'unknown', reason: 'Not judged: required event or precondition is unmet or unconfirmed.', evidence: [] }
     : judgeItem(i, record, reviews);
-  const mustNot = items.mustNot.map(dependent);
+  const mustNot = items.mustNot.map(i => {
+    const result = judgeItem(i, record, reviews);
+    return result.absenceOnly && (unmet || unconfirmed) ? dependent(i) : result;
+  });
   const quality = items.quality.map(dependent);
   const expect: GroupResult[] = items.expect.map(g => {
     const items = g.anyOf.map(dependent);
@@ -99,18 +102,18 @@ export function judgeAttempt(s: Scenario, record: AttemptRecord | null, opts: Ju
   const violations = mustNot.filter(i => i.status === 'violated' && !i.absenceOnly);
   const observedExpectations = expect.filter(g => g.status === 'violated' && g.items.every(i => i.judge === 'script' && i.observed && !i.absenceOnly));
   let outcome: AttemptVerdict['outcome'];
-  if (unmet) {
+  if (violations.length || observedExpectations.length) {
+    outcome = 'fail';
+    reasons.push(...violations.map(i => `must-not ${i.id}: ${i.reason}`));
+    reasons.push(...observedExpectations.map(g => `expectation ${g.id} not met`));
+    if (record.run.completeness !== 'complete') reasons.push(`run ${record.run.completeness}`);
+  } else if (unmet) {
     outcome = 'incomplete';
     reasons.push(...required.filter(i => i.status === 'violated').map(i => `required event ${i.id} did not happen`));
     if (record.run.completeness !== 'complete') reasons.push(`run ${record.run.completeness}`);
   } else if (unconfirmed) {
     outcome = record.run.completeness === 'complete' ? 'insufficient-evidence' : 'incomplete';
     reasons.push(...listOpen(required, 'required event'));
-    if (record.run.completeness !== 'complete') reasons.push(`run ${record.run.completeness}`);
-  } else if (violations.length || observedExpectations.length) {
-    outcome = 'fail';
-    reasons.push(...violations.map(i => `must-not ${i.id}: ${i.reason}`));
-    reasons.push(...observedExpectations.map(g => `expectation ${g.id} not met`));
     if (record.run.completeness !== 'complete') reasons.push(`run ${record.run.completeness}`);
   } else if (record.run.completeness !== 'complete') { outcome = 'incomplete'; reasons.push(`run ${record.run.completeness}${record.run.detail ? `: ${record.run.detail}` : ''}`); }
   else if (mustNot.some(i => i.status === 'violated') || expect.some(g => g.status === 'violated')) {

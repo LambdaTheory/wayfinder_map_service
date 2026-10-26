@@ -1,4 +1,4 @@
-// Strict Codex upgrade assertions (definition v6). Older Attempts are not re-judged.
+// Strict Codex upgrade assertions (definition v7). Older Attempts are not re-judged.
 import { isDeepStrictEqual } from 'node:util';
 import { holds, unknown, violated, notObserved, writeCalls, resultIs, at } from './checks.ts';
 import type { ScriptCheck } from './scenario.ts';
@@ -138,10 +138,10 @@ export const replyCanary: ScriptCheck = a => {
   if (!restart) return unknown('no restart boundary');
   const final = a.events.findLast(e => e.kind === 'message' && e.actor === 'agent' && e.role === 'assistant' && e.seq > restart.seq);
   if (!final || final.kind !== 'message') return unknown('no final native reply');
-  if (!replyPattern.test(final.text)) return violated('final reply did not follow the canary instructions rule', [at(a, final)]);
   const source = a.given.findLast(g => g.fromSeq <= final.seq);
   if (!(source?.instructions.known && source.instructions.value.includes(replyRule))
-    && !(source?.resourceText?.known && source.resourceText.value.includes(replyRule))) return unknown('reply matched but no native evidence of the new rule');
+    && !(source?.resourceText?.known && source.resourceText.value.includes(replyRule))) return unknown('no final native reply after exposure to the canary rule');
+  if (!replyPattern.test(final.text)) return violated('final reply did not follow the canary instructions rule', [at(a, final)]);
   return holds('final reply follows the newly visible instructions rule', [at(a, final), 'given']);
 };
 

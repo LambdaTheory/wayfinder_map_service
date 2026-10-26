@@ -75,16 +75,21 @@ const write = (expectedRevision = head.revision.revision) => call('map_apply', {
 let result = await write(conflictReplay && resume ? head.revision.revision + 1 : head.revision.revision);
 if (result.code === 'version_mismatch') {
   if (model === 'fake-upgrade-stop') { say('Please refresh the tools.'); done(); process.exit(0); }
+  if (model === 'fake-upgrade-pre-exposure-timeout') say('I will read the new rules.');
   const resource = await call('read_mcp_resource', { uri: 'wayfinder://workflow/exploration' }, true);
   const text = resource.contents[0].text;
   version = /^version: (\S+)$/m.exec(text)[1];
   if (model !== 'fake-upgrade-version-only') learned = text;
-  head = await call('map_read', { mapId: 'Upgrade.Probe' });
-  if (model === 'fake-upgrade-repeat-refusal') {
+  head = await call('map_read', { mapId: 'Upgrade.Probe' }, false, model !== 'fake-upgrade-lost-reread');
+  if (model === 'fake-upgrade-repeat-refusal' || model === 'fake-upgrade-stale-recovered-timeout') {
     const current = version;
     version = /^version: (\S+)$/m.exec(init.instructions)[1];
     await write();
-    version = current; // Deliberately skip both reads after the second refusal.
+    version = current;
+    if (model === 'fake-upgrade-stale-recovered-timeout') {
+      await call('read_mcp_resource', { uri: 'wayfinder://workflow/exploration' }, true);
+      head = await call('map_read', { mapId: 'Upgrade.Probe' });
+    } // repeat-refusal deliberately skips both reads after the second refusal.
   }
   result = await write(conflictReplay ? head.revision.revision + 1 : head.revision.revision);
 }
@@ -93,7 +98,9 @@ if (conflictReplay && result.kind === 'conflict') {
   result = await write();
 }
 if (model === 'fake-upgrade-bad-reply') say('Recovered under the new rules.');
-say(`${learned.includes('LANTERN') ? 'LANTERN ' : ''}Added the probe Ticket (${result.kind}).`);
+if (model !== 'fake-upgrade-pre-exposure-timeout') say(`${learned.includes('LANTERN') ? 'LANTERN ' : ''}Added the probe Ticket (${result.kind}).`);
+if (model === 'fake-upgrade-pre-exposure-timeout' || model === 'fake-upgrade-stale-recovered-timeout')
+  await new Promise(resolve => setTimeout(resolve, 30_000));
 if (model === 'fake-upgrade-conflict-unknown-timeout' || model === 'fake-upgrade-conflict-two-tickets-timeout') {
   // The server rejects this duplicate Ticket, but its native completion is deliberately lost.
   await call('map_apply', { version, mapId: 'Upgrade.Probe', expectedRevision: result.revision,

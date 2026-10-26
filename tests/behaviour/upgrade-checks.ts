@@ -83,12 +83,16 @@ function recoveryForRefusal(a: AttemptRecord, r: { refusal: Call; writes: Call[]
   const strict = codexLifecycle(a.subject.id) !== undefined && a.subject.version >= 3;
   const readRules = a.events.find(e => e.kind === 'resource-read' && e.actor === 'agent' && (!strict || e.ok) && e.session === refusal.session
     && e.seq > refusal.seq && e.seq < until && (strict ? e.uri === 'wayfinder://workflow/exploration' : e.uri.startsWith('wayfinder://workflow/exploration')));
-  const reread = mapCalls(a, 'map_read').some(e => e.session === refusal.session && e.seq > (strict ? readRules?.seq ?? refusal.seq : refusal.seq)
-    && e.seq < until && (!strict || resultIs(e, 'read')));
+  const reads = mapCalls(a, 'map_read').filter(e => e.session === refusal.session && e.seq > (strict ? readRules?.seq ?? refusal.seq : refusal.seq) && e.seq < until);
+  const missingResult = (e: Call) => !e.result.known || a.missing.includes(`${at(a, e)}.result`);
+  const reread = reads.some(e => !missingResult(e) && (!strict || resultIs(e, 'read')));
   const resourcePath = readRules && reread;
   const refreshPath = !retry;
   const gap = need(a, 'recovery reads', 'events.tool-call', 'events.resource-read');
   if (!resourcePath && gap) return gap;
+  // Native unfinished calls may be flushed at turn end; their event position cannot prove they were after the retry.
+  const unresolved = mapCalls(a, 'map_read').filter(e => e.session === refusal.session && e.turn === refusal.turn && missingResult(e));
+  if (readRules && !reread && unresolved.length) return unknown('the recovery Map read has no native result', unresolved.map(e => at(a, e)));
   if (resources === 'available') return resourcePath ? holds('read the rules and reread the Map before writing again', [at(a, refusal)])
     : (retry ? violated : notObserved)(`can read Resources but ${readRules ? '' : 'did not read the rules '}${reread ? '' : 'did not reread the Map '}before writing again`.trim(), [at(a, refusal)]);
   if (resources === 'unavailable') return refreshPath ? unknown('stopped after the refusal; a reviewer checks it asked for a refresh and a new chat', [at(a, refusal)], 'model')
@@ -112,10 +116,15 @@ const retryPairs = (writes: Call[]) => writes.filter(e => resultIs(e, 'version-m
   return retry ? [{ refusal, retry }] : [];
 });
 function attestNextRetries(a: AttemptRecord, r: { writes: Call[]; current: string }): ReturnType<ScriptCheck> {
+  const retries = retryPairs(r.writes).map(p => p.retry);
+  const contradicted = retries.filter(e => {
+    const source = phaseOf(a, e);
+    return visibleSource(source) && versionOf(source!) === r.current && argsOf(e).version !== r.current;
+  });
+  if (contradicted.length) return violated('a retry contradicts the current rules already exposed to this client', contradicted.map(e => at(a, e)));
   // Missing events can hide the Resource read that established a newer visible rules phase.
   const gap = need(a, 'retry rules source', 'events.tool-call', 'events.resource-read', 'given');
   if (gap) return gap;
-  const retries = retryPairs(r.writes).map(p => p.retry);
   const stale = retries.filter(e => argsOf(e).version !== r.current);
   if (stale.length) return violated('the next retry after a refusal did not attest the current rules', stale.map(e => at(a, e)));
   if (retries.some(e => visibleSource(phaseOf(a, e)) && versionOf(phaseOf(a, e)!) !== argsOf(e).version)) return violated('the next retry did not attest its visible rules source');
@@ -130,14 +139,14 @@ const noInvalidRecovery: ScriptCheck = a => {
 };
 
 const committedAtNewVersion: ScriptCheck = a => {
-  const gap = need(a, 'committed rules source', 'events.tool-call', 'events.resource-read', 'given');
-  if (gap) return gap;
   const r = afterRestart(a, 'new-version write');
   if ('gap' in r) return r.gap!;
   if (codexLifecycle(a.subject.id) !== undefined && a.subject.version >= 4) {
     const attestation = attestNextRetries(a, r);
     if (attestation.status !== 'holds') return attestation;
   }
+  const gap = need(a, 'committed rules source', 'events.tool-call', 'events.resource-read', 'given');
+  if (gap) return gap;
   const ok = r.writes.filter(e => resultIs(e, 'committed') && argsOf(e).version === r.current);
   if (ok.length) {
     if (ok.some(e => visibleSource(phaseOf(a, e)) && versionOf(phaseOf(a, e)!) !== r.current)) return violated('the committed version differs from the rules this client was shown', ok.map(e => at(a, e)));
@@ -252,9 +261,9 @@ const codexTurns = (resume: boolean): Scenario['turns'] => resume
   : [{ session: 'A', kind: 'opening', say: `${createProbe} Then, in this same turn: ${addProbe}` }];
 
 export const upgradeChecks: UpgradeCheck[] = [
-  { id: 'U-codex-process', version: 6, harness: 'codex', lifecycle: 'process', entry: 'mcp-only', situation: 'Same Codex process across the restart (exec waits).',
+  { id: 'U-codex-process', version: 7, harness: 'codex', lifecycle: 'process', entry: 'mcp-only', situation: 'Same Codex process across the restart (exec waits).',
     rulesSource: 'instructions', controller: restart, mustNot: codexRisks, expect: [refused, readsRules, newVersion, canaryRule, ...codexEvidence], issue: 'B02c (#67)' },
-  { id: 'U-codex-resume', version: 6, harness: 'codex', lifecycle: 'resume', entry: 'mcp-only', situation: 'Conversation resumed in a new Codex process.',
+  { id: 'U-codex-resume', version: 7, harness: 'codex', lifecycle: 'resume', entry: 'mcp-only', situation: 'Conversation resumed in a new Codex process.',
     rulesSource: 'instructions', controller: [...restart, 'Resume the conversation in a new process.'], mustNot: codexRisks, expect: [newVersion, canaryRule, ...codexEvidence, { ...readsRules, id: 'resume-refusal-recovery',
       check: a => writeCalls(a).some(e => resultIs(e, 'version-mismatch')) ? recoversByCapability(a) : holds('no refusal to recover from in the fresh process') }], issue: 'B02c (#67)' },
   { id: 'U-claude-process', version: 2, harness: 'claude', entry: 'mcp-only', situation: 'Same Claude Code process across the restart (tool search on).',
