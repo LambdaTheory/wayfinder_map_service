@@ -89,10 +89,28 @@ export interface ControlProfile {
   identities: Readonly<Record<string, string>>;
   pinnedRoots: string[];
 }
-function fileHash(path: string): string {
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.nlink !== 1) throw new IsolationError('immutable file must be regular with one link');
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
+/** One filesystem boundary for policy verification and safe native-evidence collection. */
+export function entryIdentity(path: string, kind?: 'file' | 'directory'): string {
+  const stat = lstatSync(path, { bigint: true });
+  if ((!stat.isDirectory() && !stat.isFile()) || (kind === 'directory' && !stat.isDirectory())
+    || (kind === 'file' && (!stat.isFile() || stat.nlink !== 1n)))
+    throw new IsolationError('protected entry must have its expected type; regular files require one link');
+  return `${stat.isDirectory() ? 'directory' : 'file'}:${stat.dev}:${stat.ino}:${stat.mode}`;
+}
+export function readRegularFile(path: string): Buffer {
+  entryIdentity(path, 'file');
+  return readFileSync(path);
+}
+/** Read a runner-written file only after validating its previously pinned containing directories. */
+export function readPinnedFile(path: string, pinned: Readonly<Record<string, string>>): Buffer {
+  for (const parent of parents(path)) {
+    if (pinned[parent] !== entryIdentity(parent, 'directory')) throw new IsolationError('runner evidence parent changed or unpinned');
+  }
+  return readRegularFile(path);
+}
+export const hashContents = (data: string | Buffer) => createHash('sha256').update(data).digest('hex');
+export function fileHash(path: string): string {
+  return hashContents(readRegularFile(path));
 }
 function treeHashes(roots: string[]): Record<string, string> {
   const result: Record<string, string> = {};
@@ -107,14 +125,9 @@ function treeHashes(roots: string[]): Record<string, string> {
 }
 function identities(roots: string[], mutableFiles: string[]): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const file of mutableFiles) {
-    const stat = lstatSync(file, { bigint: true });
-    if (!stat.isFile() || stat.nlink !== 1n) throw new IsolationError('mutable read-only file must be regular with one link');
-  }
+  for (const file of mutableFiles) entryIdentity(file, 'file');
   for (const path of new Set([...roots, ...mutableFiles].flatMap(p => [p, ...parents(p)]))) {
-    const stat = lstatSync(path, { bigint: true });
-    if (!stat.isDirectory() && !stat.isFile()) throw new IsolationError('protected entry replaced or linked');
-    out[path] = `${stat.isDirectory() ? 'directory' : 'file'}:${stat.dev}:${stat.ino}`;
+    out[path] = entryIdentity(path);
   }
   return out;
 }

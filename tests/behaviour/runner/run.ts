@@ -3,7 +3,7 @@
 // directory, on Codex through the MCP-only or Dedicated Entry (B02a/B02d). Spends model quota: run only what Kun approved.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -14,8 +14,9 @@ import { fixturesRoot, readiness, validateScenario } from '../scenario.ts';
 import type { ControllerAction, Scenario } from '../scenario.ts';
 import { IsolationError, clientSkills, findRollout, loginSecrets, looksRateLimited, prepareClient, prepareSandbox, prepareSession, prepareWorkdir, runTurn, writeProfile } from './codex.ts';
 import type { ClientLogin, CodexOptions, CodexSession, ControlProfile } from './codex.ts';
-import { captureDedicatedArtifacts, dedicatedClientSkills, dedicatedContext, dedicatedLaunch, dedicatedLauncherSource, dedicatedLoginSecrets, dedicatedRollout, IsolationFailure, prepareDedicated, runDedicatedTurn } from './dedicated.ts';
+import { dedicatedClientSkills, dedicatedContext, dedicatedLaunch, dedicatedLauncherSource, dedicatedLoginSecrets, dedicatedRollout, prepareDedicated, runDedicatedTurn } from './dedicated.ts';
 import type { DedicatedSetup } from './dedicated.ts';
+import { captureArtifacts } from './artifacts.ts';
 import { connectController, historyCredentials } from './controller.ts';
 import { correlateReceipts, initialRules, readRollout, streamTurn } from './normalize.ts';
 import type { RolloutFacts } from './normalize.ts';
@@ -100,7 +101,8 @@ const openDatabases = (pid: string | number) => lsof('-p', String(pid), '-Fn').s
 
 /** Global state the runner must leave alone: personal client configuration and the everyday service. */
 export function isolationSnapshot(personalConfigRoot: string) {
-  const files = ['.codex/config.toml', '.codex/auth.json', '.claude/settings.json', '.codex-wayfinder/config.toml', '.wayfinder-service/credentials.json']
+  const files = ['.codex/config.toml', '.codex/auth.json', '.claude/settings.json', '.codex-wayfinder/config.toml', '.codex-wayfinder/AGENTS.md', '.wayfinder-service/credentials.json',
+    '.wayfinder-service/credential-owners.json', '.wayfinder-service/wayfinder-token']
     .map(f => join(personalConfigRoot, f));
   return { files: Object.fromEntries(files.map(f => [tilde(f), sha(f)])), everydayServicePid: everydayPid() };
 }
@@ -111,17 +113,6 @@ function touchedEverydayDatabase(opened: string[]): Field<boolean> {
   if (!pid) return { known: false, reason: 'no everyday service running, so its database could not be located' };
   const everyday = openDatabases(pid);
   return everyday.length ? { known: true, value: opened.some(p => everyday.includes(p)) } : { known: false, reason: 'the everyday service shows no open database' };
-}
-
-/** Copy fixture outputs without following symlinks, redacting even credentials copied into binary files. */
-function snapshotWork(source: string, target: string, secrets: Record<string, string>) {
-  mkdirSync(target, { recursive: true, mode: 0o700 });
-  for (const entry of readdirSync(source, { withFileTypes: true })) {
-    if (entry.name === 'node_modules' || entry.isSymbolicLink()) continue;
-    const from = join(source, entry.name); const to = join(target, redact(entry.name, secrets));
-    if (entry.isDirectory()) snapshotWork(from, to, secrets);
-    else if (entry.isFile()) writeFileSync(to, Buffer.from(redact(readFileSync(from).toString('latin1'), secrets), 'latin1'), { mode: 0o600 });
-  }
 }
 
 const serviceCommit = () => { try { return execFileSync('git', ['-C', checkoutRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(); } catch { return 'unknown'; } };
@@ -227,7 +218,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
     const workdir = prepareWorkdir(scratch, s.seed.fixtures, fixturesRoot);
     const nativeOptions = { ...o.codex, bin: prepareClient(controlDir, o.codex.bin) };
     if (entry === 'dedicated') {
-      dedicated = prepareDedicated(scratch, sessions[0]!.codex, service, controller, nativeOptions, layout, workdir);
+      dedicated = prepareDedicated(sessions[0]!.codex, service, controller, nativeOptions, layout, workdir);
       sessions[0]!.codex.codexHome = dedicated.codexHome;
       profiles.set(sessions[0]!.codex.home, dedicated.profile);
     }
@@ -315,21 +306,28 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
           controllerEvent('isolation-check', { session: session.label, paths: Object.keys(profile.hashes), ok: true }, index);
           n = streamTurn(turn.session, index, turn.say, new Date().toISOString(), workdir, emit);
         }, onLine: (line: import('./normalize.ts').Line) => n?.line(line) };
-      const r = dedicated ? await runDedicatedTurn(request, dedicated).catch(error => {
-        // Failed integrity prevents safe discovery of refreshed credentials. Withhold this turn's
-        // streamed evidence too, matching the refusal to collect its native files.
-        events.splice(fromSeq); throw error;
-      }) : await runTurn(request);
+      const r = dedicated ? await runDedicatedTurn(request, dedicated) : await runTurn(request);
+      n?.finish();
       if (dedicated) {
-        const launch = dedicatedLaunch(dedicated);
-        if (launch) {
-          const { token, ...evidence } = launch;
-          secrets[`launcher-token-${index}`] = token; session.record.clientId = launch.clientId; launches.push(evidence);
+        try {
+          const launch = dedicatedLaunch(dedicated);
+          if (launch) {
+            const { token, ...evidence } = launch;
+            secrets[`launcher-token-${index}`] = token; session.record.clientId = launch.clientId; launches.push(evidence);
+          } else if (r.turnStarted || r.postIsolationFailure) missing.push(`raw.entry-context.launches[${index}]`);
+        } catch {
+          missing.push(`raw.entry-context.launches[${index}]`);
+          r.postIsolationFailure ??= 'isolation failure: launch evidence could not be read safely';
+        }
+        if (!r.postIsolationFailure) dedicatedLoginSecrets(dedicated, session.codex).forEach((value, i) => {
+          secrets[`codex-login-${turn.session}-turn-${index}-${i}`] = value;
+        });
+        else {
+          // Keep safe runner launch facts, but never collect native bytes through broken auth paths.
+          events.splice(fromSeq);
+          missing.push('events', 'raw.client', `sessions[${sessions.indexOf(session)}].turns[${session.record.turns.length}]`);
         }
       }
-      const refreshed = dedicated ? dedicatedLoginSecrets(dedicated, session.codex) : [];
-      refreshed.forEach((value, i) => { secrets[`codex-login-${turn.session}-turn-${index}-${i}`] = value; });
-      n?.finish();
       if (r.isolationFailure) {
         isolationFailures.push(r.isolationFailure);
         controllerEvent('isolation-check', { session: session.label, ok: false, launched: false, reason: r.isolationFailure }, index);
@@ -341,6 +339,10 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
         controllerEvent('isolation-check', { session: session.label, ok: false, phase: 'after-turn', reason: r.postIsolationFailure }, index);
         if (completeness === 'complete') { completeness = 'driver-failed'; detail = r.postIsolationFailure; }
         killAll();
+        if (dedicated) {
+          emit({ seq: 0, at: r.endedAt, actor: 'agent', session: turn.session, turn: index, kind: 'process', exitCode: r.exitCode, signal: r.signal });
+          return;
+        }
       }
       emit({ seq: 0, at: r.endedAt, actor: 'agent', session: turn.session, turn: index, kind: 'process', exitCode: r.exitCode, signal: r.signal });
       writeRaw(`turn-${index}-${turn.session}.stdout.jsonl`, r.stdout);
@@ -406,8 +408,8 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       if (failed?.status === 'rejected') throw failed.reason;
       if (completeness !== 'complete') break;
     }
-    (dedicated ? captureDedicatedArtifacts : snapshotWork)(workdir, join(dir, 'raw', 'work'), secrets);
-    rawFiles.push('work/');
+    if (dedicated && isolationFailures.length) missing.push('raw.work');
+    else { captureArtifacts(workdir, join(dir, 'raw', 'work'), secrets); rawFiles.push('work/'); }
   } catch (error) {
     if (error instanceof IsolationError) {
       if (!isolationFailures.includes(String(error))) isolationFailures.push(String(error));
@@ -425,10 +427,10 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
     if (entryContext.some(c => !c.installed)) missing.push('given[0].extraContext');
     try {
       skills = dedicatedClientSkills(dedicated, sessions[0]!.codex);
-      captureDedicatedArtifacts(dedicated.outputs, join(dir, 'raw', 'outputs'), secrets); rawFiles.push('outputs/');
+      captureArtifacts(dedicated.outputs, join(dir, 'raw', 'outputs'), secrets); rawFiles.push('outputs/');
     } catch (error) {
       missing.push('raw.outputs'); completeness = 'driver-failed';
-      if (error instanceof IsolationFailure && !isolationFailures.includes(String(error))) isolationFailures.push(String(error));
+      if (error instanceof IsolationError && !isolationFailures.includes(String(error))) isolationFailures.push(String(error));
     }
   } else {
     if (entry === 'dedicated') missing.push('given[0].extraContext');
@@ -437,17 +439,22 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   let maps: AttemptRecord['maps'] = [];
   try {
     if (!ctl) throw new Error('no Controller connection');
+    if (dedicated && isolationFailures.length) throw new Error('Dedicated integrity failure prevents safe Map-content redaction');
     maps = (await ctl.exportCatalog()).map(m => ({ mapId: m.mapId,
       // No agent turn starts until all seeding succeeds. This also recovers a committed write whose reply AND immediate reread were lost.
       seedHeadRevision: seedingComplete ? seedHeads[m.mapId] ?? null : m.history.at(-1)?.revision ?? null, history: m.history }));
-  } catch (error) { missing.push('maps'); detail = `${detail ?? ''} catalog export failed: ${String(error instanceof Error ? error.message : error)}`.trim(); }
+  } catch (error) {
+    missing.push('maps');
+    if (entry === 'dedicated') completeness = 'driver-failed';
+    detail = `${detail ?? ''} catalog export failed: ${String(error instanceof Error ? error.message : error)}`.trim(); }
   for (const session of sessions) await session.route?.close().catch(() => undefined);
   for (const [label, log] of relayLogs) writeRaw(`relay-${label}.jsonl`, log.map(e => JSON.stringify(e)).join('\n'));
   await ctl?.close().catch(() => undefined);
   const stopped = await service?.stop();
   if (service) { writeRaw('protocol.jsonl', existsSync(service.protocolReport) ? readFileSync(service.protocolReport, 'utf8') : ''); writeRaw('service.log', service.logs()); }
-  if (entry === 'dedicated' && existsSync(join(serviceDir, 'db')))
-    cpSync(join(serviceDir, 'db'), join(dir, 'database'), { recursive: true });
+  // Raw SQLite can retain credentials in Map text, history, free pages and journals. Keep only
+  // the redacted structured export; never patch database bytes or retain it after export failure.
+  if (entry === 'dedicated') missing.push('raw.database');
   const databaseCleanup = cleanupServiceDirectory(serviceDir, entry === 'dedicated' || !missing.includes('maps'));
   rmSync(scratch, { recursive: true, force: true });
   rmSync(controlDir, { recursive: true, force: true });

@@ -29,7 +29,7 @@ async function fixture(program: (dir: string) => string) {
   const controller = { clientId: 'Fixture.Controller', token: newToken() };
   const serviceDir = dedicatedServiceDirectory();
   const service = await startService(serviceDir, controller, []);
-  const setup = prepareDedicated(scratch, session, service, controller, options, layout, workdir);
+  const setup = prepareDedicated(session, service, controller, options, layout, workdir);
   session.codexHome = setup.codexHome;
   const request = { options, session, port: service.port, workdir, profile: setup.profile, prompt: '' };
   return { root, scratch, driverDir, workdir, options, session, setup, request, service,
@@ -187,9 +187,10 @@ attack.each(['home', 'launcher-home', 'hardlink'])('Dedicated rejects %s identit
 attack('Dedicated checks shared immutable hashes after a turn as well as before it', async () => {
   const f = await fixture(() => nodeFake("console.log('synthetic-run')"));
   try {
-    await expect(runDedicatedTurn({ ...f.request, onChild: () => {
+    const result = await runDedicatedTurn({ ...f.request, onChild: () => {
       // Trusted fault injection: the client itself cannot change the staged launcher.
       appendFileSync(f.setup.launcher, '\n# trusted integrity fault\n'); return () => undefined;
-    } }, f.setup)).rejects.toThrow(/isolation failure/);
+    } }, f.setup);
+    expect(result.postIsolationFailure).toMatch(/isolation failure/);
   } finally { await f.close(); }
 });

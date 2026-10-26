@@ -1,20 +1,18 @@
 // The real Dedicated launcher is trusted setup. Everything it executes or uses as policy is runner-owned.
-import { createHash } from 'node:crypto';
-import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { clientSkills, executeTurn, findRollout, loginSecrets } from './codex.ts';
 import type { CodexOptions, CodexSession, TurnRequest } from './codex.ts';
 import { readRollout, shown } from './normalize.ts';
 import { checkoutRoot, reservedPorts } from './service.ts';
-import { IsolationError, verifyProfile, writeProfile } from './sandbox.ts';
+import { entryIdentity, hashContents, IsolationError, readPinnedFile, readRegularFile, verifyProfile, writeProfile } from './sandbox.ts';
 import type { ControlProfile, SandboxLayout } from './sandbox.ts';
 import type { Credential, IsolatedService } from './service.ts';
 
 export const dedicatedLauncher = join(checkoutRoot, 'scripts/wayfinder-agent/wayfinder');
 export const dedicatedLauncherSource = relative(checkoutRoot, dedicatedLauncher);
 const python = '/usr/bin/python3';
-export { IsolationError as IsolationFailure } from './sandbox.ts';
 
 export function dedicatedServiceDirectory(): string {
   const root = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests');
@@ -22,14 +20,6 @@ export function dedicatedServiceDirectory(): string {
   return realpathSync(mkdtempSync(join(root, 'dedicated-')));
 }
 
-const hash = (text: Buffer | string) => createHash('sha256').update(text).digest('hex');
-/** lstat before reading: a substituted symlink must never disclose its target through evidence collection. */
-function identity(path: string, kind: 'file' | 'directory', content = false): string {
-  const info = lstatSync(path);
-  if ((kind === 'file' ? !info.isFile() || info.nlink !== 1 : !info.isDirectory()) || info.isSymbolicLink())
-    throw new IsolationError(`unexpected ${kind} type`);
-  return JSON.stringify([info.dev, info.ino, info.mode, content ? hash(readFileSync(path)) : null]);
-}
 interface LaunchEvidence {
   token: string;
   clientId: string;
@@ -57,7 +47,7 @@ export interface DedicatedSetup {
   controlEvidence: { profile: string; shim: string; manifest: string };
 }
 
-export function prepareDedicated(scratch: string, session: CodexSession, service: IsolatedService,
+export function prepareDedicated(session: CodexSession, service: IsolatedService,
   controller: Credential, options: CodexOptions, layout: SandboxLayout, workdir: string): DedicatedSetup {
   if (!options.sandbox) throw new IsolationError('Dedicated Entry requires the allowlist sandbox');
   if (reservedPorts.includes(service.port)) throw new IsolationError('Dedicated Entry refuses an everyday port');
@@ -96,13 +86,12 @@ export function prepareDedicated(scratch: string, session: CodexSession, service
   const shimDir = join(layout.readOnlyDir, 'launcher-bin');
   mkdirSync(shimDir, { mode: 0o700 });
   const binary = realpathSync(options.bin);
-  const protectedDirectories = [scratch, session.home, root, state, stateHome, join(stateHome, '.agents'), skills, outputs, join(outputs, 'mcp'), join(outputs, 'matt')];
   const protectedTrees = [serviceDir, launcherHome, join(state, 'AGENTS.md'), join(state, 'config.toml'), join(stateHome, '.agents')];
   // writeProfile owns policy and pinning. The exclusive path depends only on this session HOME.
   const profilePath = join(control, `${session.home.split('/').at(-1)}.sb`);
   const command = ['/usr/bin/sandbox-exec', '-f', profilePath, binary];
   const expected = { home: stateHome, codexHome: state, url: `mcp_servers.wayfinder.url="http://127.0.0.1:${service.port}/mcp"` };
-  const constants = JSON.stringify({ command, capturePath, serviceDir, expected, path: process.env.PATH ?? '/usr/bin:/bin' });
+  const constants = JSON.stringify({ command, capturePath, serviceDir, expected, controllerHash: hashContents(controller.token), path: process.env.PATH ?? '/usr/bin:/bin' });
   const shim = `#!${python} -I
 import hashlib, json, os, sys
 from pathlib import Path
@@ -115,7 +104,7 @@ if token:
         sys.exit("isolation failure: unexpected launcher HOME, CODEX_HOME or MCP URL")
     sha = hashlib.sha256(token.encode()).hexdigest()
     owners = json.loads((Path(settings["serviceDir"]) / "credential-owners.json").read_text())
-    if sha not in owners:
+    if sha == settings["controllerHash"] or sha not in owners:
         sys.exit("isolation failure: Dedicated Entry refused a fallback primary credential")
     record = {"token": token, "clientId": owners[sha]["clientId"], "argv": sys.argv[1:],
               "home": env["HOME"], "codexHome": env["CODEX_HOME"],
@@ -131,7 +120,7 @@ os.execvpe(command[0], command, env)
   writeFileSync(join(shimDir, 'codex'), shim, { mode: 0o700 });
   const profile = writeProfile(control, session, workdir, binary, {
     readOnlyRoots: [checkout, launcherDir, shimDir], mutableReadOnlyFiles: [sourceAuth],
-    denyWriteRoots: protectedTrees, denyWritePaths: protectedDirectories, localPorts: [service.port],
+    denyWriteRoots: protectedTrees, denyWritePaths: [join(outputs, 'mcp'), join(outputs, 'matt')], localPorts: [service.port],
   });
   const installedFiles = new Map<string, string>();
   const expectedFiles: Record<string, string> = {
@@ -146,18 +135,18 @@ os.execvpe(command[0], command, env)
     for (const file of ['AGENTS.md', 'config.toml']) {
       const path = join(state, file);
       if (lstatSync(path, { throwIfNoEntry: false })) {
-        const current = identity(path, 'file', true);
-        if (hash(readFileSync(path)) !== hash(expectedFiles[file]!) || (installedFiles.has(file) && installedFiles.get(file) !== current))
+        const current = entryIdentity(path, 'file');
+        if (readRegularFile(path).toString('utf8') !== expectedFiles[file]! || (installedFiles.has(file) && installedFiles.get(file) !== current))
           throw new IsolationError('changed launcher-installed context');
         installedFiles.set(file, current);
       } else if (installedFiles.has(file)) throw new IsolationError('removed launcher-installed context');
     }
-    for (const dir of [join(stateHome, '.agents'), skills]) identity(dir, 'directory');
+    entryIdentity(skills, 'directory'); // The launcher writes through this nested directory.
     const ownAuth = join(state, 'auth.json');
     const info = lstatSync(ownAuth, { throwIfNoEntry: false });
     if (info?.isSymbolicLink()) {
       if (readlinkSync(ownAuth) !== sourceAuth) throw new IsolationError('changed native auth link target');
-    } else if (info) identity(ownAuth, 'file'); // A native atomic refresh may replace the link with a regular file.
+    } else if (info) entryIdentity(ownAuth, 'file'); // A native atomic refresh may replace the link with a regular file.
   };
   return { state, skill, outputs, capturePath, control, launcherHome, profile, launcher, checkout, shimDir, codexHome: state, sourceAuth, verify,
     controlEvidence: { profile: readFileSync(profile.path, 'utf8'), shim, manifest: JSON.stringify(profile) }, env: {
@@ -178,12 +167,13 @@ export async function runDedicatedTurn(request: TurnRequest, setup: DedicatedSet
   request.onLaunch?.();
   const result = await executeTurn(request, python,
     ['-I', setup.launcher, '--harness', 'codex', '--method', 'mcp', '--model', o.model, '--effort', o.effort, '--', ...exec], setup.env);
-  setup.verify(); // Includes the launcher's mutable auth link and newly installed context.
+  try { setup.verify(); } // Includes mutable auth and newly installed context.
+  catch (error) { return { ...result, postIsolationFailure: String(error) }; }
   return result;
 }
 
 export function dedicatedLaunch(setup: DedicatedSetup): LaunchEvidence | null {
-  return existsSync(setup.capturePath) ? JSON.parse(readFileSync(setup.capturePath, 'utf8')) as LaunchEvidence : null;
+  return existsSync(setup.capturePath) ? JSON.parse(readPinnedFile(setup.capturePath, setup.profile.identities).toString('utf8')) as LaunchEvidence : null;
 }
 
 export function dedicatedLoginSecrets(setup: DedicatedSetup, session: CodexSession): string[] {
@@ -196,16 +186,16 @@ export function dedicatedRollout(setup: DedicatedSetup, session: CodexSession) {
   setup.verify();
   const sessions = join(session.codexHome, 'sessions');
   if (!lstatSync(sessions, { throwIfNoEntry: false })) return null;
-  identity(sessions, 'directory');
+  entryIdentity(sessions, 'directory');
   const path = findRollout(session);
   if (!path) return null;
-  identity(path, 'file');
+  entryIdentity(path, 'file');
   return readRollout(path);
 }
 export function dedicatedClientSkills(setup: DedicatedSetup, session: CodexSession): string[] {
   setup.verify();
   const root = join(session.codexHome, 'skills');
-  if (lstatSync(root, { throwIfNoEntry: false })) identity(root, 'directory');
+  if (lstatSync(root, { throwIfNoEntry: false })) entryIdentity(root, 'directory');
   return clientSkills(session);
 }
 
@@ -227,34 +217,9 @@ export function dedicatedContext(setup: DedicatedSetup, rollout: string | undefi
       setup.verify();
       if (isSkill && !installedSkill()) reason = 'launcher Skill link is absent or has an unexpected target';
       else if (!existsSync(path as string)) reason = 'launcher did not install this file';
-      else { identity(path as string, 'file'); content = readFileSync(path as string, 'utf8'); }
+      else content = readRegularFile(path as string).toString('utf8');
     } catch { reason = 'installation cannot be read safely after an isolation failure'; }
-    return { source: source as string, content, sha256: content === null ? null : hash(content), installed: content !== null,
+    return { source: source as string, content, sha256: content === null ? null : hashContents(content), installed: content !== null,
       reason, shownToModel: content !== null && rollout ? shown(rollout, content) : null };
   });
-}
-/** Preserve artifacts, including binary files, but remove literal credentials and never follow symlinks. */
-export function captureDedicatedArtifacts(source: string, target: string, secrets: Record<string, string>): void {
-  identity(source, 'directory');
-  mkdirSync(target, { recursive: true, mode: 0o700 });
-  for (const entry of readdirSync(source, { withFileTypes: true })) {
-    if (entry.name === 'node_modules') continue;
-    const from = join(source, entry.name); const to = join(target, entry.name);
-    if (entry.isDirectory()) captureDedicatedArtifacts(from, to, secrets);
-    else if (entry.isFile()) {
-      identity(from, 'file');
-      let data: Buffer = readFileSync(from);
-      for (const [name, secret] of Object.entries(secrets)) {
-        if (!secret) continue;
-        const needle = Buffer.from(secret); const parts: Buffer[] = [];
-        let start = 0; let index: number;
-        while ((index = data.indexOf(needle, start)) !== -1) {
-          parts.push(data.subarray(start, index), Buffer.from(`<${name}>`));
-          start = index + needle.length;
-        }
-        if (parts.length) data = Buffer.concat([...parts, data.subarray(start)]);
-      }
-      writeFileSync(to, data, { mode: 0o600 });
-    }
-  }
 }

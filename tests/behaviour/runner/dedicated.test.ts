@@ -1,3 +1,4 @@
+import { captureArtifacts } from './artifacts.ts';
 import { syntheticClientState } from './test-state.ts';
 // Model-free onboarding evidence for the Dedicated Entry; real-model onboarding still needs an approved Batch.
 import { spawnSync } from 'node:child_process';
@@ -10,7 +11,7 @@ import { clientProfiles, supportsFor } from '../clients.ts';
 import type { AttemptRecord } from '../evidence.ts';
 import { library } from '../library.ts';
 import { prepareClient, prepareSandbox, prepareSession } from './codex.ts';
-import { captureDedicatedArtifacts, dedicatedContext, dedicatedLauncher, dedicatedServiceDirectory, prepareDedicated, runDedicatedTurn } from './dedicated.ts';
+import { dedicatedContext, dedicatedLauncher, dedicatedServiceDirectory, prepareDedicated, runDedicatedTurn } from './dedicated.ts';
 import { isolationSnapshot, preflight, runAttempt, runBatch } from './run.ts';
 import { newToken, startService } from './service.ts';
 
@@ -121,7 +122,7 @@ test('a stopped run service cannot make the launcher spawn an untracked replacem
     const layout = prepareSandbox(own);
   const workdir = join(own, 'work'); mkdirSync(workdir);
   const nativeOptions = { ...options, bin: prepareClient(layout.controlDir, options.bin) };
-  const setup = prepareDedicated(own, session, service, controller, nativeOptions, layout, workdir);
+  const setup = prepareDedicated(session, service, controller, nativeOptions, layout, workdir);
     await service.stop();
     const result = spawnSync('/usr/bin/python3', ['-I', setup.launcher, '--harness', 'codex', '--method', 'mcp', '--', 'exec', '--json', '-'],
       { cwd: own, env: { ...setup.env, WAYFINDER_AGENT_DRY_RUN: '1' }, input: 'never run', encoding: 'utf8', timeout: 15_000 });
@@ -138,7 +139,7 @@ test('artifact capture redacts credentials without corrupting other bytes or fol
   const token = 'synthetic-secret';
   writeFileSync(join(source, 'binary'), Buffer.concat([Buffer.from([0, 255]), Buffer.from(token), Buffer.from([128, 0])]));
   symlinkSync(auth, join(source, 'auth-link'));
-  captureDedicatedArtifacts(source, target, { credential: token });
+  captureArtifacts(source, target, { credential: token });
   expect(readFileSync(join(target, 'binary'))).toEqual(Buffer.concat([Buffer.from([0, 255]), Buffer.from('<credential>'), Buffer.from([128, 0])]));
   expect(existsSync(join(target, 'auth-link'))).toBe(false);
 });
@@ -152,7 +153,7 @@ async function launcherFixture() {
   const layout = prepareSandbox(own);
   const workdir = join(own, 'work'); mkdirSync(workdir);
   const nativeOptions = { ...options, bin: prepareClient(layout.controlDir, options.bin) };
-  const setup = prepareDedicated(own, session, service, controller, nativeOptions, layout, workdir);
+  const setup = prepareDedicated(session, service, controller, nativeOptions, layout, workdir);
   session.codexHome = setup.codexHome;
   const request = { options: nativeOptions, session, port: service.port, workdir, profile: setup.profile, prompt: 'start' };
   return { dir, own, setup, session, service, request,
@@ -261,7 +262,8 @@ test.skipIf(!sandbox)('a launcher failure records no installed Skill just becaus
   expect(context.context.map((c: { shownToModel: boolean | null }) => c.shownToModel)).toEqual([null, null, null, null]);
   const record = JSON.parse(readFileSync(join(out, 'D-1/attempt.json'), 'utf8'));
   expect(record.missing).toContain('given[0].extraContext');
-  expect(existsSync(join(out, 'D-1/database/maps.sqlite'))).toBe(true);
+  expect(existsSync(join(out, 'D-1/database/maps.sqlite'))).toBe(false);
+  expect(record.missing).toContain('raw.database');
 }, 30_000);
 
 test.skipIf(!sandbox)('tokens refreshed between turns are redacted before native evidence is written', async () => {

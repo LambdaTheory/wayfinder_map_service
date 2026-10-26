@@ -20,13 +20,28 @@ attack.each(['root', 'path'] as const)('canonicalizes a missing deny-only %s thr
     kind === 'root' ? { denyWriteRoots: [denied] } : { denyWritePaths: [denied] });
   // Trusted setup creates a path after policy preparation, as the Dedicated launcher does.
   const actual = join(home, 'future', 'locked'); mkdirSync(join(home, 'future'));
+  const shell = (command: string) => spawnSync('/usr/bin/sandbox-exec', ['-f', profile.path, '/bin/sh', '-c', command], { encoding: 'utf8' });
+  const deniedCommand = (command: string) => {
+    const result = shell(command); expect(result.status).not.toBe(0); expect(result.stderr).toMatch(/Operation not permitted|Permission denied/);
+  };
+  // On case-insensitive filesystems the target's alternate spelling is denied before creation too.
+  const caseInsensitive = existsSync(join(scratch, 'HOME'));
+  if (caseInsensitive) deniedCommand(kind === 'root' ? `mkdir '${join(home, 'future', 'LOCKED')}'` : `echo forged > '${join(home, 'future', 'LOCKED')}'`);
   if (kind === 'root') mkdirSync(actual); else writeFileSync(actual, 'original');
   expect(verifyProfile(profile)).toBeNull();
   const target = kind === 'root' ? join(actual, 'child') : actual;
-  for (const path of [target, kind === 'root' ? join(denied, 'child') : denied]) {
-    const result = spawnSync('/usr/bin/sandbox-exec', ['-f', profile.path, '/bin/sh', '-c', `echo forged > '${path}'`], { encoding: 'utf8' });
-    expect(result.status).not.toBe(0); expect(result.stderr).toMatch(/Operation not permitted|Permission denied/);
-  }
+  const inner = join(home, 'inner'); mkdirSync(inner);
+  const deeperAlias = join(work, 'deeper-alias'); symlinkSync(inner, deeperAlias);
+  const spellings = [target, kind === 'root' ? join(denied, 'child') : denied,
+    `${inner}/../future/locked${kind === 'root' ? '/child' : ''}`,
+    `${deeperAlias}/../future/locked${kind === 'root' ? '/child' : ''}`,
+    ...(caseInsensitive ? [target.replace('/locked', '/LOCKED')] : [])];
+  for (const path of spellings) deniedCommand(`echo forged > '${path}'`);
+  const protectedFile = kind === 'root' ? join(actual, 'protected-file') : actual;
+  if (kind === 'root') writeFileSync(protectedFile, 'trusted');
+  deniedCommand(`ln '${protectedFile}' '${join(work, 'writable-hardlink')}'`);
+  expect(existsSync(join(work, 'writable-hardlink'))).toBe(false);
+  expect(verifyProfile(profile)).toBeNull();
   const sibling = spawnSync('/usr/bin/sandbox-exec', ['-f', profile.path, '/bin/sh', '-c', `echo allowed > '${join(home, 'sibling')}'`]);
   expect(sibling.status).toBe(0);
 });
