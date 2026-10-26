@@ -29,6 +29,19 @@ const textContent = (v: unknown): string => typeof v === 'string' ? v : array(v)
 const toolName = (name: unknown): string | null => typeof name === 'string'
   ? /^(?:mcp__|mcp_)?wayfinder(?:__|_)(map_create|map_apply|map_list|map_read)$/.exec(name)?.[1] ?? null : null;
 
+function claudeAnswers(value: unknown, questions: string[]): string {
+  const answers = obj(obj(value).answers);
+  const annotations = obj(obj(value).annotations);
+  // Structured values preserve free text without parsing the agent's question/summary.
+  // Only notes are human-authored; annotation previews and question keys are not.
+  return questions.flatMap(question => {
+    const answer = str(answers[question]);
+    if (!answer?.trim()) return [];
+    const notes = str(obj(annotations[question]).notes);
+    return notes?.trim() ? [answer, notes] : [answer];
+  }).join('\n');
+}
+
 export function blankSession(key: string, harness: Session['harness'], nativeId: string | null): Session {
   return { key, harness, nativeId, subagent: false, model: null, effort: null, entry: 'unknown', usage: 'unknown',
     usageBasis: [], sources: [], skill: [], mcpSessionIds: [], fingerprints: [], calls: [], fragments: [], gaps: [], ambiguities: [], correlationBasis: [] };
@@ -37,6 +50,7 @@ export function blankSession(key: string, harness: Session['harness'], nativeId:
 /** Parse the clients' native JSONL envelopes, retaining original words and stable line references. */
 export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harness: 'codex' | 'claude', fileRef: string): Session[] {
   const sessions = new Map<string, Session>();
+  const claudeQuestions = new Map<Session, Map<string, string[]>>();
   let current: Session | undefined;
   const get = (id: string | null, subagentId: string | null = null) => {
     const key = sessionKey(harness, id ?? fileRef, subagentId);
@@ -130,14 +144,29 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
       if (row.type === 'user' || row.type === 'assistant') {
         if (row.isMeta !== true && !(row.type === 'user' && /<(?:local-command-stdout|local-command-caveat|command-message)>/.test(textContent(m.content))
           && !/<command-name>\/wayfinder<\/command-name>/.test(textContent(m.content)))) message(s, row.type, m.content, ref);
-        for (const block of array(m.content).map(obj)) {
+        const blocks = array(m.content).map(obj);
+        for (const block of blocks) {
           if (block.type === 'tool_use') {
             addCall(s, str(block.id), toolName(block.name), block.input, ref);
+            if (block.name === 'AskUserQuestion' && row.type === 'assistant' && row.isMeta !== true && str(block.id)) {
+              if (!claudeQuestions.has(s)) claudeQuestions.set(s, new Map());
+              claudeQuestions.get(s)!.set(String(block.id), array(obj(block.input).questions).flatMap(q => str(obj(q).question) ?? []));
+              s.fragments.push({ ref, role: 'assistant', text: JSON.stringify({ name: block.name, input: block.input }) });
+            }
             if (block.name === 'Skill' && /^(?:[^:]+:)?wayfinder$/.test(String(obj(block.input).skill))) {
               s.skill.push(ref); s.fragments.push({ ref, role: 'tool', text: JSON.stringify({ name: 'Skill', skill: obj(block.input).skill }) });
             }
           }
-          if (block.type === 'tool_result') result(s, str(block.tool_use_id), textContent(block.content), ref);
+          if (block.type === 'tool_result') {
+            const id = str(block.tool_use_id);
+            const questions = id ? claudeQuestions.get(s)?.get(id) : undefined;
+            // toolUseResult belongs to the row, so multiple results would make its owner ambiguous.
+            const answer = questions && row.type === 'user' && row.isMeta !== true && block.is_error !== true
+              && blocks.filter(b => b.type === 'tool_result').length === 1 ? claudeAnswers(row.toolUseResult, questions) : '';
+            if (answer) s.fragments.push({ ref, role: 'user', text: answer });
+            else if (s.calls.some(c => c.id === id)) result(s, id, textContent(block.content), ref);
+            else s.fragments.push({ ref, role: 'tool', text: textContent(block.content) });
+          }
         }
       }
     }
