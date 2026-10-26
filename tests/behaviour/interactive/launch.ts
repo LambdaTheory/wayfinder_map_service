@@ -1,12 +1,12 @@
 // Trusted outer launcher. The operator's command pins the manifest before any launch data is read.
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { appendFileSync, lstatSync, readFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, copyFileSync, lstatSync, readFileSync, utimesSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Writable } from 'node:stream';
 import { IsolationError, verifyProfile } from '../runner/codex.ts';
 import type { ControlProfile } from '../runner/codex.ts';
+import { digest } from './reviews.ts';
 import type { InteractiveClient } from './native.ts';
 
 export interface LaunchManifest {
@@ -16,13 +16,13 @@ export interface LaunchManifest {
   workdir: string;
   env: Record<string, string>;
   profile: ControlProfile;
+  codexLogin?: { source: string; copy: string };
 }
-export const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 export function readManifest(path: string, expected: string): LaunchManifest {
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.nlink !== 1) throw new IsolationError('launcher manifest is not a regular single-link file');
   const text = readFileSync(path, 'utf8');
-  if (sha256(text) !== expected) throw new IsolationError('launcher manifest changed');
+  if (digest(text) !== expected) throw new IsolationError('launcher manifest changed');
   return JSON.parse(text) as LaunchManifest;
 }
 
@@ -33,6 +33,17 @@ export async function launch(path: string, expected: string, inherited: NodeJS.P
     const manifest = readManifest(path, expected);
     const failure = verifyProfile(manifest.profile);
     if (failure) throw new IsolationError(failure);
+    if (manifest.codexLogin) {
+      const { source, copy } = manifest.codexLogin;
+      if (manifest.client !== 'codex' || !manifest.profile.mutableReadOnlyFiles.includes(copy))
+        throw new IsolationError('login copy is outside the pinned mutable files');
+      const stat = lstatSync(source);
+      if (!stat.isFile() || stat.nlink !== 1) throw new Error('Subscription login must be a regular single-link file');
+      // Preserve the pinned destination inode; do not parse, log or expose the original login path.
+      copyFileSync(source, copy); chmodSync(copy, 0o600); utimesSync(copy, stat.atime, stat.mtime);
+      const failure = verifyProfile(manifest.profile);
+      if (failure) throw new IsolationError(failure);
+    }
     // The operator supplies the setup-token result only to this trusted outer process. The client gets
     // a pipe descriptor, never token bytes in argv/environment or a copied keychain/login format.
     const oauth = manifest.client === 'claude' ? inherited.CLAUDE_CODE_OAUTH_TOKEN : undefined;

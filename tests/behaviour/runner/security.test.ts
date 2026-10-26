@@ -1,7 +1,8 @@
 import { syntheticClientState } from './test-state.ts';
 // Real Seatbelt attacks against disposable files, processes and services; no model is started.
+import { once } from 'node:events';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +12,7 @@ import { newToken, startService } from './service.ts';
 
 const available = spawnSync('which', ['sandbox-exec']).status === 0;
 const attack = test.skipIf(!available);
+const nativeAttack = test.skipIf(!available || !existsSync('/usr/bin/clang') || spawnSync('/usr/bin/clang', ['--version']).status !== 0);
 const root = realpathSync(mkdtempSync('/private/tmp/wf-behave-security-'));
 const clientState = syntheticClientState(root);
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -104,25 +106,30 @@ console.log(JSON.stringify({ inspections, envToken: !!process.env.WAYFINDER_TOKE
   } finally { victim.kill(); await service.stop(); rmSync(serviceDir, { recursive: true, force: true }); }
 }, 20_000);
 
-attack('Mach task-name inspection denies an outside process but permits the client and its child in either launch mode', async () => {
-  const { a, work, control, readOnlyDir } = setup();
+nativeAttack('Mach and process-info inspection permits own children but denies outside and peer sandboxes', async () => {
+  const { a, b, work, control, readOnlyDir } = setup();
+  const peers: ReturnType<typeof spawn>[] = [];
   const driverDir = mkdtempSync(join(readOnlyDir, 'task-name-'));
   const driver = join(driverDir, 'probe');
   const source = fileURLToPath(new URL('./task-name-probe.c', import.meta.url));
   const compiled = spawnSync('/usr/bin/clang', ['-Wall', '-Wextra', '-Werror', source, '-o', driver], { encoding: 'utf8' });
   expect(compiled.status, compiled.stderr).toBe(0);
   const victim = spawn('/bin/sleep', ['30'], { stdio: 'ignore' });
-  type Observation = { portResult: number; words: number[] };
-  type Probe = { external: Observation; self: Observation; child: Observation; childSignal: number };
+  type Observation = { portResult: number; words: number[]; procBytes: number };
+  type Probe = { external: Observation; self: Observation; child: Observation; childSignal: number; childListed: number };
   const readable = (result: Observation) => {
     expect(result.portResult).toBe(0);
     expect(result.words).toHaveLength(4);
+    expect(result.procBytes).toBeGreaterThan(0);
     expect(result.words.every(count => count > 0)).toBe(true);
   };
   const isolated = (text: string) => {
     const result = JSON.parse(text) as Probe;
     expect(result.external.portResult).not.toBe(0);
     expect(result.external.words).toEqual([0, 0, 0, 0]);
+    expect(result.external.procBytes).toBe(0);
+    // proc_listchildpids uses a global PID-list operation; keep that denial instead of exposing peers.
+    expect(result.childListed).toBe(0);
     readable(result.self); readable(result.child);
     expect(result.childSignal).toBe(15);
   };
@@ -133,6 +140,7 @@ attack('Mach task-name inspection denies an outside process but permits the clie
     const outside = spawnSync(driver, [], { input: prompt, env, encoding: 'utf8', timeout: 5000 });
     expect(outside.status, outside.stderr).toBe(0);
     readable((JSON.parse(outside.stdout) as Probe).external);
+    expect((JSON.parse(outside.stdout) as Probe).childListed).toBe(1);
     const profile = writeProfile(control, a, work, driver);
     const attached = spawnSync('sandbox-exec', ['-f', profile.path, driver], { cwd: work, input: prompt, env, encoding: 'utf8', timeout: 5000 });
     expect(attached.status, attached.stderr).toBe(0);
@@ -140,37 +148,81 @@ attack('Mach task-name inspection denies an outside process but permits the clie
       session: a, port: 1, workdir: work, profile, prompt });
     expect(detached.exitCode, detached.stderr).toBe(0);
     isolated(attached.stdout); isolated(detached.stdout);
+    // A separate sandbox instance is a peer even when it loads exactly the same profile file.
+    for (const peerProfile of [profile, writeProfile(control, b, work, '/bin/sh')]) {
+      const peer = spawn('sandbox-exec', ['-f', peerProfile.path, '/bin/sh', '-c', 'echo ready; exec /bin/sleep 30'], { stdio: ['ignore', 'pipe', 'ignore'] });
+      peers.push(peer); await once(peer.stdout!, 'data');
+      const probe = spawnSync('sandbox-exec', ['-f', profile.path, driver], { cwd: work, input: String(peer.pid), env, encoding: 'utf8', timeout: 5000 });
+      expect(probe.status, probe.stderr).toBe(0); isolated(probe.stdout);
+      expect(peer.exitCode).toBeNull(); expect(peer.signalCode).toBeNull();
+    }
     expect(victim.exitCode).toBeNull(); expect(victim.signalCode).toBeNull();
-  } finally { victim.kill(); }
+  } finally { victim.kill(); for (const peer of peers) peer.kill(); }
 }, 20_000);
+
+nativeAttack.each(['opens its controlling terminal', 'denies another same-user terminal'])('forkpty: %s', boundary => {
+  const { a, work, control, readOnlyDir } = setup();
+  const driverDir = mkdtempSync(join(readOnlyDir, 'tty-'));
+  const driver = join(driverDir, 'probe');
+  const source = fileURLToPath(new URL('./tty-probe.c', import.meta.url));
+  const compiled = spawnSync('/usr/bin/clang', ['-Wall', '-Wextra', '-Werror', source, '-o', driver], { encoding: 'utf8' });
+  expect(compiled.status, compiled.stderr).toBe(0);
+  const profile = writeProfile(control, a, work, driver);
+  const result = spawnSync(driver, [profile.path], { encoding: 'utf8', timeout: 8000 });
+  expect(result.status, result.stderr).toBe(0);
+  const observation = JSON.parse(result.stdout.match(/\{[^\r\n]+\}/)![0]);
+  if (boundary === 'opens its controlling terminal') expect(observation).toMatchObject({ ownRead: 1, ownWrite: 1 });
+  else expect(observation).toMatchObject({ peerReadError: 1, peerWriteError: 1 }); // EPERM
+});
 
 attack('a client can use only its own relay, whose credential overrides client-supplied Authorization', async () => {
   const { a, work, control, readOnlyDir } = setup();
   const { createServer } = await import('node:http');
+  const { connect } = await import('node:net');
   const { startRoute } = await import('./relay.ts');
   const { freePort } = await import('./service.ts');
   const seen: string[] = [];
   const target = createServer((req, res) => { seen.push(req.headers.authorization ?? ''); res.end('ok'); });
   const port = await freePort();
   await new Promise<void>(resolve => target.listen(port, '127.0.0.1', resolve));
+  const ipv6 = createServer((_req, res) => res.end('ok'));
+  const ipv6Port = await freePort();
+  await new Promise<void>(resolve => ipv6.listen(ipv6Port, '::1', resolve));
   const own = await startRoute(port, 'synthetic-A', () => undefined);
   const other = await startRoute(port, 'synthetic-B', () => undefined);
   const driverDir = mkdtempSync(join(readOnlyDir, 'relay-driver-'));
   const driver = join(driverDir, 'attack.mjs');
   writeFileSync(driver, `#!/usr/bin/env node
 let prompt = ''; for await (const chunk of process.stdin) prompt += chunk;
-const { own, other, direct } = JSON.parse(prompt);
+const { connect } = await import('node:net');
+const { own, other, direct, ipv6 } = JSON.parse(prompt);
+const socketProbe = (port, host) => new Promise(resolve => {
+  const socket = connect(port, host);
+  socket.setTimeout(1000, () => { socket.destroy(); resolve('timeout'); });
+  socket.once('connect', () => { socket.destroy(); resolve('connected'); });
+  socket.once('error', error => resolve(error.code));
+});
 const probe = async port => { try { return (await fetch('http://127.0.0.1:' + port + '/mcp', { headers: { Authorization: 'Bearer forged-controller' } })).status; } catch { return 'denied'; } };
-console.log(JSON.stringify([await probe(own), await probe(other), await probe(direct)]));
+console.log(JSON.stringify([await probe(own), await probe(other), await probe(direct),
+  await socketProbe(direct, '::ffff:127.0.0.1'), await socketProbe(direct, '::ffff:0.0.0.0'),
+  await socketProbe(ipv6, '::1'), await socketProbe(direct, '0.0.0.0'), await socketProbe(own, '::ffff:127.0.0.1')]));
 `); chmodSync(driver, 0o755);
   try {
+    // Every address reaches a test-owned listener before the sandbox; a denied result is not a dead endpoint.
+    for (const [host, targetPort] of [['::ffff:127.0.0.1', port], ['::ffff:0.0.0.0', port], ['::1', ipv6Port], ['0.0.0.0', port]] as const) {
+      await new Promise<void>((resolve, reject) => {
+        const socket = connect(targetPort, host);
+        socket.setTimeout(1000, () => { socket.destroy(); reject(new Error('positive control timed out')); });
+        socket.once('connect', () => { socket.destroy(); resolve(); }); socket.once('error', reject);
+      });
+    }
     const profile = writeProfile(control, a, work, driver, { localPorts: [own.port] });
     const result = await runTurn({ options: { model: 'fake', effort: 'low', bin: driver, sandbox: true, timeoutMs: 5000 },
-      session: a, port: own.port, workdir: work, profile, prompt: JSON.stringify({ own: own.port, other: other.port, direct: port }) });
+      session: a, port: own.port, workdir: work, profile, prompt: JSON.stringify({ own: own.port, other: other.port, direct: port, ipv6: ipv6Port }) });
     expect(result.exitCode, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual([200, 'denied', 'denied']);
+    expect(JSON.parse(result.stdout)).toEqual([200, 'denied', 'denied', ...Array(5).fill('EPERM')]);
     expect(seen).toEqual(['Bearer synthetic-A']);
-  } finally { await own.close(); await other.close(); await new Promise<void>(resolve => target.close(() => resolve())); }
+  } finally { await own.close(); await other.close(); await new Promise<void>(resolve => target.close(() => resolve())); await new Promise<void>(resolve => ipv6.close(() => resolve())); }
 });
 
 attack('the per-user system temp cannot carry data between sessions', () => {

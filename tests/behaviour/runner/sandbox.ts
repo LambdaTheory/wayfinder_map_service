@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative } from 'node:path';
+import { localNetworkDenials } from './network-policy.ts';
 import { reservedPorts } from './service.ts';
 
 export class IsolationError extends Error {
@@ -49,7 +50,7 @@ if (installedCodex) {
 // OS executables, libraries and TLS/DNS data; no generic /System, /Library, /usr, /var or /etc grant.
 const systemDirectories = ['/bin', '/sbin', '/usr/bin', '/usr/sbin', '/usr/lib', '/usr/share', '/System/Library',
   '/System/Volumes/Preboot/Cryptexes/OS/usr/lib', '/System/Volumes/Preboot/Cryptexes/OS/System/Library', '/private/etc/ssl'];
-const systemFiles = ['/', '/dev/null', '/dev/zero', '/dev/random', '/dev/urandom', '/private/etc/hosts', '/private/etc/resolv.conf', '/private/etc/localtime'];
+const systemFiles = ['/', '/dev/tty', '/dev/null', '/dev/zero', '/dev/random', '/dev/urandom', '/private/etc/hosts', '/private/etc/resolv.conf', '/private/etc/localtime'];
 
 export function prepareSandbox(scratch: string): SandboxLayout {
   scratch = realpathSync(scratch);
@@ -128,16 +129,16 @@ function sandboxProfile(p: Policy): string {
   return ['(version 1)', '(allow default)', '(deny file-read*)', '(allow file-read-metadata)',
     ...[...systemDirectories, ...p.readRoots, p.home, p.workdir].map(root => `(allow file-read* (subpath ${q(root)}))`),
     ...[...systemFiles, ...p.readFiles].map(file => `(allow file-read* (literal ${q(file)}))`),
-    '(deny file-write*)', `(allow file-write* (subpath ${q(p.home)}) (subpath ${q(p.workdir)}) (subpath "/dev"))`,
+    '(deny file-write*)', `(allow file-write* (subpath ${q(p.home)}) (subpath ${q(p.workdir)}) (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper"))`,
     ...p.denyRoots.map(root => `(deny file-write* (subpath ${q(root)}))`),
     ...p.denyEntries.map(path => `(deny file-write* (literal ${q(path)}))`),
     ...p.controlDirectories.map(root => `(deny file-read* (subpath ${q(root)}))`),
     // A deny filtered by "others" leaves same-session processes accessible in an attached launch.
-    '(deny sysctl-read (sysctl-name-prefix "kern.proc"))', '(deny process-info*)', '(allow process-info* (target self))',
+    '(deny sysctl-read (sysctl-name-prefix "kern.proc"))', '(deny process-info*)', '(allow process-info* (target self) (target same-sandbox))',
     '(deny mach-task-name)', '(allow mach-task-name (target self) (target same-sandbox))',
     '(deny signal)', '(allow signal (target self) (target same-sandbox))',
-    '(deny network-outbound (remote tcp "localhost:*") (remote udp "localhost:*"))',
-    ...p.localPorts.map(port => `(allow network-outbound (remote tcp "localhost:${port}"))`),
+    ...localNetworkDenials,
+    ...p.localPorts.map(port => `(allow network-outbound (remote tcp4 "localhost:${port}"))`),
     ...reservedPorts.map(port => `(deny network-outbound (remote ip "localhost:${port}"))`), ''].join('\n');
 }
 

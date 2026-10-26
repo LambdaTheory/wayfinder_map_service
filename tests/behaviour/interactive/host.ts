@@ -1,6 +1,6 @@
 // Manual B09b controller. Starts only its own service; prints a launcher for an approved operator to run.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, existsSync, symlinkSync, copyFileSync, chmodSync, lstatSync, utimesSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, existsSync, symlinkSync, lstatSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
@@ -9,7 +9,8 @@ import { attemptSchema, completeness } from '../evidence.ts';
 import type { AttemptRecord, Completeness } from '../evidence.ts';
 import { prepareClient, prepareSandbox, prepareWorkdir, verifyProfile, writeProfile } from '../runner/codex.ts';
 import type { ControlProfile } from '../runner/codex.ts';
-import { readManifest, sha256 } from './launch.ts';
+import { digest } from './reviews.ts';
+import { readManifest } from './launch.ts';
 import type { LaunchManifest } from './launch.ts';
 import { startRoute } from '../runner/relay.ts';
 import { connectController } from '../runner/controller.ts';
@@ -43,12 +44,14 @@ export function launcher({ scratch, client, bin, port, model, effort, subscripti
     for (const dir of ['.codex', '.claude', 'tmp']) mkdirSync(join(home, dir), { mode: 0o700 });
     const work = prepareWorkdir(scratch, [], scratch);
     const mutable: string[] = [];
+    let codexLogin: LaunchManifest['codexLogin'];
     if (client === 'codex') {
       const source = join(subscriptionHome, '.codex/auth.json');
       const stat = lstatSync(source);
       if (!stat.isFile() || stat.nlink !== 1) throw new Error('Subscription login must be a regular single-link file');
       const loginDir = join(readOnlyDir, 'login'); mkdirSync(loginDir, { mode: 0o700 });
-      const copy = join(loginDir, 'auth.json'); copyFileSync(source, copy); chmodSync(copy, 0o600); utimesSync(copy, stat.atime, stat.mtime);
+      const copy = join(loginDir, 'auth.json'); writeFileSync(copy, '', { mode: 0o600, flag: 'wx' });
+      codexLogin = { source, copy }; // Fill the pinned file only immediately before the approved launch.
       symlinkSync(copy, join(home, '.codex/auth.json')); mutable.push(copy);
     }
     const configuration = join(readOnlyDir, 'mcp'); mkdirSync(configuration, { mode: 0o700 });
@@ -66,10 +69,10 @@ export function launcher({ scratch, client, bin, port, model, effort, subscripti
     if (client === 'claude') for (const key of proxyVariables) if (proxyEnv[key] !== undefined) env[key] = proxyEnv[key]!;
     const executable = prepareClient(controlDir, bin);
     const profile = writeProfile(controlDir, { home }, work, executable, { readOnlyRoots: [configuration], mutableReadOnlyFiles: mutable, localPorts: [port] });
-    const manifest: LaunchManifest = { client, bin: executable, args, workdir: work, env, profile };
+    const manifest: LaunchManifest = { client, bin: executable, args, workdir: work, env, profile, ...(codexLogin ? { codexLogin } : {}) };
     const manifestPath = join(controlDir, 'launch.json'); const text = JSON.stringify(manifest);
     writeFileSync(manifestPath, text, { mode: 0o600, flag: 'wx' });
-    const manifestHash = sha256(text);
+    const manifestHash = digest(text);
     const command = [process.execPath, fileURLToPath(new URL('./launch.ts', import.meta.url)), manifestPath, manifestHash].map(q).join(' ');
     return { command, controlDir, manifestPath, manifestHash, profile };
   } catch (error) { rmSync(controlDir, { recursive: true, force: true }); throw error; }
@@ -151,7 +154,7 @@ export async function host(args: string[], options: { subscriptionHome: string; 
   } catch (error) {
     const safe = new Error(privateText(String(error), secrets));
     capture.run.detail = safe.message;
-    if (!abort.signal.aborted) capture.run.completeness = phase === 'service' ? 'service-failed' : 'driver-failed';
+    if (!abort.signal.aborted) capture.run.completeness = phase === 'service' ? 'service-failed' : !launchExposed ? 'launch-failed' : 'driver-failed';
     throw safe;
   } finally {
     clearTimeout(timer); readline.close(); process.removeListener('SIGINT', cancelled); process.removeListener('SIGTERM', cancelled);
@@ -188,20 +191,38 @@ export async function host(args: string[], options: { subscriptionHome: string; 
       }
       let controlIntegrity: Field<boolean> = absent('launcher was not prepared');
       const controlFailures: string[] = [];
-      let launchFailed = false;
+      let launchFailed = false; let launchStarted = false; let launchExited = false;
       if (prepared) {
+        // Preserve the launch record even if an independent manifest/profile check fails.
+        try {
+          const log = join(prepared.controlDir, 'launch.jsonl');
+          if (existsSync(log)) {
+            const text = readFileSync(log, 'utf8');
+            writePrivate(join(raw, 'launch.jsonl'), text, secrets);
+            capture.raw.files.push('raw/launch.jsonl');
+            for (const line of text.trim().split('\n').filter(Boolean)) {
+              const entry = JSON.parse(line) as { isolationFailure?: string; launchFailure?: string; phase?: string; launched?: boolean };
+              if (entry.phase === 'started' && entry.launched) launchStarted = true;
+              if (entry.phase === 'exited') launchExited = true;
+              if (entry.launchFailure) launchFailed = true;
+              if (entry.isolationFailure) controlFailures.push(entry.isolationFailure);
+            }
+          }
+        } catch { controlFailures.push('launcher evidence missing or invalid'); }
         try {
           readManifest(prepared.manifestPath, prepared.manifestHash);
           const failure = verifyProfile(prepared.profile); if (failure) controlFailures.push(failure);
-          const log = join(prepared.controlDir, 'launch.jsonl');
-          if (existsSync(log)) for (const line of readFileSync(log, 'utf8').trim().split('\n')) {
-            const entry = JSON.parse(line) as { isolationFailure?: string; launchFailure?: string; phase?: string; code?: number | null };
-            if (entry.launchFailure || (entry.phase === 'exited' && entry.code !== 0)) launchFailed = true;
-            if (entry.isolationFailure) controlFailures.push(entry.isolationFailure);
+        } catch { controlFailures.push('launcher control files missing or changed'); }
+        controlIntegrity = { known: true, value: controlFailures.length === 0 };
+        if (capture.run.completeness === 'complete') {
+          if (!launchStarted) {
+            capture.run.completeness = 'launch-failed';
+            capture.run.detail = launchFailed ? 'Interactive client launch failed' : 'No client start recorded';
+          } else if (launchFailed || !launchExited) {
+            capture.run.completeness = 'driver-failed'; capture.run.detail = 'Interactive launch record is incomplete';
           }
-          controlIntegrity = { known: true, value: controlFailures.length === 0 };
-        } catch { controlFailures.push('launcher control files missing or changed'); controlIntegrity = { known: true, value: false }; }
-        if (launchFailed && capture.run.completeness === 'complete') { capture.run.completeness = 'driver-failed'; capture.run.detail = 'Interactive client launch or exit failed'; }
+          // Exit codes and signals remain evidence. The operator's completion declaration is separate.
+        }
         if (controlFailures.length) { capture.run.completeness = 'driver-failed'; capture.run.detail = 'Interactive launcher isolation check failed'; }
       }
       let loginSync: unknown = { status: 'not-applicable' };
@@ -220,7 +241,7 @@ export async function host(args: string[], options: { subscriptionHome: string; 
       rmSync(join(dir, 'credentials.json'), { force: true });
       capture.run.endedAt = new Date().toISOString();
       if (!capture.maps.length) capture.missing.push('maps');
-      if (!capture.raw.files.length) capture.missing.push('events');
+      if (!capture.raw.files.some(file => file.startsWith('raw/native-'))) capture.missing.push('events');
       writePrivate(join(dir, 'capture.json'), capture, secrets);
       writePrivate(join(dir, 'isolation.json'), { serviceStopped: stopped ? { known: true, value: stopped } : { known: false, reason: 'service never started' },
         codexLoginSync: loginSync, controlIntegrity, controlFailures,

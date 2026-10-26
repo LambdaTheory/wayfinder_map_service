@@ -1,6 +1,7 @@
 // Native fake client: inspect only the supplied synthetic PID, itself and a child it creates.
 // Print return codes and word counts, never resource values, memory or environment contents.
 #include <mach/mach.h>
+#include <libproc.h>
 #include <signal.h>
 #include <stdio.h>
 #include <sys/wait.h>
@@ -17,7 +18,9 @@ static void inspect(pid_t pid) {
     kern_return_t result = task_info(name, flavors[i], data, &count);
     printf("%s%u", i ? "," : "", result == KERN_SUCCESS ? count : 0);
   }
-  printf("]}");
+  struct proc_bsdinfo info;
+  int bytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+  printf("],\"procBytes\":%d}", bytes);
   if (name != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), name);
 }
 
@@ -35,6 +38,11 @@ int main(void) {
   printf("{\"external\":"); inspect(external);
   printf(",\"self\":"); inspect(getpid());
   printf(",\"child\":"); inspect(child);
+  pid_t children[32] = { 0 };
+  proc_listchildpids(getpid(), children, sizeof(children));
+  int listed = 0;
+  for (unsigned i = 0; i < 32; i++) if (children[i] == child) listed = 1;
+  printf(",\"childListed\":%d", listed);
   int status = 0;
   if (kill(child, SIGTERM) != 0 || waitpid(child, &status, 0) != child) return 4;
   printf(",\"childSignal\":%d}\n", WIFSIGNALED(status) ? WTERMSIG(status) : 0);

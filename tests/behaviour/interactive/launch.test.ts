@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'vitest';
 import { launcher } from './host.ts';
@@ -48,11 +48,13 @@ writeFileSync('result.json', JSON.stringify({
 `, route.port);
     writeFileSync(join(f.work, 'attack.json'), JSON.stringify({ controls: [f.manifestPath, f.profile.path],
       source: join(f.subscriptionHome, '.codex/auth.json'), relay: route.port, direct: port }));
+    writeFileSync(join(f.subscriptionHome, '.codex/auth.json'), 'synthetic-latest-login');
     expect(await launch(f.manifestPath, f.manifestHash, { WAYFINDER_TOKEN: 'excluded-token', OPENAI_API_KEY: 'excluded-key' })).toBe(0);
     expect(JSON.parse(readFileSync(join(f.work, 'result.json'), 'utf8'))).toEqual({ reads: [false, false], writes: [false, false], source: false,
-      ownLogin: 'synthetic-login', own: 200, direct: 'denied', tokens: [] });
+      ownLogin: 'synthetic-latest-login', own: 200, direct: 'denied', tokens: [] });
     expect(received).toEqual(['Bearer synthetic-session-token']);
-    expect(readFileSync(join(f.subscriptionHome, '.codex/auth.json'), 'utf8')).toBe('synthetic-login');
+    expect(readFileSync(join(f.subscriptionHome, '.codex/auth.json'), 'utf8')).toBe('synthetic-latest-login');
+    expect(statSync(f.profile.mutableReadOnlyFiles[0]!).mode & 0o777).toBe(0o600);
   } finally { await route.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 
