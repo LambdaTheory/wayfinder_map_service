@@ -184,6 +184,34 @@ describe('capture from a read-only database', () => {
     expect(() => captureProblem(database(), input({ humanWords }))).toThrow(/Unredacted private path or credential/i);
   });
 
+  test.each([
+    'Bearer\u200Btokentoken', 'Bearer\u200Ctokentoken', 'Be\u200Darer\u2060tokentoken',
+    '/Users\u200B/synthetic/secret', 'C:\\Us\u200Eers\\synthetic\\secret',
+    'Ｂｅａｒｅｒ　ｔｏｋｅｎｔｏｋｅｎ', '／Ｕｓｅｒｓ／synthetic/secret', 'Bearer tökentoken',
+  ])('rejects an obfuscated private path or credential: %s', humanWords => {
+    expect(() => captureProblem(database(), input({ humanWords }))).toThrow(/Unredacted private path or credential/i);
+  });
+
+  test('checks normalized declared literals without silently rewriting public Unicode text', () => {
+    const path = database();
+    const humanWords = 'ｐｒｉｖａｔｅ\u200B-ｔｏｋｅｎ';
+    expect(() => captureProblem(path, input({ humanWords, redactions: [...input().redactions,
+      { id: 'normalized', value: 'private-token', replacement: '<redacted>' }] }))).toThrow(/declared private literal survived/i);
+    const publicWords = 'Ａ项比较：e\u0301，等用户确认 👩\u200D💻';
+    const result = captureProblem(path, input({ humanWords: publicWords }));
+    expect(result.record.source.humanWords).toBe(publicWords);
+    expect(result.scenario.turns[0]!.say.endsWith(publicWords)).toBe(true);
+  });
+
+  test('a Windows path outside known private prefixes requires an explicit literal rule', () => {
+    const path = database();
+    const humanWords = 'C:/Secret/proof.txt';
+    expect(captureProblem(path, input({ humanWords })).record.source.humanWords).toBe(humanWords);
+    const result = captureProblem(path, input({ humanWords, redactions: [...input().redactions,
+      { id: 'other-windows-path', value: humanWords, replacement: '<private-evidence>/proof.txt' }] }));
+    expect(result.record.source.humanWords).toBe('<private-evidence>/proof.txt');
+  });
+
   test('requires purpose-based choices for every Claim, never clears them wholesale', () => {
     const path = database();
     expect(() => captureProblem(path, input({ claims: [] }))).toThrow(/every current Claim/);
@@ -375,17 +403,72 @@ test('manual CLI writes a reusable bundle once, never overwrites it and never le
   const path = database();
   const request = join(dir, 'input.json');
   const out = join(dir, 'capture');
-  writeFileSync(request, JSON.stringify(input()));
+  const humanWords = 'Ａ项比较：e\u0301，等用户确认 👩\u200D💻';
+  writeFileSync(request, JSON.stringify(input({ id: 'PrivateCapture', humanWords, redactions: [...input().redactions,
+    { id: 'scenario-name', value: 'PrivateCapture', replacement: 'PublicCapture' }] })));
   const cli = fileURLToPath(new URL('./cli.ts', import.meta.url));
   const run = () => spawnSync(process.execPath, [cli, path, request, out], { encoding: 'utf8' });
-  expect(run().status).toBe(0);
+  const success = run();
+  expect(success.status).toBe(0);
+  expect(success.stdout).not.toContain('PrivateCapture');
+  expect(JSON.parse(success.stdout).scenario).toBe('PublicCapture');
   expect(readdirSync(out).sort()).toEqual(['capture.json', 'scenario.json', 'seed.json']);
   const before = readFileSync(join(out, 'capture.json'));
+  expect(JSON.parse(before.toString('utf8')).source.humanWords).toBe(humanWords);
   const duplicate = run();
   expect(duplicate.status).toBe(1);
   expect(duplicate.stderr).not.toContain(dir);
   expect(readFileSync(join(out, 'capture.json'))).toEqual(before);
   expect(readRevisions(path, 'Capture.Map', 28, false)).toHaveLength(1);
+});
+
+test.each([
+  { file: 'seed.json', value: 'partB",\n              "label": "partA' },
+  { file: 'scenario.json', value: 'partB",\n                "label": "partA' },
+  { file: 'capture.json', value: 'partB",\n    "humanWords": "partA' },
+])('CLI refuses a declared literal formed only by formatting $file before writing any output', ({ file, value }) => {
+  const first = sampleHistory()[0]!;
+  const prepared = prepareApply(first.state, { mapId: first.mapId, expectedRevision: 1, author: seedAuthor,
+    commands: [{ kind: 'content.add', section: 'fog', item: { id: 'f' as Revision['state']['fog'][number]['id'], text: 'Synthetic fog',
+      references: [{ locator: 'partB', label: 'partA' }] } }] });
+  if (prepared.kind !== 'prepared') throw new Error('fixture apply failed');
+  const path = database([first, revisionFromPrepared(prepared.change)]);
+  const request = input({ revision: 2, claims: [], redactions: [], sessionRef: 'partB', humanWords: 'partA' });
+  const bundle = captureProblem(path, request);
+  const candidates = { 'seed.json': bundle.seed, 'scenario.json': bundle.scenario, 'capture.json': bundle.record };
+  for (const [name, candidate] of Object.entries(candidates)) {
+    // Independent literal spans pin the differing indentations of the three files.
+    expect((JSON.stringify(candidate, null, 2) + '\n').includes(value)).toBe(name === file);
+  }
+  const dir = directory();
+  const manifest = join(dir, 'input.json');
+  const out = join(dir, 'capture');
+  writeFileSync(manifest, JSON.stringify({ ...request, redactions: [{ id: 'formatted-span', value, replacement: '<redacted>' }] }));
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('./cli.ts', import.meta.url)), path, manifest, out], { encoding: 'utf8' });
+  expect(result.status).toBe(1);
+  expect(result.stderr).toMatch(/declared private literal survived/i);
+  expect(result.stderr + result.stdout).not.toContain(value);
+  expect(result.stdout).toBe('');
+  expect(existsSync(out)).toBe(false);
+});
+
+test.each([
+  { value: '\\u0000', humanWords: '\u0000', name: 'JSON escape' },
+  { value: '}\n', humanWords: 'A public question', name: 'final newline' },
+  { value: 'CaptureTest","verdict":"specified', humanWords: 'A public question', name: 'stdout summary' },
+])('CLI checks the exact $name bytes before creating output', ({ value, humanWords }) => {
+  const dir = directory();
+  const manifest = join(dir, 'input.json');
+  const out = join(dir, 'capture');
+  writeFileSync(manifest, JSON.stringify(input({ humanWords, redactions: [...input().redactions,
+    { id: 'encoded-span', value, replacement: '<redacted>' }] })));
+  const result = spawnSync(process.execPath,
+    [fileURLToPath(new URL('./cli.ts', import.meta.url)), database(), manifest, out], { encoding: 'utf8' });
+  expect(result.status).toBe(1);
+  expect(result.stderr).toMatch(/declared private literal survived/i);
+  expect(result.stderr + result.stdout).not.toContain(value);
+  expect(result.stdout).toBe('');
+  expect(existsSync(out)).toBe(false);
 });
 
 test('capture modules can be imported without a build; only conversion loads the built domain', () => {

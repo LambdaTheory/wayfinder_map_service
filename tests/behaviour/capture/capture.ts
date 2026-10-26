@@ -110,12 +110,19 @@ function redact<T>(value: T, rules: RedactionRule[], log: CaptureRecord['redacti
   return walk(value, root) as T;
 }
 
+/** Inspect a normalized view only: preserve the original public text and redaction locations. */
+const privacyText = (value: string) => value.normalize('NFKC').replace(/\p{Cf}/gu, '');
+
 /** This is a guard, not an automatic secret detector. Maintainers still review all output before admission. */
 function guardPrivate(value: unknown, rules: RedactionRule[] = []) {
   if (typeof value === 'string') {
-    if (rules.some(r => value.includes(r.value))) throw new CaptureError('A declared private literal survived in the capture output');
-    if (/(?:file:\/\/|\/Users\/|\/home\/|\/private\/|~\/|[A-Za-z]:\\Users\\)/i.test(value)
-      || /Bearer\s+[A-Za-z0-9._-]{8,}/i.test(value)) throw new CaptureError('Unredacted private path or credential; add an explicit redaction rule');
+    const text = privacyText(value);
+    if (rules.some(r => {
+      const literal = privacyText(r.value);
+      return value.includes(r.value) || (literal.length > 0 && text.includes(literal));
+    })) throw new CaptureError('A declared private literal survived in the capture output');
+    if (/(?:file:\/\/|\/Users\/|\/home\/|\/private\/|~\/|[A-Za-z]:\\Users\\)/i.test(text)
+      || /Bearer\s*[\p{L}\p{N}\p{M}._~+/-]{8,}/iu.test(text)) throw new CaptureError('Unredacted private path or credential; add an explicit redaction rule');
   } else if (Array.isArray(value)) {
     for (const item of value) guardPrivate(item, rules);
   } else if (value && typeof value === 'object') {
@@ -124,6 +131,16 @@ function guardPrivate(value: unknown, rules: RedactionRule[] = []) {
       guardPrivate(item, rules);
     }
   }
+}
+
+/** Validate every exact UTF-8 output, including JSON layout and the final newline, before any file is created. */
+export function serializeCaptureOutput(bundle: CaptureBundle, rules: RedactionRule[]) {
+  const files: Record<string, Buffer> = Object.fromEntries(Object.entries({ 'seed.json': bundle.seed, 'scenario.json': bundle.scenario, 'capture.json': bundle.record })
+    .map(([file, value]) => [file, Buffer.from(JSON.stringify(value, null, 2) + '\n', 'utf8')]));
+  const summary = Buffer.from(JSON.stringify({ scenario: bundle.scenario.id,
+    verdict: bundle.record.verdict.status, reproduction: bundle.record.reproduction.status }) + '\n', 'utf8');
+  for (const bytes of [...Object.values(files), summary]) guardPrivate(bytes.toString('utf8'), rules);
+  return { files, summary };
 }
 
 export function captureProblem(database: string, input: CaptureInput): CaptureBundle {
