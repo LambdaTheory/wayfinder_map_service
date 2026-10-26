@@ -2,7 +2,7 @@
 // credential per session, run from this checkout's build. Never the everyday service or its database (R2).
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -42,9 +42,8 @@ export interface IsolatedService {
 }
 
 /**
- * Start the service in `dir` (created, private). The Controller authenticates with the primary token; every
- * other credential goes into the credentials file, so each Revision names the credential that wrote it. The
- * service runs in its own process group, so a Ctrl-C to the runner reaches it only through `stop()`, after the
+ * Start the service in `dir` (created, private). Every run credential, including the Controller, goes into
+ * the credentials file as a digest, so each Revision names its writer. The service runs in its own process group, so a Ctrl-C to the runner reaches it only through `stop()`, after the
  * evidence has been read.
  */
 export async function startService(dir: string, controller: Credential, others: Credential[]): Promise<IsolatedService> {
@@ -53,13 +52,13 @@ export async function startService(dir: string, controller: Credential, others: 
   const { initializeSQLite } = await import(pathToFileURL(join(checkoutRoot, 'dist/sqlite-storage.js')).href) as { initializeSQLite(path: string): unknown };
   await initializeSQLite(databasePath);
   const credentialsPath = join(dir, 'credentials.json');
-  writeFileSync(credentialsPath, JSON.stringify({ credentials: others.map(c => ({ clientId: c.clientId,
+  writeFileSync(credentialsPath, JSON.stringify({ credentials: [controller, ...others].map(c => ({ clientId: c.clientId,
     tokenSha256: createHash('sha256').update(c.token).digest('hex') })) }), { mode: 0o600 });
   const protocolReport = join(dir, 'protocol.jsonl');
   const port = await freePort();
-  const child = spawn(process.execPath, ['--import', observer, join(checkoutRoot, 'dist/mcp-start.js')], {
-    env: { PATH: process.env.PATH ?? '', WAYFINDER_DATABASE_PATH: databasePath, WAYFINDER_PORT: String(port), WAYFINDER_TOKEN: controller.token,
-      WAYFINDER_ACTOR_ID: 'behaviour-runner', WAYFINDER_CLIENT_ID: controller.clientId, WAYFINDER_ALLOWED_ORIGINS: '[]',
+  const child = spawn(process.execPath, ['--import', observer, fileURLToPath(new URL('./service-process.mjs', import.meta.url))], {
+    env: { PATH: process.env.PATH ?? '', WAYFINDER_DATABASE_PATH: databasePath, WAYFINDER_PORT: String(port),
+      WAYFINDER_ACTOR_ID: 'behaviour-runner', WAYFINDER_CLIENT_ID: 'Behaviour.UnusedPrimary', WAYFINDER_ALLOWED_ORIGINS: '[]',
       WAYFINDER_CREDENTIALS_FILE: credentialsPath, WAYFINDER_PROTOCOL_REPORT: protocolReport },
     stdio: ['ignore', 'pipe', 'pipe'], detached: true,
   });
@@ -82,4 +81,11 @@ export async function startService(dir: string, controller: Credential, others: 
     });
   } catch (error) { await stop(); throw error; }
   return { port, pid: child.pid!, databasePath, protocolReport, logs: () => logs, stop };
+}
+
+/** Preserve the only history copy when export fails; temporary credentials never survive cleanup. */
+export function cleanupServiceDirectory(dir: string, historyExported: boolean): { removed: boolean; retained: string | null } {
+  rmSync(join(dir, 'credentials.json'), { force: true });
+  if (historyExported) rmSync(dir, { recursive: true, force: true });
+  return { removed: !existsSync(dir), retained: !historyExported && existsSync(join(dir, 'db', 'maps.sqlite')) ? join(dir, 'db', 'maps.sqlite') : null };
 }

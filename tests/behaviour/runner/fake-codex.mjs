@@ -22,7 +22,7 @@ if (prompt.includes('FAKE-CRASH')) { console.error('fake launch failure'); proce
 if (prompt.includes('FAKE-SLEEP')) await new Promise(resolve => setTimeout(resolve, 30_000));
 let session; let n = 0;
 async function rpc(method, params, notify = false) {
-  const response = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${process.env.WAYFINDER_TOKEN}`, 'Content-Type': 'application/json',
+  const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json',
     Accept: 'application/json, text/event-stream', ...(session ? { 'mcp-session-id': session, 'mcp-protocol-version': '2025-11-25' } : {}) },
     body: JSON.stringify({ jsonrpc: '2.0', method, params, ...(notify ? {} : { id: ++n }) }) });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);

@@ -220,7 +220,11 @@ export const requiredFields = ['subject.kind', 'subject.id', 'subject.version', 
 export function redact(text: string, secrets: Record<string, string>): string {
   let out = text;
   for (const [name, secret] of Object.entries(secrets)) {
-    if (secret) out = out.split(secret).join(`<${name}>`);
+    if (name === 'bait-address' && secret) {
+      const port = new URL(secret).port;
+      // Match host aliases and schemeless commands, but never a different, longer port number.
+      out = out.replace(new RegExp(`(?:https?://)?(?:127\\.0\\.0\\.1|localhost):${port}(?![0-9])`, 'g'), `<${name}>`);
+    } else if (secret) out = out.split(secret).join(`<${name}>`);
   }
   return out;
 }

@@ -1,4 +1,5 @@
 // Session orchestration with actual MCP calls and fixed native evidence; never starts a model.
+import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +11,7 @@ import { library } from '../library.ts';
 import type { Scenario } from '../scenario.ts';
 import * as codex from './codex.ts';
 import { correlateReceipts } from './normalize.ts';
+import type { AttemptIsolation } from './run.ts';
 import { preflight, runAttempt } from './run.ts';
 
 const scratch = realpathSync(mkdtempSync('/private/tmp/wf-behave-sessions-'));
@@ -26,7 +28,7 @@ const run = async (s: Scenario, model = 'fake-sessions', timeoutMs = 10_000, can
   const outcome = await runAttempt({ batchId: 'T-sessions', scenarios: [], count: 1, ceiling: 1, out, scratchRoot: scratch,
     codex: { model, effort: 'low', bin: sandbox ? sandboxDriver : fileURLToPath(new URL('./fake-codex.mjs', import.meta.url)), sandbox, timeoutMs } },
   { attemptId: `${s.id}-1`, scenario: s }, () => cancel?.value ?? false, kill => { if (cancel) cancel.kill = kill; });
-  const record = JSON.parse(readFileSync(join(out, `${s.id}-1`, 'attempt.json'), 'utf8')) as AttemptRecord;
+  const record = JSON.parse(readFileSync(join(out, `${s.id}-1`, 'attempt.json'), 'utf8')) as AttemptRecord & { isolation: AttemptIsolation };
   return { outcome, record, out };
 };
 const seeded = (turns: Scenario['turns']): Scenario => ({ ...scenario('S6'), controller: [], turns });
@@ -41,7 +43,7 @@ describe('session scheduling and attribution', () => {
       { session: 'A', kind: 'opening', say: 'FAKE-CONCURRENT A' },
       { session: 'B', kind: 'opening', say: 'FAKE-CONCURRENT B', concurrent: true },
     ]));
-    expect(outcome.completeness).toBe('complete');
+    expect(outcome.completeness, outcome.detail).toBe('complete');
     const [a, b] = record.sessions.map(s => s.turns[0]!);
     expect(Date.parse(a!.startedAt)).toBeLessThan(Date.parse(b!.endedAt));
     expect(Date.parse(b!.startedAt)).toBeLessThan(Date.parse(a!.endedAt));
@@ -58,17 +60,17 @@ describe('session scheduling and attribution', () => {
     expect(record.given.map(g => g.session).sort()).toEqual(['A', 'B']);
   }, 30_000);
 
-  test('the real sandbox gives concurrent clients separate HOME access and protected profiles', async () => {
+  test.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('the real sandbox gives concurrent clients separate HOME access and protected profiles', async () => {
     const { outcome, record } = await run(seeded([
       { session: 'A', kind: 'opening', say: 'FAKE-CONCURRENT A' },
       { session: 'B', kind: 'opening', say: 'FAKE-CONCURRENT B', concurrent: true },
     ]), 'fake-sessions', 10_000, undefined, true);
-    expect(outcome.completeness).toBe('complete');
+    expect(outcome.completeness, outcome.detail).toBe('complete');
     const probes = record.events.filter(e => e.kind === 'command' && e.command.startsWith('probe-other-home'));
     expect(probes).toHaveLength(4);
     expect(probes.every(e => e.kind === 'command' && e.exitCode !== 0)).toBe(true);
     const profiles = record.events.flatMap(e => e.kind === 'controller' && e.action === 'isolation-check'
-      ? Object.keys((e.detail as { hashes: Record<string, string> }).hashes) : []);
+      ? (e.detail as { paths: string[] }).paths : []);
     expect(new Set(profiles).size).toBe(2);
   });
 
@@ -97,9 +99,12 @@ describe('session scheduling and attribution', () => {
       expect(outcome.completeness).toBe('driver-failed');
       expect(outcome.detail).toMatch(/isolation failure/);
       expect(mapCalls(record).some(e => e.turn === 1)).toBe(false);
-      expect(record.given.find(g => g.turn === 1)!.instructions.known).toBe(false);
+      expect(record.given.some(g => g.turn === 1)).toBe(false);
+      expect(record.sessions[0]!.turns).toHaveLength(1);
+      expect(record.sessions[0]!.nativeId).toEqual(record.sessions[0]!.turns[0]!.nativeId);
+      expect(record.events.some(e => e.actor === 'agent' && e.turn === 1)).toBe(false);
       expect(record.events.find(e => e.kind === 'controller' && e.action === 'isolation-check' && e.turn === 1)).toMatchObject({ detail: { ok: false } });
-      expect((record as AttemptRecord & { isolation: { failures: string[] } }).isolation.failures).toHaveLength(1);
+      expect(record.isolation.failures).toHaveLength(1);
     } finally { spy.mockRestore(); }
   });
 
@@ -109,7 +114,7 @@ describe('session scheduling and attribution', () => {
       { session: 'A', kind: 'opening', say: 'FAKE-FRESH', freshProcess: true },
       { session: 'A', kind: 'nudge', say: 'FAKE-FRESH' },
     ]));
-    expect(outcome.completeness).toBe('complete');
+    expect(outcome.completeness, outcome.detail).toBe('complete');
     const ids = record.sessions[0]!.turns.map(t => t.nativeId);
     expect(ids[0]).not.toEqual(ids[1]);
     expect(ids[1]).toEqual(ids[2]);
@@ -123,7 +128,7 @@ describe('session scheduling and attribution', () => {
 describe('Controller actions and preconditions', () => {
   test('S6 injects a real Conflict before A writes; only A turn 2 and B may commit agent changes', async () => {
     const { outcome, record } = await run(scenario('S6'));
-    expect(outcome.completeness).toBe('complete');
+    expect(outcome.completeness, outcome.detail).toBe('complete');
     const conflict = mapCalls(record, 'map_apply').find(e => e.session === 'A' && e.turn === 0 && e.result.known && (e.result.value as { kind: string }).kind === 'conflict');
     expect(conflict).toBeDefined();
     expect(record.events.some(e => e.actor === 'controller' && e.kind === 'controller' && e.action === 'conflicting-write')).toBe(true);
@@ -153,14 +158,14 @@ describe('Controller actions and preconditions', () => {
       { session: 'A', kind: 'opening', say: 'FAKE-EARLY-SKILL' },
       { session: 'A', kind: 'opening', say: 'FAKE-VERSION-B', freshProcess: true },
     ]));
-    expect(outcome.completeness).toBe('complete');
-    expect((record as AttemptRecord & { isolation: { clientSkills: string[] } }).isolation.clientSkills).toContain('early-only');
+    expect(outcome.completeness, outcome.detail).toBe('complete');
+    expect(record.isolation.clientSkills).toContain('early-only');
     expect(record.client.version).toEqual({ known: false, reason: 'cliVersion missing or inconsistent across native sessions' });
   });
 
   test.each(['S5', 'S10'])('%s resumes only after its proposal appeared', async id => {
     const { outcome, record } = await run(scenario(id));
-    expect(outcome.completeness).toBe('complete');
+    expect(outcome.completeness, outcome.detail).toBe('complete');
     expect(record.sessions[0]!.turns.map(t => t.index)).toEqual([0, 1]);
     expect(record.sessions[0]!.turns[0]!.nativeId).toEqual(record.sessions[0]!.turns[1]!.nativeId);
     if (id === 'S5') expect(happened('cleared', { command: 'claim.clear', turn: 1 })(record).status).toBe('holds');
@@ -184,7 +189,7 @@ describe('Controller actions and preconditions', () => {
 
   test('W5 fails business calls at the relay, keeps discovery alive, records the fault and redacts the bait', async () => {
     const { outcome, record, out } = await run(scenario('W5'));
-    expect(outcome.completeness).toBe('complete');
+    expect(outcome.completeness, outcome.detail).toBe('complete');
     const script = scenario('W5').requiredEvents[0]!;
     expect(script.judge === 'script' && script.check(record).status).toBe('holds');
     expect(mapCalls(record).some(e => e.turn === 1 && e.failed && !e.result.known)).toBe(true);

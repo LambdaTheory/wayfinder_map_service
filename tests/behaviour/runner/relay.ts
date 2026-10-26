@@ -1,9 +1,15 @@
-// A private route per session. It forwards the client's bytes unchanged and lets the Controller
-// interpose before a write, without filling arguments or turning its observations into agent receipts.
+// A private route per session attaches its credential and forwards the client's RPC body unchanged.
+// The Controller can interpose before a write without filling arguments or producing agent receipts.
 import { createServer, request } from 'node:http';
 import { freePort } from './service.ts';
 
 export interface RpcRequest { id?: string | number; method?: string; params?: { name?: string; arguments?: Record<string, unknown> } }
+export type RelayObservation =
+  | { phase: 'request' | 'cut'; at?: string; method?: string | undefined; sessionId: string | string[] | null; rpc: RpcRequest }
+  | { phase: 'response'; at: string; requestId: string | number | undefined; method: string | undefined;
+      sessionId: string | string[] | null; status: number | undefined; body: string }
+  | { phase: 'error' | 'hook-error'; requestId?: string | number | undefined; error: string };
+
 export interface Route {
   port: number;
   sessionIds: Set<string>;
@@ -13,7 +19,7 @@ export interface Route {
   close(): Promise<void>;
 }
 
-export async function startRoute(target: number, observe: (record: unknown) => void): Promise<Route> {
+export async function startRoute(target: number, token: string, observe: (record: RelayObservation) => void): Promise<Route> {
   let cut = false;
   const upstream = new Set<ReturnType<typeof request>>();
   const server = createServer(async (req, res) => {
@@ -25,10 +31,14 @@ export async function startRoute(target: number, observe: (record: unknown) => v
       try { rpc = JSON.parse(body.toString()) as RpcRequest; } catch { /* GET/DELETE have no JSON body */ }
       const sessionId = req.headers['mcp-session-id'] ?? null;
       observe({ phase: 'request', at: new Date().toISOString(), method: req.method, sessionId, rpc });
-      if (cut && rpc.method === 'tools/call') { res.writeHead(503).end('Service Unavailable'); observe({ phase: 'cut', sessionId, rpc }); return; }
+      if (cut && (Array.isArray(rpc) ? rpc : [rpc]).some(call => call.method === 'tools/call')) {
+        res.writeHead(503).end('Service Unavailable');
+        for (const call of Array.isArray(rpc) ? rpc : [rpc]) if (call.method === 'tools/call') observe({ phase: 'cut', sessionId, rpc: call });
+        return;
+      }
       await route.before?.(rpc);
       const proxy = request({ hostname: '127.0.0.1', port: target, method: req.method, path: req.url,
-        headers: { ...req.headers, host: `127.0.0.1:${target}` } }, response => {
+        headers: { ...req.headers, authorization: `Bearer ${token}`, host: `127.0.0.1:${target}` } }, response => {
         const id = response.headers['mcp-session-id'];
         if (typeof id === 'string') route.sessionIds.add(id);
         // Stream responses as they arrive (including SSE). Capture each response for hooks and raw evidence.

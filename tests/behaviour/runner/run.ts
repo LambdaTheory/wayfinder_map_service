@@ -12,15 +12,15 @@ import type { AttemptRecord, Completeness, EventRecord, Field, GivenRules, Sessi
 import { library } from '../library.ts';
 import { fixturesRoot, readiness, validateScenario } from '../scenario.ts';
 import type { ControllerAction, Scenario } from '../scenario.ts';
-import { clientSkills, findRollout, loginSecrets, looksRateLimited, prepareSession, prepareWorkdir, runTurn, writeProfile } from './codex.ts';
+import { IsolationError, clientSkills, findRollout, loginSecrets, looksRateLimited, prepareSession, prepareWorkdir, runTurn, writeProfile } from './codex.ts';
 import type { CodexOptions, CodexSession, ControlProfile } from './codex.ts';
 import { connectController } from './controller.ts';
 import { correlateReceipts, initialRules, readRollout, streamTurn } from './normalize.ts';
 import type { RolloutFacts } from './normalize.ts';
-import { checkoutRoot, everydayPort, newToken, startService } from './service.ts';
+import { checkoutRoot, cleanupServiceDirectory, everydayPort, newToken, startService } from './service.ts';
 import type { Credential } from './service.ts';
 import { startRoute, structuredReply } from './relay.ts';
-import type { Route } from './relay.ts';
+import type { RelayObservation, Route } from './relay.ts';
 
 export interface BatchOptions {
   batchId: string;
@@ -115,13 +115,6 @@ function snapshotWork(source: string, target: string, secrets: Record<string, st
   }
 }
 
-/** Preserve the only history copy when export fails; temporary credentials never survive cleanup. */
-export function cleanupServiceDirectory(dir: string, historyExported: boolean): { removed: boolean; retained: string | null } {
-  rmSync(join(dir, 'credentials.json'), { force: true });
-  if (historyExported) rmSync(dir, { recursive: true, force: true });
-  return { removed: !existsSync(dir), retained: !historyExported && existsSync(join(dir, 'db', 'maps.sqlite')) ? join(dir, 'db', 'maps.sqlite') : null };
-}
-
 const serviceCommit = () => { try { return execFileSync('git', ['-C', checkoutRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(); } catch { return 'unknown'; } };
 
 interface Session { label: string; credential: Credential; codex: CodexSession; record: SessionRecord; rollout: RolloutFacts | null; route?: Route; turn?: number }
@@ -136,6 +129,20 @@ function attribution(record: AttemptRecord) {
   const unplaced = revisions.filter(v => v.author.clientId !== record.controller.clientId
     && !committed.some(r => r.mapId === v.mapId && r.outcome.kind === 'committed' && r.outcome.revision === v.revision)).map(v => `${v.mapId}@${v.revision}`);
   return { agentRevisions: revisions.length, committedReceipts: committed.length, mismatched, unplaced };
+}
+
+export interface AttemptIsolation {
+  sandbox: boolean;
+  serviceStopped: { code: number | null; signal: string | null } | null;
+  servedOwnDatabase: boolean;
+  touchedEverydayDatabase: ReturnType<typeof touchedEverydayDatabase>;
+  scratchRemoved: boolean;
+  controlDirectoryRemoved: boolean;
+  databaseDirectoryRemoved: boolean;
+  retainedDatabase: string | null;
+  failures: string[];
+  clientSkills: string[];
+  attribution: ReturnType<typeof attribution>;
 }
 
 export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: () => boolean, register: (kill: () => void) => void): Promise<AttemptOutcome> {
@@ -164,11 +171,11 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   const startedAt = new Date().toISOString();
   const events: EventRecord[] = [];
   const emit = (event: EventRecord) => { events.push({ ...event, seq: events.length }); };
-  const controllerEvent = (action: string, detail: unknown, turn: number | null = null) => emit({ seq: 0, at: new Date().toISOString(),
-    actor: 'controller', session: null, turn, kind: 'controller', action, detail });
+  const controllerEvent = (action: string, detail: unknown, turn: number | null = null, session: string | null = null) => emit({ seq: 0, at: new Date().toISOString(),
+    actor: 'controller', session, turn, kind: 'controller', action, detail });
   const given: GivenRules[] = [];
   const exposures: (RolloutFacts | null)[] = [];
-  const relayLogs = new Map<string, unknown[]>();
+  const relayLogs = new Map<string, (RelayObservation & { turn: number | null })[]>();
   const active = new Set<() => void>();
   const killAll = () => { for (const kill of active) kill(); };
   register(killAll);
@@ -206,12 +213,10 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
     }
 
     for (const session of sessions) {
-      const log: unknown[] = []; relayLogs.set(session.label, log);
-      session.route = await startRoute(service.port, entry => {
-        log.push({ turn: session.turn ?? null, ...entry as object });
-        const observed = entry as { phase: string; rpc?: { id?: number | string; params?: { name?: string } } };
-        if (observed.phase === 'cut') emit({ seq: 0, at: new Date().toISOString(), actor: 'controller', session: session.label,
-          turn: session.turn ?? null, kind: 'controller', action: 'relay-cut', detail: { tool: observed.rpc?.params?.name, requestId: observed.rpc?.id } });
+      const log: (RelayObservation & { turn: number | null })[] = []; relayLogs.set(session.label, log);
+      session.route = await startRoute(service.port, session.credential.token, entry => {
+        log.push({ turn: session.turn ?? null, ...entry });
+        if (entry.phase === 'cut') controllerEvent('relay-cut', { tool: entry.rpc.params?.name, requestId: entry.rpc.id }, session.turn ?? null, session.label);
       });
     }
     const actionRuns = new Map<ControllerAction, Promise<void>>();
@@ -268,23 +273,28 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       };
       let profile = profiles.get(session.codex.home);
       if (!profile) {
-        profile = writeProfile(controlDir, session.codex, workdir, o.codex.bin);
+        profile = writeProfile(controlDir, session.codex, workdir, o.codex.bin, { localPorts: [session.route!.port, ...(bait ? [service!.port] : [])] });
         profiles.set(session.codex.home, profile);
       }
       const fromSeq = events.length;
-      const n = streamTurn(turn.session, index, turn.say, new Date().toISOString(), workdir, emit);
+      let n: ReturnType<typeof streamTurn> | undefined;
       const r = await runTurn({ options: o.codex, session: session.codex, port: session.route!.port, workdir,
-        prompt: turn.say, profile, onChild, onLine: n.line });
-      n.finish();
-      controllerEvent('isolation-check', { session: session.label, hashes: profile.hashes, ok: !r.isolationFailure }, index);
+        prompt: turn.say, profile, onChild,
+        onLaunch: () => {
+          controllerEvent('isolation-check', { session: session.label, paths: Object.keys(profile.hashes), ok: true }, index);
+          n = streamTurn(turn.session, index, turn.say, new Date().toISOString(), workdir, emit);
+        }, onLine: line => n?.line(line) });
+      n?.finish();
       if (r.isolationFailure) {
         isolationFailures.push(r.isolationFailure);
-        completeness = 'driver-failed'; detail = r.isolationFailure; killAll();
+        controllerEvent('isolation-check', { session: session.label, ok: false, launched: false, reason: r.isolationFailure }, index);
+        if (completeness === 'complete') { completeness = 'driver-failed'; detail = r.isolationFailure; }
+        killAll(); return;
       }
       emit({ seq: 0, at: r.endedAt, actor: 'agent', session: turn.session, turn: index, kind: 'process', exitCode: r.exitCode, signal: r.signal });
       writeRaw(`turn-${index}-${turn.session}.stdout.jsonl`, r.stdout);
       if (r.stderr.trim()) writeRaw(`turn-${index}-${turn.session}.stderr.txt`, r.stderr);
-      usage.inputTokens += n.usage.inputTokens; usage.outputTokens += n.usage.outputTokens;
+      usage.inputTokens += n!.usage.inputTokens; usage.outputTokens += n!.usage.outputTokens;
       const nativeId: Field<string> = r.turnStarted && r.threadId ? { known: true, value: r.threadId } : { known: false, reason: 'no thread started' };
       session.record.nativeId = nativeId;
       session.record.turns.push({ nativeId, index, input: turn.say, startedAt: r.startedAt, endedAt: r.endedAt, durationMs: r.durationMs });
@@ -295,7 +305,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       controllerEvent('native-session', { session: session.label, nativeId, visibleModel: session.rollout?.visibleModel ?? null,
         effort: session.rollout?.effort ?? null, clientVersion: session.rollout?.cliVersion ?? null }, index);
       given.push({ ...initialRules(ctl!.version, ctl!.instructions, ctl!.toolDescriptions, session.rollout), session: session.label, turn: index, fromSeq });
-      const responses = (relayLogs.get(session.label) ?? []) as { turn: number; phase: string; method?: string; status?: number }[];
+      const responses = relayLogs.get(session.label) ?? [];
       controllerEvent('relay-observations', { session: session.label,
         initializeResponses: responses.filter(e => e.turn === index && e.phase === 'response' && e.method === 'initialize' && e.status === 200).length,
         discoveryResponses: responses.filter(e => e.turn === index && e.phase === 'response' && e.method === 'tools/list' && e.status === 200).length }, index);
@@ -306,7 +316,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       if (r.timedOut) { completeness = 'timeout'; detail = `turn ${index} exceeded ${o.codex.timeoutMs} ms`; killAll(); return; }
       if (r.exitCode !== 0 || !r.turnStarted) {
         completeness = !r.turnStarted ? 'launch-failed' : looksRateLimited(r) ? 'rate-limited' : 'driver-failed';
-        detail = `turn ${index}: exit ${r.exitCode ?? r.signal}; ${[...n.errors, r.stderr.trim().split('\n').at(-1) ?? ''].join(' ').slice(0, 300)}`;
+        detail = `turn ${index}: exit ${r.exitCode ?? r.signal}; ${[...n!.errors, r.stderr.trim().split('\n').at(-1) ?? ''].join(' ').slice(0, 300)}`;
         killAll(); return;
       }
       const missed = during.filter(a => !actionRuns.has(a));
@@ -336,7 +346,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       for (const i of group) for (const a of s.controller.filter(a => 'before' in a.when && a.when.before === i))
         await runControllerAction(a, sessions.find(x => x.label === s.turns[i]!.session)!, i);
       const results = await Promise.allSettled(group.map(i => runOne(i).catch(error => {
-        if (String(error).includes('isolation failure')) isolationFailures.push(String(error));
+        if (error instanceof IsolationError) isolationFailures.push(String(error));
         if (completeness === 'complete') { completeness = 'driver-failed'; detail = String(error); }
         killAll(); throw error;
       })));
@@ -393,7 +403,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
     ...record.sessions.flatMap((x, i): [string, Field<unknown>][] => [[`sessions[${i}].nativeId`, x.nativeId], [`sessions[${i}].mcpSessionIds`, x.mcpSessionIds],
       ...x.turns.map((t, k): [string, Field<unknown>] => [`sessions[${i}].turns[${k}].nativeId`, t.nativeId!])])];
   record.missing = [...new Set([...missing, ...record.receipts.flatMap((r, i) => r.outcome.kind === 'unknown' ? [`receipts[${i}].outcome`] : []), ...unknownFields.filter(([, f]) => !f.known).map(([path]) => path)])];
-  const isolation = { sandbox: o.codex.sandbox, serviceStopped: stopped ?? null, servedOwnDatabase: service ? opened.has(service.databasePath) : false,
+  const isolation: AttemptIsolation = { sandbox: o.codex.sandbox, serviceStopped: stopped ?? null, servedOwnDatabase: service ? opened.has(service.databasePath) : false,
     touchedEverydayDatabase: touchedEverydayDatabase([...opened]), scratchRemoved: !existsSync(scratch), controlDirectoryRemoved: !existsSync(controlDir), databaseDirectoryRemoved: databaseCleanup.removed, retainedDatabase: databaseCleanup.retained, failures: isolationFailures, clientSkills: skills, attribution: attribution(record) };
   const text = tilde(redact(JSON.stringify({ ...record, isolation }, null, 1), secrets));
   if (leaks(text, secrets).length) return { attemptId: p.attemptId, scenario: s.id, completeness: 'driver-failed', detail: 'a credential survived redaction; record withheld' };
