@@ -1,8 +1,8 @@
 {
   "main": "e4d54cc189b853239c646143597780133292372f",
-  "branch": "593f8b03c1ad1deb523fcc88379220e0864d4f28",
-  "comparisons": 1080,
-  "unchanged": 995,
+  "branch": "af32b7c080c8934711819f4c3a32b17f1b491c20",
+  "comparisons": 1154,
+  "unchanged": 1053,
   "covered": [
     "F11",
     "S0",
@@ -100,6 +100,54 @@
     },
     {
       "file": "tests/behaviour/runner/upgrade.test.ts",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > a lost native Resource result leaves recovery unknown in U-codex-process",
+      "scenario": "U-codex-process",
+      "mode": "definition",
+      "before": "fail",
+      "after": "incomplete",
+      "baselineVersion": 2,
+      "branchVersion": 7,
+      "count": 2,
+      "reason": "R3/R4 rule 2: an unfinished native workflow Resource call may supply the new version; main infers a guessed version from its missing result. Complete stays insufficient-evidence and timeout stays incomplete, including explicit missing-result markers."
+    },
+    {
+      "file": "tests/behaviour/runner/upgrade.test.ts",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > a lost native Resource result leaves recovery unknown in U-codex-process",
+      "scenario": "U-codex-process",
+      "mode": "definition",
+      "before": "fail",
+      "after": "insufficient-evidence",
+      "baselineVersion": 2,
+      "branchVersion": 7,
+      "count": 2,
+      "reason": "R3/R4 rule 2: an unfinished native workflow Resource call may supply the new version; main infers a guessed version from its missing result. Complete stays insufficient-evidence and timeout stays incomplete, including explicit missing-result markers."
+    },
+    {
+      "file": "tests/behaviour/runner/upgrade.test.ts",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > a lost native Resource result leaves recovery unknown in U-codex-resume",
+      "scenario": "U-codex-resume",
+      "mode": "definition",
+      "before": "pass",
+      "after": "insufficient-evidence",
+      "baselineVersion": 2,
+      "branchVersion": 7,
+      "count": 2,
+      "reason": "B02c/R4: fresh initialization independently states the version, but after an actual refusal the client must still prove its Resource recovery. Main resume v2 lacks this recovery requirement and passes despite an unresolved Resource result; v7 stays insufficient-evidence."
+    },
+    {
+      "file": "tests/behaviour/runner/upgrade.test.ts",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > a missing Resource result cannot establish its derived rule phase or a canary reply violation",
+      "scenario": "U-codex-process",
+      "mode": "definition",
+      "before": "insufficient-evidence",
+      "after": "pass",
+      "baselineVersion": 2,
+      "branchVersion": 7,
+      "count": 1,
+      "reason": "B02c/R3: this is the intact successful process-mode control, whose corroborated Resource rules source main v2 does not recognize. Damaged Resource copies are compared separately and cannot pass."
+    },
+    {
+      "file": "tests/behaviour/runner/upgrade.test.ts",
       "test": "owned upgrade through the real shared sandbox, fake native driver only > a pre-exposure reply is not retroactively judged by the canary after timeout",
       "scenario": "U-codex-process",
       "mode": "definition",
@@ -109,6 +157,66 @@
       "branchVersion": 7,
       "count": 1,
       "reason": "B02c / R3 / spec section 3: main v2 does not recognize resource as a client-visible rules source; v7 verifies native Resource output plus the owned lifecycle, full definitions and exact history in this successful fake control."
+    },
+    {
+      "file": "tests/behaviour/runner/upgrade.test.ts",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > a proven exposure then stale retry survives a later lost Resource result in U-codex-process",
+      "scenario": "U-codex-process",
+      "mode": "definition",
+      "before": "incomplete",
+      "after": "fail",
+      "baselineVersion": 2,
+      "branchVersion": 7,
+      "count": 1,
+      "reason": "R4 rules 1/5: current rules were positively exposed before the stale retry; a later unresolved Resource result cannot erase that contradiction, including after timeout and in the flaky rerun cell."
+    },
+    {
+      "file": "tests/behaviour/runner/upgrade.test.ts",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > a proven exposure then stale retry survives a later lost Resource result in U-codex-process",
+      "scenario": "U-codex-process",
+      "mode": "definition",
+      "before": "insufficient-evidence",
+      "after": "fail",
+      "baselineVersion": 2,
+      "branchVersion": 7,
+      "count": 1,
+      "reason": "R4 rules 1/5: current rules were positively exposed before the stale retry; a later unresolved Resource result cannot erase that contradiction, including after timeout and in the flaky rerun cell."
+    },
+    {
+      "file": "tests/behaviour/runner/upgrade.test.ts",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > a proven exposure then stale retry survives a later lost Resource result in U-codex-process",
+      "scenario": "U-codex-process",
+      "mode": "definition",
+      "before": "insufficient-evidence",
+      "after": "pass",
+      "baselineVersion": 2,
+      "branchVersion": 7,
+      "count": 1,
+      "reason": "B02c/R3: this is the intact successful process-mode control, whose corroborated Resource rules source main v2 does not recognize. Damaged Resource copies are compared separately and cannot pass."
+    },
+    {
+      "file": "tests/behaviour/runner/upgrade.test.ts",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > a proven exposure then stale retry survives a later lost Resource result in U-codex-resume",
+      "scenario": "U-codex-resume",
+      "mode": "definition",
+      "before": "incomplete",
+      "after": "fail",
+      "baselineVersion": 2,
+      "branchVersion": 7,
+      "count": 1,
+      "reason": "R4 rules 1/5: current rules were positively exposed before the stale retry; a later unresolved Resource result cannot erase that contradiction, including after timeout and in the flaky rerun cell."
+    },
+    {
+      "file": "tests/behaviour/runner/upgrade.test.ts",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > a proven exposure then stale retry survives a later lost Resource result in U-codex-resume",
+      "scenario": "U-codex-resume",
+      "mode": "definition",
+      "before": "insufficient-evidence",
+      "after": "fail",
+      "baselineVersion": 2,
+      "branchVersion": 7,
+      "count": 1,
+      "reason": "R4 rules 1/5: current rules were positively exposed before the stale retry; a later unresolved Resource result cannot erase that contradiction, including after timeout and in the flaky rerun cell."
     },
     {
       "file": "tests/behaviour/runner/upgrade.test.ts",
@@ -628,6 +736,30 @@
     },
     {
       "file": "tests/behaviour/verdict.test.ts",
+      "test": "Attempt verdicts on fixed evidence > Conflict reread requires a completed native read: missing result field",
+      "scenario": "S6",
+      "mode": "helpers",
+      "before": "pass",
+      "after": "insufficient-evidence",
+      "baselineVersion": 1,
+      "branchVersion": 1,
+      "count": 1,
+      "reason": "R3/R4 (Claude suggestion): a turn-end flushed map_read with no native read result or a declared missing result cannot prove either successful rereading or its ordering; main incorrectly counts the call alone as success."
+    },
+    {
+      "file": "tests/behaviour/verdict.test.ts",
+      "test": "Attempt verdicts on fixed evidence > Conflict reread requires a completed native read: unknown result",
+      "scenario": "S6",
+      "mode": "helpers",
+      "before": "pass",
+      "after": "insufficient-evidence",
+      "baselineVersion": 1,
+      "branchVersion": 1,
+      "count": 1,
+      "reason": "R3/R4 (Claude suggestion): a turn-end flushed map_read with no native read result or a declared missing result cannot prove either successful rereading or its ordering; main incorrectly counts the call alone as success."
+    },
+    {
+      "file": "tests/behaviour/verdict.test.ts",
       "test": "Attempt verdicts on fixed evidence > missing evidence cannot prove absence: catalog first page / events",
       "scenario": "S12",
       "mode": "helpers",
@@ -829,6 +961,30 @@
       "branchVersion": 1,
       "count": 1,
       "reason": "R4: S15 proposal prerequisite is confirmed and a recorded write precedes every read in the complete read/command trace; timeout or missing other writes cannot erase this proved ordering violation (including the failed Attempt retained by the flaky rerun cell)."
+    },
+    {
+      "file": "tests/behaviour/verdict.test.ts",
+      "test": "upgrade checks judge the recovery path > legacy committed-version proof with an unresolved current-turn workflow Resource",
+      "scenario": "U-claude-process",
+      "mode": "definition",
+      "before": "fail",
+      "after": "incomplete",
+      "baselineVersion": 2,
+      "branchVersion": 2,
+      "count": 1,
+      "reason": "R3/R4 rule 2: the shared non-Codex checks also cannot infer guessed-version or wrong committed-version from an unresolved workflow Resource in this retry session/turn. The missing source blocks success and failure; unrelated-read controls still fail."
+    },
+    {
+      "file": "tests/behaviour/verdict.test.ts",
+      "test": "upgrade checks judge the recovery path > legacy committed-version proof with an unresolved current-turn workflow Resource",
+      "scenario": "U-claude-process",
+      "mode": "definition",
+      "before": "fail",
+      "after": "insufficient-evidence",
+      "baselineVersion": 2,
+      "branchVersion": 2,
+      "count": 1,
+      "reason": "R3/R4 rule 2: the shared non-Codex checks also cannot infer guessed-version or wrong committed-version from an unresolved workflow Resource in this retry session/turn. The missing source blocks success and failure; unrelated-read controls still fail."
     },
     {
       "file": "tests/behaviour/verdict.test.ts",
