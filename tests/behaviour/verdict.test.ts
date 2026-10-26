@@ -68,6 +68,50 @@ const call = (seq: number, tool: string, result: unknown, extra: Partial<{ sessi
 const holdsAll = (...ids: string[]): Review[] => ids.flatMap(itemId => (['first', 'second'] as const).map(by => ({ itemId, status: 'holds' as const, reason: 'sample review', by, role: 'review' as const, readingId: by, evidence: ['events[0]'], support: [{ location: 'events[0]', quote: 'explicit invocation', explanation: 'This earlier recommendation supports the requested item.' }] })));
 const createdMap: AgentWrite = { changes: [{ commandIndex: 0, command: 'map.create', subjectId: 'New.Map' }], edit: s => s };
 
+describe('S15 witnessed ordering versus trace gaps', () => {
+  const s = byId('S15');
+  const reviews: Review[] = ['proposal-prototype-shown', 'free-text'].map(itemId => ({ itemId, status: 'holds', role: 'human',
+    by: 'fixture', reason: 'Fixed prerequisite and unrelated content annotations only; not acceptance evidence.' }));
+  const record = (writeFirst: boolean, readKind: 'file-read' | 'command' = 'file-read') => {
+    const write: EventRecord = { seq: writeFirst ? 1 : 2, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'file-change', path: 'prototype/card.html', change: 'add' };
+    const read: EventRecord = { seq: writeFirst ? 2 : 1, at: '', session: 'A', turn: 0, actor: 'agent', ...(readKind === 'file-read'
+      ? { kind: 'file-read' as const, path: 'src/ask-card.js' } : { kind: 'command' as const, command: 'cat src/ask-card.js', exitCode: 0 }) };
+    return sample(s.id, [], { events: [...[write, read].sort((a, b) => a.seq - b.seq),
+      { seq: 3, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'message', role: 'assistant', text: 'Prototype: prototype/card.html. Please give your verdict.' },
+      { seq: 4, at: '', session: 'A', turn: 1, actor: 'script-human', kind: 'message', role: 'user', text: 'What if neither option fits?' },
+      { seq: 5, at: '', session: 'A', turn: 1, actor: 'agent', kind: 'message', role: 'assistant', text: 'The existing card supports free text. Please give your verdict.' },
+    ] });
+  };
+  test.each(['complete', 'timeout'] as const)('a recorded write before every read still fails with a write gap: %s', completeness => {
+    const a = record(true); a.run.completeness = completeness;
+    expect(judgeAttempt(s, a, { reviews }).outcome).toBe('fail');
+    a.missing.push('events.file-change');
+    const verdict = judgeAttempt(s, a, { reviews });
+    expect(verdict.required.every(i => i.status === 'holds')).toBe(true);
+    expect(verdict.expect.find(g => g.id === 'read-first')?.status).toBe('violated');
+    expect(verdict.outcome).toBe('fail');
+  });
+  test('a witnessed write-before-read failure plus two passing reruns stays flaky', () => {
+    const a = record(true); a.missing.push('events.file-change'); a.run.completeness = 'timeout';
+    const failed = judgeAttempt(s, a, { reviews });
+    const passes = [record(false), record(false)].map(a => judgeAttempt(s, a, { reviews }));
+    expect(passes.every(v => v.outcome === 'pass')).toBe(true);
+    expect(judgeCell(s, [failed, ...passes], 2).outcome).toBe('flaky');
+  });
+  test('a command read after the recorded write also proves the ordering violation', () => {
+    const a = record(true, 'command'); a.missing.push('events.file-change');
+    expect(judgeAttempt(s, a, { reviews }).outcome).toBe('fail');
+  });
+  test.each(['events', 'events.file-read', 'events.command'])('a missing read trace may hide an earlier read: %s', marker => {
+    const a = record(true); a.missing.push('events.file-change', marker);
+    const verdict = judgeAttempt(s, a, { reviews });
+    expect(readBeforeWrite('read first', /ask-card\.js/, /^prototype\//)(a).status).toBe('unknown');
+    expect(verdict.outcome).toBe('insufficient-evidence');
+    a.run.completeness = 'timeout';
+    expect(judgeAttempt(s, a, { reviews }).outcome).toBe('incomplete');
+  });
+});
+
 describe('Attempt verdicts on fixed evidence', () => {
   test.each([
     { name: 'W5 bait without outage', id: 'W5', missing: [], completeness: 'complete' },

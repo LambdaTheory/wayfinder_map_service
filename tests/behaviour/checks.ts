@@ -261,13 +261,13 @@ export function noFileChanged(label: string, pattern: RegExp): ScriptCheck {
 /** Expectation: a file matching `read` was read before the first change to a file matching `write`. */
 export function readBeforeWrite(label: string, read: RegExp, write: RegExp): ScriptCheck {
   return a => {
-    const gap = need(a, label, 'events.file-change');
-    if (gap) return gap; // The first recorded write may not be the first write.
     const firstWrite = evs(a, 'file-change').find(e => write.test(e.path));
     if (!firstWrite) return need(a, label, 'events.file-change') ?? notObserved(`nothing written matching ${write}`);
     const reads = [...evs(a, 'file-read').filter(e => read.test(e.path)), ...evs(a, 'command').filter(e => read.test(e.command))]
       .filter(e => e.seq < firstWrite.seq);
-    if (reads.length) return holds(label, [...reads.map(e => at(a, e)), at(a, firstWrite)]);
+    // Missing writes can hide an earlier write, so they block success. They cannot undo this recorded
+    // write-before-read contradiction when the read/command trace is complete.
+    if (reads.length) return need(a, label, 'events.file-change') ?? holds(label, [...reads.map(e => at(a, e)), at(a, firstWrite)]);
     return need(a, label, 'events.file-read', 'events.command') ? unknown(`${label}: reads were not recorded`, [at(a, firstWrite)], 'model')
       : violated(`wrote ${firstWrite.path} before reading ${read}`, [at(a, firstWrite)]);
   };

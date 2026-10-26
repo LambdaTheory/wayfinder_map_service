@@ -144,7 +144,7 @@ export interface Scenario {
   seed: Seed;
   turns: Turn[];
   controller: ControllerAction[];
-  /** Events that must be proven before any other verdict counts (R4), e.g. a real Conflict. */
+  /** Prerequisites for positive expectations, quality and absence-only checks (R4/R9); independently proved must-nots still fail. */
   requiredEvents: Item[];
   mustNot: Item[];
   expect: ExpectGroup[];

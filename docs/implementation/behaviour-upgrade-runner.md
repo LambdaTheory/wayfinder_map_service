@@ -160,7 +160,7 @@ npm run build
 node tests/behaviour/compare-main.mjs --out /tmp/wayfinder-verdict-comparison.json
 ```
 
-The [saved comparison](behaviour-upgrade-main-comparison.json) is from code commit `cf6d132` against main `18e1528`: **1048 Attempt outcomes, 970 unchanged, 78 changed outcomes in 66 exact manifest entries**. All 32 stock definitions were covered; existing interactive imports were compared through their supplied definitions. There were **zero unlisted changes, stale entries or count mismatches**. The comparison suite passed **23 files / 764 tests** in 92.08 seconds. These are repeated judgements of synthetic test inputs, not 1048 real Attempts. The intentional differences are completely enumerated in the JSON report and manifest; grouped here for review:
+The [fourth-round comparison](https://github.com/kun-g/wayfinder_map_service/blob/37f9fee/docs/implementation/behaviour-upgrade-main-comparison.json) is from code commit `cf6d132` against main `18e1528`: **1048 Attempt outcomes, 970 unchanged, 78 changed outcomes in 66 exact manifest entries**. All 32 stock definitions were covered; existing interactive imports were compared through their supplied definitions. There were **zero unlisted changes, stale entries or count mismatches**. The comparison suite passed **23 files / 764 tests** in 92.08 seconds. These are repeated judgements of synthetic test inputs, not 1048 real Attempts. The intentional differences are completely enumerated in that JSON report and manifest; grouped here for review (the fifth-round extension follows):
 
 | Changed evidence / rule | Manifest entries / outcomes | Main → branch | Why main's result cannot be retained |
 | --- | --- | --- | --- |
@@ -181,5 +181,40 @@ The [saved comparison](behaviour-upgrade-main-comparison.json) is from code comm
 | S15 first-write ordering with missing file changes | 2 / 2 | pass → insufficient | R3/R4: an earlier write may be missing, so the positive ordering is unproved |
 
 The W5 bait, S0b early-create, S9/W2 early-Settlement, valid human/model must-not, interrupted reviewed expectations, pre-exposure reply and interactive capability fixtures retain main's outcomes; they are not exceptions in the manifest. S6/W5's interrupted-expectation cases now explicitly prove their script prerequisites. The fourth-round changes passed `npm run build`, full `npm test` (**39 files / 1984 tests**, including 54 upgrade runner tests; 92.89 seconds), `npm run typecheck` and `git diff --check` on Node 26.3.0 after `npm ci`. Only the comparison artifact and this verification text were added afterward; no product code, sandbox policy or real-model acceptance changed.
+
+### Fifth-review S15 proof boundary
+
+The [fourth Codex re-review](https://github.com/kun-g/wayfinder_map_service/pull/107#issuecomment-6421772350) confirmed all 78 listed outcome changes and found one uncovered converse of the S15 write-gap guard. Main `e4d54cc` was merged in `c96e7f7` before this fix. Its changes since the prior baseline concern the ChatGPT runner; the main verdict engine, common checks and Scenario definitions are unchanged. The comparison now pins this latest main.
+
+`readBeforeWrite` now checks the present recorded write against the read/command trace before deciding whether missing writes defeat its proof. A missing earlier write can invalidate a claimed success, but cannot repair a recorded write that precedes every read in a complete read trace. If reads or commands themselves are missing, an earlier read remains possible and the result stays unknown. The requiredEvents API comment now describes the dependent expectation gate and explicitly excludes independently proved must-nots.
+
+| S15 evidence, proposal prerequisite confirmed | Complete | Timeout |
+| --- | --- | --- |
+| Write before every read; only file-change records missing | `fail` | `fail` |
+| Read before the recorded write; file-change records missing | `insufficient-evidence` | `incomplete` |
+| Write before recorded read, but an earlier read/command may be missing | `insufficient-evidence` | `incomplete` |
+
+The first row plus two passing reruns is `flaky`. An undecided complete Attempt still blocks a cell's pass; an interrupted Attempt without a proved violation can be rerun under the existing R4 cell rule.
+
+The first row is tested through the actual S15 definition, with labelled fixed annotations only for the proposal prerequisite and unrelated free-text requirement. The complete, timeout and rerun regressions all failed before the fix; a command-based late read also reproduced the failure. Three controls cover missing `events`, `events.file-read` and `events.command`; the previous read-before-write/write-gap controls remain unchanged. The verdict test file passed all 105 tests after the fix, without any real model readings.
+
+The similar-guard audit found no further change needed:
+
+- `never`, `noFileChanged`, `usedBait`, Conflict replay, excess-creation/Settlement counts and upgrade committed-write checks inspect positive proof before returning an unrelated gap; existing regressions retain those failures.
+- Catalog paging, Conflict rereads, first-refusal ordering and guessed versions depend on an absence within the same missing trace; an omitted page/read/refusal/source can change that conclusion, so unknown is correct.
+- `atEnd` needs the final Map history, and command/reference-shape recovery needs the complete subsequent write trace; a missing later state or successful correction can change their conclusion.
+- Upgrade retry attestation already preserves a request contradicting an exposed rules source before checking later trace gaps; its prior lifecycle-complete regression remains in the full suite.
+
+The main-comparison manifest retains all 66 prior entries / 78 outcomes and adds only these S15 cases:
+
+| New comparison | Entries / outcomes | Main → branch | Reason |
+| --- | --- | --- | --- |
+| Recorded write before all reads, timeout, with and without the write gap | 2 / 4 | `incomplete` → `fail` | R4: prerequisite and contradiction are proved before interruption; both engine and stock-definition comparisons |
+| Same failure in the cell with two passing reruns | 2 / 2 | `incomplete` → `fail` | R4: retain the failed Attempt so cell aggregation remains `flaky`; both comparison modes |
+| Possible omitted command read before the write, complete run | 1 / 1 | `fail` → `insufficient-evidence` | R3/R4: main's stock helper ignores the command trace gap; it cannot prove that the write preceded every read |
+
+The complete write-before-read case (including a command read) is again `fail` on both main and this branch, so it needs no exception. The previous read-before-write/write-gap comparisons still block false success. These are repeated judgements of fixed inputs, not real Attempts or new scenario definitions.
+
+Fifth-round verification on Node 26.3.0 after `npm ci`: `npm run build`, `npm test` (**39 files / 2019 tests**), `npm run typecheck` and `git diff --check` pass. The increase from 1984 is 28 tests merged from main and seven S15 regressions. No real models or private run records were used.
 
 Standards: no new package dependency, product code or sandbox permission; service ownership and cleanup remain explicit; raw evidence is redacted and kept outside the repository. Spec: R2 lifecycle and isolation, R3 actual client exposure and independent persistence evidence, R4 no false green or W5 conflation, separate upgrade accounting. Only tests and documentation change, so the Release Version stays 2.1.0 under mcp-sqlite §14.3; this changes no shipped mandatory rule or client tool contract and requires no pre-merge ChatGPT run. The outstanding gate is Kun's approval for real Codex quota, followed by the approved verdict reviews.
