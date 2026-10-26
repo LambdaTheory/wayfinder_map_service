@@ -9,6 +9,7 @@ import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { attemptSchema, classifyResult, leaks, redact } from '../evidence.ts';
 import type { AttemptRecord, Completeness, EventRecord, Field, GivenRules, SessionRecord } from '../evidence.ts';
+import { proxyEnvironment, proxyRouting, proxySummary } from '../proxy.ts';
 import { library } from '../library.ts';
 import { fixturesRoot, readiness, validateScenario } from '../scenario.ts';
 import type { ControllerAction, Scenario } from '../scenario.ts';
@@ -35,6 +36,8 @@ export interface BatchOptions {
   loginSource: ClientLogin | null;
   /** Root of the personal configuration to compare; tests inject a synthetic HOME. */
   personalConfigRoot: string;
+  /** Explicit input; tests omit it or supply synthetic proxies. CLI selects only six keys. */
+  proxyEnv?: Record<string, string>;
 }
 
 export interface PlannedAttempt { attemptId: string; scenario: Scenario }
@@ -149,6 +152,7 @@ export interface AttemptIsolation {
 }
 
 export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: () => boolean, register: (kill: () => void) => void): Promise<AttemptOutcome> {
+  const proxies = proxyRouting(o.proxyEnv ?? {});
   const s = p.scenario;
   const outputError = outputRefusal(o.out);
   if (outputError) return { attemptId: p.attemptId, scenario: s.id, completeness: 'not-run', detail: outputError };
@@ -171,6 +175,8 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   const nativeSessions = sessions.map(s => s.codex);
   const secrets: Record<string, string> = { 'controller-token': controller.token,
     ...Object.fromEntries(sessions.flatMap(x => [[`token-${x.label}`, x.credential.token], ...loginSecrets(x.codex).map((v, i) => [`codex-login-${x.label}-${i}`, v])])) };
+  for (const [key, value] of Object.entries(o.proxyEnv ?? {})) if (key.toLowerCase() !== 'no_proxy') secrets[`proxy-original-${key}`] = value;
+  for (const [key, value] of Object.entries(proxies.environment)) if (key.toLowerCase() !== 'no_proxy') secrets[`proxy-${key}`] = value;
   const startedAt = new Date().toISOString();
   const events: EventRecord[] = [];
   const emit = (event: EventRecord) => { events.push({ ...event, seq: events.length }); };
@@ -284,7 +290,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       };
       let profile = profiles.get(session.codex.home);
       if (!profile) {
-        profile = writeProfile(controlDir, session.codex, workdir, nativeOptions.bin, { localPorts: [session.route!.port, ...(bait ? [service!.port] : [])] });
+        profile = writeProfile(controlDir, session.codex, workdir, nativeOptions.bin, { localPorts: [session.route!.port, ...(bait ? [service!.port] : [])], proxyEnv: proxies.environment });
         profiles.set(session.codex.home, profile);
       }
       const fromSeq = events.length;
@@ -292,7 +298,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       const r = await runTurn({ options: nativeOptions, session: session.codex, port: session.route!.port, workdir,
         prompt: turn.say, profile, onChild,
         onLaunch: () => {
-          controllerEvent('isolation-check', { session: session.label, paths: Object.keys(profile.hashes), ok: true }, index);
+          controllerEvent('isolation-check', { session: session.label, paths: Object.keys(profile.hashes), proxy: proxySummary(profile.proxyEnvironment), ok: true }, index);
           n = streamTurn(turn.session, index, turn.say, new Date().toISOString(), workdir, emit);
         }, onLine: line => n?.line(line) });
       n?.finish();
@@ -435,6 +441,7 @@ export const personalConfigNamesRun = (text: string) => /wf-behave-|behaviour-ru
 export async function runBatch(o: BatchOptions): Promise<{ outcomes: AttemptOutcome[]; refusals: string[] }> {
   const { plan, refusals } = preflight(o);
   if (refusals.length) return { outcomes: [], refusals };
+  try { proxyRouting(o.proxyEnv ?? {}); } catch (error) { return { outcomes: [], refusals: [(error as Error).message] }; }
   const outputError = outputRefusal(o.out);
   if (outputError) return { outcomes: [], refusals: [outputError] };
   if (existsSync(o.out)) return { outcomes: [], refusals: [`${tilde(o.out)} already exists; a Batch never reuses an output directory`] };
@@ -464,7 +471,7 @@ export async function runBatch(o: BatchOptions): Promise<{ outcomes: AttemptOutc
   const mentionsRun = Object.keys(after.files).filter(f => { const path = f.replace(/^~/, homedir());
     return existsSync(path) && personalConfigNamesRun(readFileSync(path, 'utf8')); });
   writeFileSync(join(o.out, 'batch.json'), JSON.stringify({ batchId: o.batchId, combination: `codex:${o.codex.model}:${o.codex.effort}`, entry: 'mcp-only',
-    sandbox: o.codex.sandbox, plan: plan.map(p => p.attemptId), ceiling: o.ceiling, outcomes,
+    sandbox: o.codex.sandbox, proxy: proxySummary(o.proxyEnv ?? {}), plan: plan.map(p => p.attemptId), ceiling: o.ceiling, outcomes,
     isolation: { before, after, unchanged: JSON.stringify(before) === JSON.stringify(after), personalConfigNamingThisRun: mentionsRun } }, null, 1), { mode: 0o600 });
   return { outcomes, refusals: [] };
 }
@@ -477,9 +484,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.error('usage: run.ts --batch <id> --scenarios S0b,F11 --count 2 --ceiling 4 [--model gpt-6-astra] [--effort xhigh]');
     process.exit(2);
   }
+  const proxyEnv = proxyEnvironment(homedir(), process.env);
+  proxyRouting(proxyEnv); // Refuse invalid routing before opening subscription state.
   const result = await runBatch({ batchId: values.batch, scenarios: values.scenarios.split(','), count: Number(values.count), ceiling: Number(values.ceiling),
     out: values.out ?? join(homedir(), 'Library/Application Support/Wayfinder/behaviour-runs', values.batch), scratchRoot: '/private/tmp',
-    loginSource: { contents: readFileSync(join(homedir(), '.codex/auth.json'), 'utf8') }, personalConfigRoot: homedir(),
+    loginSource: { contents: readFileSync(join(homedir(), '.codex/auth.json'), 'utf8') }, personalConfigRoot: homedir(), proxyEnv,
     codex: { model: values.model, effort: values.effort, bin: values.codex, sandbox: !values['no-sandbox'], timeoutMs: Number(values['timeout-min']) * 60_000 } });
   for (const r of result.refusals) console.error(`refused: ${r}`);
   if (result.refusals.length) process.exit(1);

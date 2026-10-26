@@ -19,7 +19,8 @@ import { W1, W7 } from '../scenarios/pace.ts';
 import { isolationSnapshot, isolationMeasurements, openDatabases } from './isolation.ts';
 import type { IsolationSnapshot } from './isolation.ts';
 import { privateText, writePrivate } from './privacy.ts';
-import { claudeProxyEnvironment, proxyVariables, syncCodexLogin } from './subscription.ts';
+import { syncCodexLogin } from './subscription.ts';
+import { proxyEnvironment, proxyRouting, proxySummary } from '../proxy.ts';
 import type { Field } from '../evidence.ts';
 import type { InteractiveClient } from './native.ts';
 
@@ -36,6 +37,7 @@ export interface PreparedLauncher {
 }
 /** Prepare controls, never a model call. port is a credential-injecting relay, not the service itself. */
 export function launcher({ scratch, client, bin, port, model, effort, subscriptionHome, proxyEnv = {} }: LaunchOptions): PreparedLauncher {
+  proxyRouting(proxyEnv); // Refuse before preparing login state or launcher controls.
   scratch = realpathSync(scratch);
   const { controlDir, readOnlyDir } = prepareSandbox(scratch);
   try {
@@ -66,9 +68,9 @@ export function launcher({ scratch, client, bin, port, model, effort, subscripti
     const env: Record<string, string> = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, TMPDIR: join(home, 'tmp'),
       CODEX_HOME: join(home, '.codex'), CLAUDE_CONFIG_DIR: join(home, '.claude'), LANG: 'en_US.UTF-8', TERM: 'xterm-256color',
       DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' };
-    if (client === 'claude') for (const key of proxyVariables) if (proxyEnv[key] !== undefined) env[key] = proxyEnv[key]!;
     const executable = prepareClient(controlDir, bin);
-    const profile = writeProfile(controlDir, { home }, work, executable, { readOnlyRoots: [configuration], mutableReadOnlyFiles: mutable, localPorts: [port] });
+    const profile = writeProfile(controlDir, { home }, work, executable, { readOnlyRoots: [configuration], mutableReadOnlyFiles: mutable, localPorts: [port], proxyEnv });
+    Object.assign(env, profile.proxyEnvironment);
     const manifest: LaunchManifest = { client, bin: executable, args, workdir: work, env, profile, ...(codexLogin ? { codexLogin } : {}) };
     const manifestPath = join(controlDir, 'launch.json'); const text = JSON.stringify(manifest);
     writeFileSync(manifestPath, text, { mode: 0o600, flag: 'wx' });
@@ -127,9 +129,11 @@ export async function host(args: string[], options: { subscriptionHome: string; 
   try {
     scratch = mkdtempSync('/private/tmp/wayfinder-interactive-');
     const bin = realpathSync(executable);
-    const proxyEnv = client === 'claude' ? claudeProxyEnvironment(options.subscriptionHome, options.inheritedEnv ?? process.env) : {};
+    const proxyEnv = proxyEnvironment(options.subscriptionHome, options.inheritedEnv ?? process.env);
+    const proxies = proxyRouting(proxyEnv);
     // Bypass hosts are public routing data; redacting them would corrupt loopback MCP evidence.
     for (const [key, value] of Object.entries(proxyEnv)) if (key.toLowerCase() !== 'no_proxy') secrets[`proxy-${key}`] = value;
+    for (const [key, value] of Object.entries(proxies.environment)) if (key.toLowerCase() !== 'no_proxy') secrets[`proxy-normalized-${key}`] = value;
     capture.service.commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkoutRoot, encoding: 'utf8' }).trim();
     before = observe([dir, scratch]);
     phase = 'service';
@@ -244,7 +248,7 @@ export async function host(args: string[], options: { subscriptionHome: string; 
       if (!capture.maps.length) capture.missing.push('maps');
       if (!capture.raw.files.some(file => file.startsWith('raw/native-'))) capture.missing.push('events');
       writePrivate(join(dir, 'capture.json'), capture, secrets);
-      writePrivate(join(dir, 'isolation.json'), { serviceStopped: stopped ? { known: true, value: stopped } : { known: false, reason: 'service never started' },
+      writePrivate(join(dir, 'isolation.json'), { proxy: prepared ? proxySummary(prepared.profile.proxyEnvironment) : { enabled: false, variables: [], unavailable: true }, serviceStopped: stopped ? { known: true, value: stopped } : { known: false, reason: 'service never started' },
         codexLoginSync: loginSync, controlIntegrity, controlFailures,
         controlDirectoryRemoved: prepared ? !existsSync(prepared.controlDir) : null,
         ...(prepared && existsSync(prepared.controlDir) ? { retainedControlDirectory: prepared.controlDir } : {}),

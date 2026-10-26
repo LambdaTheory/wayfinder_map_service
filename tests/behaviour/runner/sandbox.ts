@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative } from 'node:path';
+import { proxyRouting } from '../proxy.ts';
 import { localNetworkDenials } from './network-policy.ts';
 import { reservedPorts } from './service.ts';
 
@@ -17,6 +18,8 @@ export interface SandboxAccess {
   denyWriteRoots?: string[];
   denyWritePaths?: string[];
   localPorts?: number[];
+  /** Explicit proxy input; never load personal settings inside the sandbox API. */
+  proxyEnv?: NodeJS.ProcessEnv;
 }
 export interface SandboxLayout { readonly scratch: string; readonly controlDir: string; readonly readOnlyDir: string }
 const layouts = new Map<string, SandboxLayout>();
@@ -88,6 +91,7 @@ export interface ControlProfile {
   mutableReadOnlyFiles: string[];
   identities: Readonly<Record<string, string>>;
   pinnedRoots: string[];
+  proxyEnvironment: Readonly<Record<string, string>>;
 }
 function fileHash(path: string): string {
   const stat = lstatSync(path);
@@ -122,7 +126,7 @@ const hashes = (p: Pick<ControlProfile, 'path' | 'readOnlyRoots'>) => ({ ...tree
 
 interface Policy {
   home: string; workdir: string; readRoots: string[]; readFiles: string[];
-  denyRoots: string[]; denyEntries: string[]; localPorts: number[]; controlDirectories: string[];
+  denyRoots: string[]; denyEntries: string[]; localPorts: number[]; proxyRules: string[]; controlDirectories: string[];
 }
 function sandboxProfile(p: Policy): string {
   const q = JSON.stringify;
@@ -145,6 +149,7 @@ function sandboxProfile(p: Policy): string {
     '(deny mach-task-name)', '(allow mach-task-name (target self) (target same-sandbox))',
     '(deny signal)', '(allow signal (target self) (target same-sandbox))',
     ...localNetworkDenials,
+    ...p.proxyRules,
     ...p.localPorts.map(port => `(allow network-outbound (remote tcp4 "localhost:${port}"))`),
     ...reservedPorts.map(port => `(deny network-outbound (remote ip "localhost:${port}"))`), ''].join('\n');
 }
@@ -152,6 +157,7 @@ function sandboxProfile(p: Policy): string {
 /** All grants, including Node and the client, go through the same canonical allowlist. */
 export function writeProfile(controlDir: string, session: { home: string }, workdir: string, bin: string, access: SandboxAccess = {}): ControlProfile {
   try {
+    const proxies = proxyRouting(access.proxyEnv ?? {});
     const layout = layoutFor(controlDir);
     if (!lstatSync(session.home).isDirectory()) throw new IsolationError('session HOME must be a real directory');
     if (!lstatSync(workdir).isDirectory()) throw new IsolationError('workdir must be a real directory inside this Attempt');
@@ -188,8 +194,8 @@ export function writeProfile(controlDir: string, session: { home: string }, work
     const immutableHashes = treeHashes(readOnlyRoots); // Validate before reserving the exclusive profile path.
     const path = join(layout.controlDir, `${basename(home)}.sb`);
     writeFileSync(path, sandboxProfile({ home, workdir, readRoots, readFiles: [executable, ...mutable], denyRoots,
-      denyEntries: Object.keys(expectedIdentities), controlDirectories: controls, localPorts: access.localPorts ?? [] }), { flag: 'wx', mode: 0o600 });
-    const profile = { path, readOnlyRoots, mutableReadOnlyFiles: mutable, pinnedRoots, identities: expectedIdentities };
+      denyEntries: Object.keys(expectedIdentities), controlDirectories: controls, localPorts: access.localPorts ?? [], proxyRules: proxies.rules }), { flag: 'wx', mode: 0o600 });
+    const profile = { path, readOnlyRoots, mutableReadOnlyFiles: mutable, pinnedRoots, identities: expectedIdentities, proxyEnvironment: Object.freeze(proxies.environment) };
     return { ...profile, hashes: Object.freeze({ ...immutableHashes, [path]: fileHash(path) }) };
   } catch (error) { if (error instanceof IsolationError) throw error; throw new IsolationError(`cannot prepare sandbox: ${String(error)}`); }
 }

@@ -20,7 +20,7 @@ function fixture(client: InteractiveClient, code: string, port: number) {
   const driver = join(root, 'fake-client.mjs');
   writeFileSync(driver, '#!/usr/bin/env node\n' + code); chmodSync(driver, 0o700);
   const prepared = launcher({ scratch, client, bin: driver, port, model: 'fake', effort: 'low', subscriptionHome,
-    proxyEnv: { HTTPS_PROXY: 'http://synthetic-proxy.invalid', NO_PROXY: '127.0.0.1', ANTHROPIC_API_KEY: 'excluded-key', EXTRA: 'excluded-setting' } });
+    proxyEnv: { HTTPS_PROXY: 'http://127.0.0.1:23457/', NO_PROXY: '127.0.0.1', ANTHROPIC_API_KEY: 'excluded-key', EXTRA: 'excluded-setting' } });
   dirs.push(prepared.controlDir);
   const manifest = readManifest(prepared.manifestPath, prepared.manifestHash);
   return { ...prepared, manifest, scratch, subscriptionHome, work: manifest.workdir };
@@ -89,7 +89,7 @@ writeFileSync('result.json', JSON.stringify({ subscription: token === 'synthetic
   expect(await launch(f.manifestPath, f.manifestHash, { CLAUDE_CODE_OAUTH_TOKEN: 'synthetic-subscription', ANTHROPIC_API_KEY: 'excluded-key', EXTRA: 'excluded-setting' })).toBe(0);
   const result = JSON.parse(readFileSync(join(f.work, 'result.json'), 'utf8'));
   expect(result.subscription).toBe(true);
-  expect(result.env).toMatchObject({ CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: '3', HTTPS_PROXY: 'http://synthetic-proxy.invalid', NO_PROXY: '127.0.0.1' });
+  expect(result.env).toMatchObject({ CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: '3', HTTPS_PROXY: 'http://127.0.0.1:23457/', NO_PROXY: '127.0.0.1' });
   for (const key of ['WAYFINDER_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'EXTRA']) expect(result.env).not.toHaveProperty(key);
 });
 

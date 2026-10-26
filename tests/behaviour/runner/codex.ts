@@ -112,7 +112,7 @@ export function runTurn({ options: o, session: s, port, workdir, prompt, profile
   const args = codexArgs(o, port, workdir, s.thread);
   const [cmd, argv] = o.sandbox ? ['sandbox-exec', ['-f', profile.path, o.bin, ...args]] : [o.bin, args];
   const env = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: s.home, CODEX_HOME: s.codexHome, TMPDIR: join(s.home, 'tmp'),
-    LANG: 'en_US.UTF-8' };
+    LANG: 'en_US.UTF-8', ...profile.proxyEnvironment };
   const started = Date.now();
   return new Promise(resolve => {
     const child = spawn(cmd as string, argv as string[], { cwd: workdir, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });

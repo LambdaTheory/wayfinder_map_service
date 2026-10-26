@@ -36,16 +36,16 @@ describe('proxy selection and validation', () => {
   });
   test.each([null, [], 'private fixture', { env: null }, { env: [] }, { env: 'private fixture' }])(
     'invalid settings shape returns a fixed error without its contents (%j)', settings => {
-      expect(() => reviewProxyEnvironment(home(settings), {})).toThrow('Review proxy settings unavailable; refusing to fall back to a direct connection');
+      expect(() => reviewProxyEnvironment(home(settings), {})).toThrow('Proxy settings unavailable; refusing to fall back to a direct connection');
     });
   test('invalid JSON, unreadable settings and proxy value types do not leak contents or paths', () => {
     const malformed = home(); const path = join(malformed, '.claude/settings.json');
     writeFileSync(path, '{synthetic-private-content');
-    expect(() => reviewProxyEnvironment(malformed, {})).toThrow(new ReviewProxyError('Review proxy settings unavailable; refusing to fall back to a direct connection'));
+    expect(() => reviewProxyEnvironment(malformed, {})).toThrow(new ReviewProxyError('Proxy settings unavailable; refusing to fall back to a direct connection'));
     rmSync(path); mkdirSync(path);
-    expect(() => reviewProxyEnvironment(malformed, {})).toThrow(new ReviewProxyError('Review proxy settings unavailable; refusing to fall back to a direct connection'));
+    expect(() => reviewProxyEnvironment(malformed, {})).toThrow(new ReviewProxyError('Proxy settings unavailable; refusing to fall back to a direct connection'));
     expect(() => reviewProxyEnvironment(home({ env: { HTTPS_PROXY: { private: 'fixture' } } }), {}))
-      .toThrow(new ReviewProxyError('Review proxy setting must be a string'));
+      .toThrow(new ReviewProxyError('Proxy setting must be a string'));
   });
   test('normalizes proxy URLs to IPv4 and generates only their TCP ports; bypass lists create no exceptions', () => {
     expect(reviewProxyRouting({ HTTP_PROXY: 'http://127.1:2345', HTTPS_PROXY: 'http://127.0.0.1:2345',
@@ -59,7 +59,7 @@ describe('proxy selection and validation', () => {
   test.each(['[::1]', '[::ffff:127.0.0.1]', '[::ffff:0.0.0.0]', '127.0.0.2', 'proxy.invalid'])(
     'unsupported proxy host %s is unavailable, not an exception for a broader endpoint', hostname => {
       expect(() => reviewProxyRouting({ HTTPS_PROXY: `http://${hostname}:2345` }))
-        .toThrow(new ReviewProxyError('Review proxy must use localhost or 127.0.0.1'));
+        .toThrow(new ReviewProxyError('Proxy must use localhost or 127.0.0.1'));
     });
   test.each(['not a URL', 'http://localhost:99999', 'http://localhost:0', 'file:///private/fixture', 'socks5://localhost:1234'])(
     'invalid or unsupported proxy URLs fail without echoing the URL (%s)', value => {
@@ -68,7 +68,7 @@ describe('proxy selection and validation', () => {
     });
   test.each([18765, 18766])('reserved port %i cannot gain a proxy exception', port => {
     for (const hostname of ['127.0.0.1', 'localhost', '[::1]', 'proxy.invalid'])
-      expect(() => reviewProxyRouting({ HTTPS_PROXY: `http://${hostname}:${port}` })).toThrow('Review proxy uses a reserved Wayfinder port');
+      expect(() => reviewProxyRouting({ HTTPS_PROXY: `http://${hostname}:${port}` })).toThrow('Proxy uses a reserved Wayfinder port');
   });
 });
 
@@ -102,16 +102,16 @@ socket.on('error', error => { console.error(error.code); process.exitCode = 1; }
       const result = await new CliReviewDriver(5000, subscriptionHome).checkLogin({ cli, model: 'fixture' });
       expect(neighbour.connections()).toBe(0);
       expect(proxy.connections()).toBe(0);
-      expect(result).toMatchObject({ available: false, detail: 'Review proxy must use localhost or 127.0.0.1' });
+      expect(result).toMatchObject({ available: false, detail: 'Proxy must use localhost or 127.0.0.1' });
     } finally { await proxy.close(); await neighbour.close(); }
   });
   test.each(['claude', 'codex'] as const)('%s refuses reserved ports and malformed settings before launching', async cli => {
     clearProxyEnvironment(); vi.stubEnv('PATH', '/usr/bin:/bin'); // No native model executable can be found.
     const malformed = home(); writeFileSync(join(malformed, '.claude/settings.json'), '{synthetic-private-content');
     for (const [subscriptionHome, detail] of [
-      ...[18765, 18766].map(port => [home({ env: { HTTPS_PROXY: `http://127.0.0.1:${port}` } }), 'Review proxy uses a reserved Wayfinder port']),
-      [home(null), 'Review proxy settings unavailable; refusing to fall back to a direct connection'],
-      [malformed, 'Review proxy settings unavailable; refusing to fall back to a direct connection'],
+      ...[18765, 18766].map(port => [home({ env: { HTTPS_PROXY: `http://127.0.0.1:${port}` } }), 'Proxy uses a reserved Wayfinder port']),
+      [home(null), 'Proxy settings unavailable; refusing to fall back to a direct connection'],
+      [malformed, 'Proxy settings unavailable; refusing to fall back to a direct connection'],
     ] as [string, string][]) {
       const driver = new CliReviewDriver(5000, subscriptionHome);
       const response = await driver.invoke({ id: 'fixture', kind: 'availability', target: { cli, model: 'fixture' }, input: 'No real model.' });

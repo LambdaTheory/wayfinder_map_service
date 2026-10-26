@@ -200,3 +200,45 @@ describe('inside the sandbox', () => {
     }
   }, 60_000);
 });
+
+test.skipIf(!sandboxAvailable)('an entire Batch forwards normalized proxies and records only routing metadata with scrubbed native output', async () => {
+  let connections = 0;
+  const proxy = createServer(socket => { connections++; socket.end('fixture'); });
+  const port = await freePort();
+  await new Promise<void>(resolve => proxy.listen(port, '127.0.0.1', resolve));
+  const bin = join(scratch, 'proxy-client.mjs');
+  writeFileSync(bin, readFileSync(fakeCodex, 'utf8').replace('const url =', `
+const proxy = new URL(process.env.HTTPS_PROXY);
+if (proxy.hostname !== '127.0.0.1' || process.env.ALL_PROXY || process.env.OPENAI_API_KEY) throw new Error('proxy environment mismatch');
+await new Promise((resolve, reject) => {
+  import('node:net').then(({connect}) => {
+    const socket = connect(Number(proxy.port), proxy.hostname); socket.on('data', () => {});
+    socket.once('end', resolve); socket.once('error', reject);
+  });
+});
+console.error(process.env.HTTPS_PROXY);
+const url =`), { mode: 0o700 });
+  const out = join(records, 'proxy-batch');
+  try {
+    const result = await runBatch({ batchId: 'T-proxy', scenarios: ['S0b'], count: 1, ceiling: 1, out,
+      codex: { model: 'fake-model', effort: 'low', bin, sandbox: true, timeoutMs: 10_000 }, scratchRoot: scratch, ...clientState,
+      proxyEnv: { HTTPS_PROXY: `http://synthetic-user:synthetic-password@localhost:${port}`, NO_PROXY: '127.0.0.1,localhost' } });
+    expect(result.refusals).toEqual([]); expect(result.outcomes[0]?.completeness).toBe('complete');
+    expect(connections).toBe(2);
+    const metadata = { enabled: true, variables: ['HTTPS_PROXY', 'NO_PROXY'] };
+    expect(JSON.parse(readFileSync(join(out, 'batch.json'), 'utf8')).proxy).toEqual(metadata);
+    const attempt = readFileSync(join(out, 'S0b-1/attempt.json'), 'utf8');
+    expect(JSON.parse(attempt).events.filter((e: { action: string }) => e.action === 'isolation-check')[0].detail.proxy).toEqual(metadata);
+    for (const text of [attempt, ...[0, 1].map(turn => readFileSync(join(out, `S0b-1/raw/turn-${turn}-A.stderr.txt`), 'utf8'))]) {
+      expect(text).not.toContain('synthetic-password');
+    }
+  } finally { await new Promise<void>(resolve => proxy.close(() => resolve())); }
+}, 30_000);
+
+test('a Batch refuses invalid proxy settings before creating output or a service', async () => {
+  const out = join(records, 'refused-proxy');
+  const result = await runBatch({ batchId: 'T-refused', scenarios: ['S0b'], count: 1, ceiling: 1, out, scratchRoot: scratch, ...clientState,
+    codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: true, timeoutMs: 1000 }, proxyEnv: { HTTPS_PROXY: 'http://localhost:18766' } });
+  expect(result).toEqual({ outcomes: [], refusals: ['Proxy uses a reserved Wayfinder port'] });
+  expect(existsSync(out)).toBe(false);
+});

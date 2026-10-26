@@ -673,9 +673,9 @@ it('login synchronization refuses a client-created parent symlink before reading
 
 it('the generated Claude launcher preserves the proxy allowlist without arbitrary environment keys', () => {
   const script = launcher({ scratch: temporary(), client: 'claude', bin: process.execPath, port: 23456,
-    model: 'synthetic-model', effort: 'high', subscriptionHome: subscription(), proxyEnv: { HTTPS_PROXY: 'http://synthetic-proxy:1', NO_PROXY: 'localhost',
+    model: 'synthetic-model', effort: 'high', subscriptionHome: subscription(), proxyEnv: { HTTPS_PROXY: 'http://127.0.0.1:23457/', NO_PROXY: 'localhost',
       ANTHROPIC_API_KEY: 'synthetic-excluded', OTHER: 'synthetic-excluded' } });
-  expect(script.manifest.env).toMatchObject({ HTTPS_PROXY: 'http://synthetic-proxy:1', NO_PROXY: 'localhost' });
+  expect(script.manifest.env).toMatchObject({ HTTPS_PROXY: 'http://127.0.0.1:23457/', NO_PROXY: 'localhost' });
   expect(JSON.stringify(script.manifest)).not.toContain('synthetic-excluded');
 });
 
