@@ -65,9 +65,9 @@ Pending and Answered questions belong to the Ticket and remain when its Claim is
 
 ### Reopen Requests
 
-The desk offers Reopen on every settled Ticket. Before Kun files a Reopen Request, it shows the settled dependent Tickets that the service computes M1 would require reopening. The request records that exact list as `affectedTickets`, along with the requested option or text. Filing authorizes reopening the target and the named dependents, applying the existing human-verdict rule at request time; it does not authorize unnamed dependents or supply a verdict on a replacement answer. An option records its source `questionId` and `questionVersion` as well as its index and label, using the schema in section 6.2. A Ticket settled without a Desk Answer, including a conversation or historical Settlement, offers text only. Kun may cancel after seeing the list until the request is Taken; the Ticket stays settled until explicit agent action and there is no agent rejection state.
+The desk offers Reopen on every settled Ticket. Before Kun files a Reopen Request, it shows the settled dependent Tickets that the service computes M1 would require reopening. The request records that exact list as `affectedTickets`, along with the requested option or text. Filing authorizes reopening the target and the named dependents, applying the existing human-verdict rule at request time; it does not authorize unnamed dependents or supply a verdict on a replacement answer. An option may reference only the Desk Question behind the target's current Settlement; it records that publication's `questionId` and `questionVersion` as well as the option's index and label, using the schema in section 6.2. A Ticket settled without a Desk Answer, including a conversation or historical Settlement, offers text only. Kun may cancel after seeing the list until the request is Taken; the Ticket stays settled until explicit agent action and there is no agent rejection state.
 
-The first Claimant taking answers on the Map receives the request as a `reopen_request` item. A settled Ticket has no Claim and the original agent session may be gone, so requests are Map-scoped. Taking is once-only, but current reads also list Taken-but-unhandled requests for recovery; any Claimant on the Map may handle one without releasing it again.
+The first Claimant taking answers on the Map receives the request as a `reopen_request` item. A settled Ticket has no Claim and the original agent session may be gone, so requests are Map-scoped. Taking is once-only; the [current-read projection](#62-public-results-and-recovery-reads) provides recovery, and any Claimant on the Map may handle a Taken request without releasing it again.
 
 ```mermaid
 stateDiagram-v2
@@ -83,17 +83,19 @@ stateDiagram-v2
     RequestTaken --> Closed: agent / reopenRequest.close under its guards
 ```
 
-`map_apply` gains optional `reopenRequestId`. The service accepts the citation only for a Taken, unhandled request on that Map; a pending request cannot be cited, preserving Kun's cancellation window. Handling is not tied to the taking Claimant. The first committing batch marks the request handled and removes it from the recovery list; a later citation is rejected as already handled.
+At filing, the service records the Settlements Kun saw: `settlementIntroducedAtRevision` copies the target's `introducedAtRevision`, and `affectedSettlementRevisions` maps each Ticket in `affectedTickets` to its Settlement's `introducedAtRevision`, with exactly those keys. `map_apply` gains optional `reopenRequestId`. The service accepts the citation only for a Taken, unhandled request on that Map whose recorded Settlement is still the target's current Settlement, checked before the batch reopens the target. A pending request cannot be cited, preserving Kun's cancellation window. Handling is not tied to the taking Claimant. The first committing batch marks the request handled and removes it from the recovery list; a later citation is rejected as already handled.
 
-In the committing transaction, the service checks that the cited batch reopens the target under M1's existing reopen/Claim rules. The settled dependents it reopens must equal M1's currently required set, and that set must be a subset of the recorded `affectedTickets`. If the set shrank, reopen only the currently required dependents and mark the request handled. If it grew, reject the whole batch with `reopen_authorization_exceeded`; the agent asks Kun first, naming the extras. There is no silent cascade or permission to reopen an obsolete recorded dependent merely because it was once listed.
+In the committing transaction, the service checks that the cited batch reopens the target under M1's existing reopen/Claim rules. The settled dependents it reopens must equal M1's currently required set, and each must be covered by the request: both listed in `affectedTickets` and still carrying its recorded Settlement before reopening. If the set shrank, reopen only the currently required dependents and mark the request handled. A newly required Ticket or a changed dependent Settlement rejects the whole batch with `reopen_authorization_exceeded`; its `uncoveredTickets: {ticketId, reason}[]` lists every uncovered Ticket ID and the reason `not_listed` or `settlement_changed`, respectively. The agent asks Kun first, naming them. There is no silent cascade or permission to reopen an obsolete recorded dependent merely because it was once listed. #111 chooses the other stable rejection codes under [M1's error conventions](m1.md#6-result-and-error-contracts), including pending, cross-Map, already-handled, closed/superseded or stale-target citations, an omitted target and a failed close guard.
 
-An unusable request has two completion paths. Kun may file a new request for the same target after seeing the current affected list; the new request supersedes the older unhandled one. Alternatively, the agent uses `reopenRequest.close {requestId, reason}` for an unhandled request, either in the batch that reopens under a conversation agreement without `reopenRequestId`, or when its target is no longer settled. A closed or superseded request leaves the recovery list and cannot be cited.
+An unusable request has two completion paths. Kun may file a new request for the same target after seeing the current affected list; the new request supersedes the older unhandled one. Alternatively, the agent uses `reopenRequest.close {requestId, reason}` for an unhandled request only when its target no longer has the recorded Settlement, checked after the batch's earlier commands. This covers a reopen in the same batch, an already-open target and a target settled again with a different introduction Revision. Closing is not rejection of Kun's request: the service checks loss of that Settlement, not an unobservable conversation agreement; an uncited reopen retains M1's existing human-agreement rule. A closed or superseded request leaves the recovery list and cannot be cited.
 
 ### Publication after reopening
 
 Every reopen path closes the Ticket's settled Desk Question publication with state `superseded_by_reopen`: a Reopen Request target, each settled dependent reopened with it, and a Ticket reopened under a conversation agreement. All answers to that publication become stale and can never be cited again. The desk shows superseded publications and their answers as history, never as live answers.
 
-A new Settlement of a reopened Ticket requires a new publication N+1 and a fresh Desk Answer cited through `deskAnswer`, or a conversation verdict while no question is active under the [Settlement rules](#agent-settlement). Only a Reopen Request's target gets its requested option preselected on re-post, without submitting it. Reopened dependents get no preselection; the agent re-posts them as their turn comes.
+A new Settlement of a reopened Ticket requires a new publication N+1 and a fresh Desk Answer cited through `deskAnswer`, or a conversation verdict while no question is active under the [Settlement rules](#agent-settlement). Reopened dependents get no preselection; the agent re-posts them as their turn comes.
+
+Only a Reopen Request's target can receive its preselection on N+1. Record `handledAtRevision` on the handled request and associate it with the target's reopen in that Revision; the new publication uses only the request that caused this reopen, never the latest handled request on the Ticket. For an option request, preselect the new index only when exactly one new option matches the source option's label and one-line description exactly; zero or multiple matches mean no preselection. For a text request, show the text verbatim next to the options as “Kun asked to reopen: …” context, with no auto-selection or prefilled submission. Preselection never submits an answer.
 
 ## 4. Submission, release and Settlement
 
@@ -195,8 +197,10 @@ interface ReopenItem {
   readonly kind: 'reopen_request';
   readonly requestId: string;
   readonly ticketId: TicketId;
+  readonly settlementIntroducedAtRevision: RevisionNumber;
   readonly requested: ReopenChoice;
   readonly affectedTickets: readonly TicketId[];
+  readonly affectedSettlementRevisions: Readonly<Record<TicketId, RevisionNumber>>;
   readonly requestedAt: string;
 }
 type DeliveryItem = AnswerItem | ReopenItem;
@@ -214,10 +218,13 @@ interface ReadDelivery {
 interface UnhandledReopenRequest {
   readonly requestId: string;
   readonly ticketId: TicketId;
+  readonly settlementIntroducedAtRevision: RevisionNumber;
   readonly requested: ReopenChoice;
   readonly affectedTickets: readonly TicketId[];
+  readonly affectedSettlementRevisions: Readonly<Record<TicketId, RevisionNumber>>;
   readonly requestedAt: string;
   readonly state: 'pending' | 'taken';
+  readonly stale: boolean;
 }
 ```
 
@@ -228,7 +235,7 @@ interface UnhandledReopenRequest {
 | Field | Presence and meaning |
 | --- | --- |
 | `deskQuestions` | Every successful read: question publications with the fields from section 2, `state` and `withdrawnReason` when withdrawn. Current reads use the displayed state from section 3 and include `currentAnswer` (an `AnswerItem`, or null if unanswered or the publication is superseded), including Taken for recovery where still applicable. Historical reads return publications as they stood at the selected Revision (`published`/`withdrawn`/`superseded_by_reopen`), omitting `currentAnswer` and all other desk-side state. Publication retirement follows [section 3](#publication-after-reopening). |
-| `reopenRequests: UnhandledReopenRequest[]` | Current reads only, listing pending and Taken-but-unhandled requests; inspection alone never releases them. The handling contract is in section 3. |
+| `reopenRequests: UnhandledReopenRequest[]` | Current reads only, listing pending and Taken-but-unhandled requests; inspection alone never releases them. `stale` is true when the target no longer has the request's recorded Settlement, so the agent can close it under section 3. This derived marker neither changes delivery state nor closes the request automatically. |
 | `delivery: ReadDelivery` | Taking current reads only, using the same item schema as `map_wait`; no separate `delivered[]` or duplicated `currentRevision`, because `FoundMap.revision` already supplies it. |
 
 Historical reads omit `delivery` and `reopenRequests`; they do not fabricate past answers from current desk records. These projections implement the Revision boundary in section 8.1.
@@ -279,11 +286,12 @@ The service enforces key scope, Question Version matching, supersession, release
 | Competing waiters | Only one release takes an answer; ordinary answers match the caller's claimed Tickets; Map-scoped Reopen Requests go to only one claimant; a newer same-scope wait supersedes the earlier one. |
 | Edit versus settle | Changing Taken to Answered invalidates the old answer; both race orders are checked and an obsolete answer cannot win after the replacement is accepted. |
 | Requested material | Agent withdraws, supplies the material and re-posts; the request for material itself is never a Settlement. |
-| Reopen publication | Request targets, reopened settled dependents and conversation reopens all retire the old publication; every old answer becomes stale and cannot settle again; only the target's new publication preselects the requested option. |
+| Reopen publication | Request targets, reopened settled dependents and conversation reopens all retire the old publication; every old answer becomes stale and cannot settle again. |
+| Reopen preselection | Only the request that caused the target's reopen supplies preselection; reordered identical options select the new index, while changed or ambiguous matches select none; text is shown verbatim as context without prefilled submission; reopened dependents have no preselection. |
 | Reopen request source | The displayed dependent list equals the stored authorization; option requests identify their source publication; a conversation/historical Settlement can receive a text-only request; recovery reads expose Taken-but-unhandled requests. |
-| Reopen citation | Pending or cross-Map citations and a batch omitting the target are rejected without handling the request; a Taken request can be handled by a different Claimant on the Map; the first committed batch handles it and an already-handled citation is rejected. |
-| Changed affected set | A shrunk set reopens exactly the currently required dependents and handles the request; a grown set rejects the whole batch with `reopen_authorization_exceeded`, naming the extras before asking Kun. |
-| Reopen supersession and close | A new request for the same target shows the current list and supersedes the old unhandled request; `reopenRequest.close` succeeds only with the conversation-reopen batch or an already-unsettled target; neither terminal request remains in recovery or is citable. |
+| Reopen citation | Pending or cross-Map citations and a batch omitting the target are rejected without handling the request; a Taken request can be handled by a different Claimant on the Map; the first committed batch handles it and an already-handled citation is rejected. A request filed against an earlier Settlement cannot reopen a newer Settlement, including when the old pending request is delivered after the target is settled again; current reads mark that request stale. |
+| Changed affected set or Settlement | A shrunk set reopens exactly the currently required dependents and handles the request; growth or a listed dependent settled again rejects the whole batch with `reopen_authorization_exceeded`. The error lists every uncovered Ticket with `not_listed` or `settlement_changed`, even when the required Ticket IDs themselves have not changed. |
+| Reopen supersession and close | A new request for the same target shows the current list and supersedes the old unhandled request; close rejects while the recorded Settlement is current and succeeds after an earlier reopen command, on an open target, or after a new Settlement replaces it. Exercise both an uncited conversation reopen and a reopen as another request's dependent; closed/superseded requests leave recovery and are uncitable. |
 | Loss and restart | Durable answer/Taken state survives; lost response is an unknown receipt; no automatic return or Settlement; resumption discovers unprocessed Taken answers. |
 | Claim release/clear | Pending/Answered questions survive; Taken returns in the same transaction as the Claim Revision; the next Claimant inherits the question. |
 | Queue | Verify already-settled versus still-open other prerequisites, shared descendants, research gating, triage and stable tie-breakers. |
@@ -302,12 +310,12 @@ Tests for this implementation must control submission and release boundaries rat
 | --- | --- |
 | #109 | This specification, two ADRs, glossary and contract amendments; closeout follows [section 10](#10-accepted-by-kun-on-2026-10-26). |
 | #110 | SDK v2 and both protocol eras; retain four tools, schemas and workflow at this step; record actual SDK/client/protocol connectivity evidence. |
-| #111 | Format-2 desk storage and migration, including Reopen Requests and affected-dependent computation; post/withdraw commands, typed Settlement citations, `reopenRequestId` validation and handled marking, `reopenRequest.close`, publication retirement and inspection read projection. |
+| #111 | Format-2 desk storage and migration, including Reopen Requests, Settlement bindings and affected-dependent computation; post/withdraw commands, typed Settlement citations, `reopenRequestId` validation and handled marking, `reopenRequest.close`, publication retirement, preselection/history data and inspection read projection. |
 | #112 | `map_wait` and ChatGPT taking `map_read` through one release coordinator, including `reopen_request` delivery, task/blocking paths, recovery and exact-tool-set/build metadata. |
-| #113 | Viewer write route for answer submit/change, Reopen Requests displaying the affected list and cancellation; keyed, keyboard/bulk and visual behavior. |
+| #113 | Viewer write route for answer submit/change, Reopen Requests displaying the affected list and cancellation; preselection/text context and superseded publications shown as history; keyed, keyboard/bulk and visual behavior. |
 | #114 | Publish all-askable posting, unlock-first triage and client use in the mandatory workflow and every governed tool description, plus launcher instructions and behavior scenarios. |
 
-#112 depends on #110 and #111; #113 depends on #111; #114 depends on #112 and #113. This assignment replaces #113's original submit-answer-only wording; #111–#113 have been updated by the coordinator to match. Follow the implementation Issues for scheduling and Kun's gates. Do not ship the discarded intermediate chat-only approach. Agents settle released verdicts and post newly unlocked questions in the same write where the existing command rules allow it.
+#112 depends on #110 and #111; #113 depends on #111; #114 depends on #112 and #113. This assignment replaces #113's original submit-answer-only wording; this specification governs later additions even when the implementation Issue bodies have not yet been synchronized. Follow those Issues for scheduling and Kun's gates. Do not ship the discarded intermediate chat-only approach. Agents settle released verdicts and post newly unlocked questions in the same write where the existing command rules allow it.
 
 Under [MCP/SQLite §14.3](mcp-sqlite.md#143-versioning-build-and-release), this documentation-only PR keeps the Release Version and adds no CHANGELOG section or tag. The current workflow file and generated guidance remain unchanged. The additive implementation Issues specify minor releases; the mandatory workflow change ships with the desk as one later major release after #87, with one approved ChatGPT run before that merge. No real-model Batch, ChatGPT run, everyday-service operation or release is authorized by this specification PR. Keep `Refs #109` for the [closeout gate](#10-accepted-by-kun-on-2026-10-26).
 

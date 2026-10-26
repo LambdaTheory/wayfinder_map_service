@@ -95,7 +95,7 @@ A human's response to a particular Question Version, retained separately from th
 _Avoid_: Decision, Settlement, agent recommendation
 
 **Quiet Window**:
-The interval after the human's most recent answer on a Map during which answers remain open to change before being released to an agent.
+The interval after the human's most recent change to answers or Reopen Requests on a Map during which responses remain open to change before being released to an agent.
 _Avoid_: Approval deadline, answer expiry
 
 **Taken**:
