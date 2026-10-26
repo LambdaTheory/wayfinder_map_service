@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, describe, expect, test, vi } from 'vitest';
 import { CliReviewDriver, reviewSandbox } from './review-cli.ts';
-import { ReviewProxyError, reviewProxyEnvironment, reviewProxyRules, reviewProxyVariables } from './review-proxy.ts';
+import { ReviewProxyError, reviewProxyEnvironment, reviewProxyRouting, reviewProxyVariables } from './review-proxy.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'wayfinder-review-proxy-test-'));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -28,8 +28,9 @@ describe('proxy selection and validation', () => {
   });
   test('missing settings and no proxies preserve the existing network policy', () => {
     const selected = reviewProxyEnvironment(home(), {});
-    expect(selected).toEqual({}); expect(reviewProxyRules(selected)).toEqual([]);
-    const profile = reviewSandbox(root, root, root, undefined, undefined, selected);
+    expect(selected).toEqual({}); expect(reviewProxyRouting(selected)).toEqual({ environment: {}, rules: [] });
+    expect(reviewProxyRouting({ HTTPS_PROXY: '', NO_PROXY: '' })).toEqual({ environment: { HTTPS_PROXY: '', NO_PROXY: '' }, rules: [] });
+    const profile = reviewSandbox(root, root, root, undefined, undefined, reviewProxyRouting(selected).rules);
     expect(profile).toContain('(deny network-outbound (remote ip "localhost:*"))');
     expect(profile).not.toContain('(allow network-outbound');
   });
@@ -46,28 +47,35 @@ describe('proxy selection and validation', () => {
     expect(() => reviewProxyEnvironment(home({ env: { HTTPS_PROXY: { private: 'fixture' } } }), {}))
       .toThrow(new ReviewProxyError('Review proxy setting must be a string'));
   });
-  test('only exact loopback TCP endpoints create rules; bypass lists and remote proxies add no local access', () => {
-    expect(reviewProxyRules({ HTTP_PROXY: 'http://127.1:2345', HTTPS_PROXY: 'http://127.0.0.1:2345',
-      http_proxy: 'http://localhost', https_proxy: 'https://[::1]', NO_PROXY: 'localhost:18766', ALL_PROXY: 'http://127.0.0.1:9999' }))
-      .toEqual(['(allow network-outbound (remote tcp4 "localhost:2345"))',
-        '(allow network-outbound (remote tcp "localhost:80"))', '(allow network-outbound (remote tcp6 "localhost:443"))']);
-    expect(reviewProxyRules({ HTTPS_PROXY: 'https://proxy.invalid:443', NO_PROXY: '*', no_proxy: '127.0.0.1' })).toEqual([]);
+  test('normalizes proxy URLs to IPv4 and generates only their TCP ports; bypass lists create no exceptions', () => {
+    expect(reviewProxyRouting({ HTTP_PROXY: 'http://127.1:2345', HTTPS_PROXY: 'http://127.0.0.1:2345',
+      http_proxy: 'http://localhost', https_proxy: 'https://localhost', NO_PROXY: 'localhost:18766', ALL_PROXY: 'http://127.0.0.1:9999' }))
+      .toEqual({ environment: { HTTP_PROXY: 'http://127.0.0.1:2345/', HTTPS_PROXY: 'http://127.0.0.1:2345/',
+        http_proxy: 'http://127.0.0.1/', https_proxy: 'https://127.0.0.1/', NO_PROXY: 'localhost:18766' },
+        rules: ['(allow network-outbound (remote tcp4 "localhost:2345"))',
+          '(allow network-outbound (remote tcp4 "localhost:80"))', '(allow network-outbound (remote tcp4 "localhost:443"))'] });
+    expect(reviewProxyRouting({ NO_PROXY: '*', no_proxy: '127.0.0.1' }).rules).toEqual([]);
   });
+  test.each(['[::1]', '[::ffff:127.0.0.1]', '127.0.0.2', 'proxy.invalid'])(
+    'unsupported proxy host %s is unavailable, not an exception for a broader endpoint', hostname => {
+      expect(() => reviewProxyRouting({ HTTPS_PROXY: `http://${hostname}:2345` }))
+        .toThrow(new ReviewProxyError('Review proxy must use localhost or 127.0.0.1'));
+    });
   test.each(['not a URL', 'http://localhost:99999', 'http://localhost:0', 'file:///private/fixture', 'socks5://localhost:1234'])(
     'invalid or unsupported proxy URLs fail without echoing the URL (%s)', value => {
-      expect(() => reviewProxyRules({ HTTPS_PROXY: value })).toThrow(ReviewProxyError);
-      try { reviewProxyRules({ HTTPS_PROXY: value }); } catch (error) { expect(String(error)).not.toContain(value); }
+      expect(() => reviewProxyRouting({ HTTPS_PROXY: value })).toThrow(ReviewProxyError);
+      try { reviewProxyRouting({ HTTPS_PROXY: value }); } catch (error) { expect(String(error)).not.toContain(value); }
     });
   test.each([18765, 18766])('reserved port %i cannot gain a proxy exception', port => {
     for (const hostname of ['127.0.0.1', 'localhost', '[::1]', 'proxy.invalid'])
-      expect(() => reviewProxyRules({ HTTPS_PROXY: `http://${hostname}:${port}` })).toThrow('Review proxy uses a reserved Wayfinder port');
+      expect(() => reviewProxyRouting({ HTTPS_PROXY: `http://${hostname}:${port}` })).toThrow('Review proxy uses a reserved Wayfinder port');
   });
 });
 
-async function listener(hostname = '127.0.0.1') {
+async function listener(hostname = '127.0.0.1', port = 0) {
   let connections = 0;
   const server = createServer(socket => { connections++; socket.end('synthetic proxy'); });
-  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, hostname, resolve); });
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen({ port, host: hostname, ipv6Only: hostname === '::1' }, resolve); });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('missing fixture port');
   return { port: address.port, connections: () => connections,
@@ -76,36 +84,62 @@ async function listener(hostname = '127.0.0.1') {
 function clearProxyEnvironment() { for (const key of reviewProxyVariables) vi.stubEnv(key, undefined); }
 
 describe.skipIf(process.platform !== 'darwin')('real sandbox with fake reviewers and proxy listeners', () => {
+  test.each(['claude', 'codex'] as const)('%s refuses an IPv6 proxy instead of granting its mapped IPv4 neighbour access', async cli => {
+    clearProxyEnvironment();
+    const proxy = await listener('::1'); const neighbour = await listener('127.0.0.1', proxy.port);
+    try {
+      const subscriptionHome = home({ env: { HTTPS_PROXY: `http://[::1]:${proxy.port}` } });
+      const install = mkdtempSync(join(root, 'mapped-')); const binDir = join(install, 'bin'); mkdirSync(binDir);
+      writeFileSync(join(binDir, cli), `#!${process.execPath}
+const net = require('node:net');
+const socket = net.connect(${proxy.port}, '::ffff:127.0.0.1');
+socket.setTimeout(1500, () => { socket.destroy(); process.exitCode = 2; });
+socket.on('data', () => {});
+socket.on('end', () => console.log(${JSON.stringify(cli === 'claude' ? '{"loggedIn":true,"authMethod":"claude.ai"}' : 'Logged in using ChatGPT')}));
+socket.on('error', error => { console.error(error.code); process.exitCode = 1; });
+`, { mode: 0o700 });
+      vi.stubEnv('PATH', `${binDir}:/usr/bin:/bin`);
+      const result = await new CliReviewDriver(5000, subscriptionHome).checkLogin({ cli, model: 'fixture' });
+      expect(neighbour.connections()).toBe(0);
+      expect(proxy.connections()).toBe(0);
+      expect(result).toMatchObject({ available: false, detail: 'Review proxy must use localhost or 127.0.0.1' });
+    } finally { await proxy.close(); await neighbour.close(); }
+  });
   test.each(['claude', 'codex'] as const)('%s refuses reserved ports and malformed settings before launching', async cli => {
     clearProxyEnvironment(); vi.stubEnv('PATH', '/usr/bin:/bin'); // No native model executable can be found.
-    for (const settings of [{ env: { HTTPS_PROXY: 'http://127.0.0.1:18766' } }, null]) {
-      const driver = new CliReviewDriver(5000, home(settings));
+    const malformed = home(); writeFileSync(join(malformed, '.claude/settings.json'), '{synthetic-private-content');
+    for (const [subscriptionHome, detail] of [
+      ...[18765, 18766].map(port => [home({ env: { HTTPS_PROXY: `http://127.0.0.1:${port}` } }), 'Review proxy uses a reserved Wayfinder port']),
+      [home(null), 'Review proxy settings unavailable; refusing to fall back to a direct connection'],
+      [malformed, 'Review proxy settings unavailable; refusing to fall back to a direct connection'],
+    ] as [string, string][]) {
+      const driver = new CliReviewDriver(5000, subscriptionHome);
       const response = await driver.invoke({ id: 'fixture', kind: 'availability', target: { cli, model: 'fixture' }, input: 'No real model.' });
       expect(response.status).toBe('unavailable');
-      expect(response.detail).toBe(settings ? 'Review proxy uses a reserved Wayfinder port' : 'Review proxy settings unavailable; refusing to fall back to a direct connection');
+      expect(response.detail).toBe(detail);
       expect(response.invocation).toBeUndefined();
     }
   });
-  test.each(['claude', 'codex'].flatMap(cli => ['127.0.0.1', '::1', 'localhost'].map(hostname => ({ cli: cli as 'claude' | 'codex', hostname }))))(
+  test.each(['claude', 'codex'].flatMap(cli => ['127.0.0.1', 'localhost'].map(hostname => ({ cli: cli as 'claude' | 'codex', hostname }))))(
     '$cli connects only to its $hostname proxy, using settings or terminal routing', async ({ cli, hostname }) => {
-    const connectHost = hostname === 'localhost' ? '127.0.0.1' : hostname;
-    const proxy = await listener(connectHost); const unrelated = await listener(connectHost);
+    const proxy = await listener(); const unrelated = await listener();
     try {
       for (const source of ['settings', 'terminal', 'none'] as const) {
         clearProxyEnvironment();
-        const proxyUrl = `http://${hostname === '::1' ? '[::1]' : hostname}:${proxy.port}`;
-        const expected = source === 'none' ? {} : Object.fromEntries(reviewProxyVariables.map(key => [key, key.toLowerCase() === 'no_proxy' ? 'fixture.invalid' : proxyUrl]));
-        const subscriptionHome = home({ env: { ...(source === 'settings' ? expected : {}),
+        const proxyUrl = `http://${hostname}:${proxy.port}`;
+        const configured = source === 'none' ? {} : Object.fromEntries(reviewProxyVariables.map(key => [key, key.toLowerCase() === 'no_proxy' ? 'fixture.invalid' : proxyUrl]));
+        const expected = source === 'none' ? {} : Object.fromEntries(reviewProxyVariables.map(key => [key, key.toLowerCase() === 'no_proxy' ? 'fixture.invalid' : `http://127.0.0.1:${proxy.port}/`]));
+        const subscriptionHome = home({ env: { ...(source === 'settings' ? configured : {}),
           ...(source === 'terminal' ? { HTTPS_PROXY: 'http://127.0.0.1:18766' } : {}),
           ALL_PROXY: 'ignored', NODE_OPTIONS: 'ignored', ANTHROPIC_API_KEY: 'synthetic-do-not-forward' } });
-        if (source === 'terminal') for (const [key, value] of Object.entries(expected)) vi.stubEnv(key, value);
+        if (source === 'terminal') for (const [key, value] of Object.entries(configured)) vi.stubEnv(key, value);
         vi.stubEnv('ALL_PROXY', `http://127.0.0.1:${unrelated.port}`);
         vi.stubEnv('all_proxy', `http://127.0.0.1:${unrelated.port}`);
         vi.stubEnv('OPENAI_API_KEY', 'synthetic-do-not-forward');
         const install = mkdtempSync(join(root, 'install-')); const binDir = join(install, 'bin'); mkdirSync(binDir);
         writeFileSync(join(binDir, cli), `#!${process.execPath}
 const assert = require('node:assert/strict'); const net = require('node:net'); const fs = require('node:fs'); const dgram = require('node:dgram');
-async function connect(port, hostname = ${JSON.stringify(connectHost)}) {
+async function connect(port, hostname = '127.0.0.1') {
   return new Promise(resolve => {
     const socket = net.connect(port, hostname); let data = '';
     socket.setTimeout(1500, () => { socket.destroy(); resolve('timeout'); });
@@ -116,8 +150,8 @@ async function connect(port, hostname = ${JSON.stringify(connectHost)}) {
 }
 async function sendUdp(port) {
   return new Promise(resolve => {
-    const socket = dgram.createSocket(${JSON.stringify(connectHost === '::1' ? 'udp6' : 'udp4')});
-    socket.send('synthetic packet', port, ${JSON.stringify(connectHost)}, error => { socket.close(); resolve(error?.code ?? 'sent'); });
+    const socket = dgram.createSocket('udp4');
+    socket.send('synthetic packet', port, '127.0.0.1', error => { socket.close(); resolve(error?.code ?? 'sent'); });
   });
 }
 (async () => {
@@ -127,8 +161,9 @@ async function sendUdp(port) {
   assert.throws(() => fs.readFileSync(${JSON.stringify(join(subscriptionHome, '.claude/settings.json'))}), {code:'EPERM'});
   assert.equal(await connect(${proxy.port}), ${JSON.stringify(source === 'none' ? 'EPERM' : 'connected')});
   assert.equal(await sendUdp(${proxy.port}), 'EPERM');
-  ${hostname === 'localhost' ? '' : `assert.equal(await connect(${proxy.port}, ${JSON.stringify(connectHost === '::1' ? '127.0.0.1' : '::1')}), 'EPERM');`}
+  assert.equal(await connect(${proxy.port}, '::1'), 'EPERM');
   for (const port of [18765, 18766, ${unrelated.port}]) assert.equal(await connect(port), 'EPERM');
+  for (const port of [18765, 18766, ${unrelated.port}]) assert.equal(await connect(port, '::ffff:127.0.0.1'), 'EPERM');
   if (process.argv.includes('status')) {
     console.log(${JSON.stringify(cli === 'claude' ? '{"loggedIn":true,"authMethod":"claude.ai"}' : 'Logged in using ChatGPT')}); return;
   }

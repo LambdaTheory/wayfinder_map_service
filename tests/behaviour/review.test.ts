@@ -89,20 +89,57 @@ describe('independent reviews over complete Attempt evidence', () => {
     expect(readdirSync(dirname(join(dir, result.path))).filter(x => x.endsWith('.input.json'))).toHaveLength(4);
     expect(readdirSync(dirname(join(dir, result.path))).filter(x => x.endsWith('.output.json'))).toHaveLength(4);
   });
-  test('the prompt\'s synthetic JSON output example satisfies the unchanged evidence validator', async () => {
+  test('neutral synthetic examples cover both verdicts and satisfy the unchanged evidence validator', async () => {
+    const inputs: string[] = [];
     const fake = new Fake((req, out) => {
       if (req.kind === 'availability') return out;
-      const packet = JSON.parse(req.input.slice(req.input.indexOf('\n{') + 1));
-      const example = packet.syntheticCitationExample;
-      const a = sample(); a.events = [{ ...a.events[0]!, kind: 'message', role: 'assistant', text: example.sources.reply.text }];
-      const entry = example.output.items[0];
-      expect(Object.keys(entry).sort()).toEqual(['evidence', 'itemId', 'reason', 'status', 'support']);
-      expect(entry.support).toHaveLength(2);
-      expect(entry.support[1].quote).toBe(turnWriteEvidence(a)[0]![0]!.statement);
-      expect(reviewProblem({ ...entry, by: 'fixture', role: 'review', readingId: 'synthetic-example' }, a)).toBeNull();
+      inputs.push(req.input);
       return out;
     });
     expect((await judged(fake)).verdict.outcome).toBe('pass');
+    expect(inputs).toHaveLength(2);
+    for (const input of inputs) {
+      const packet = JSON.parse(input.slice(input.indexOf('\n{') + 1));
+      expect(packet.syntheticCitationExamples).toHaveLength(2);
+      expect(packet.syntheticCitationExamples.map((e: { output: { items: Review[] } }) => e.output.items[0]!.status).sort()).toEqual(['holds', 'violated']);
+      expect(JSON.stringify(packet.syntheticCitationExamples)).not.toMatch(/scope|permission|Feishu|asks-scope/i);
+      for (const example of packet.syntheticCitationExamples) {
+        const a = sample(); const session = a.sessions[0]!;
+        session.label = 'SYNTHETIC'; session.turns[0]!.index = 37;
+        a.events = [{ ...a.events[0]!, kind: 'message', role: 'assistant', session: session.label, turn: 37, text: example.sources.reply.text }];
+        expect(example.sources.reply).toMatchObject({ session: 'SYNTHETIC', turn: 37 });
+        const entry = example.output.items[0];
+        expect(Object.keys(entry).sort()).toEqual(['evidence', 'itemId', 'reason', 'status', 'support']);
+        expect(entry.itemId).toBe('synthetic-label-check');
+        expect(entry.support).toHaveLength(2);
+        expect(entry.support[1].quote).toBe(turnWriteEvidence(a)[0]![0]!.statement);
+        expect(reviewProblem({ ...entry, by: 'fixture', role: 'review', readingId: 'synthetic-example' }, a)).toBeNull();
+      }
+    }
+  });
+  test('the guide identifies human events and turns as context and explains decoded quotations', async () => {
+    const a = sample();
+    a.sessions[0]!.turns[0]!.input = 'Choose "cobalt"\nthen wait.';
+    a.events.push({ seq: 12, at: '', session: 'A', turn: 0, actor: 'script-human', kind: 'message', role: 'user', text: 'A human question.' },
+      { seq: 13, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'message', role: 'user', text: 'Recorded user input.' },
+      { seq: 14, at: '', session: null, turn: null, actor: 'controller', kind: 'message', role: 'user', text: 'Controller setup.' });
+    const fake = new Fake(); const { result } = await judged(fake, a);
+    expect(result.reviews).toHaveLength(4); // Two requested items, each read twice.
+    const requests = fake.requests.filter(r => r.kind === 'review'); expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      const packet = JSON.parse(request.input.slice(request.input.indexOf('\n{') + 1));
+      expect(packet.citationGuide.contextOnly).toEqual(['sessions[0].turns[0]', 'events[2]', 'events[3]']);
+      expect(packet.citationGuide.contextOnly.every((p: string) => packet.evidenceLocations.includes(p))).toBe(true);
+      expect(request.input).toContain("sessions[i].turns[j] quotes an exact substring of that turn's decoded input field, not its JSON");
+      expect(request.input).toContain('Human message events quote decoded text');
+    }
+    const reading = result.reviews[0]!;
+    const context = { location: 'sessions[0].turns[0]', quote: a.sessions[0]!.turns[0]!.input, explanation: 'The human input supplies context only.' };
+    const supported = { ...reading, evidence: [...reading.evidence!, context.location], support: [...reading.support!, context] };
+    expect(reviewProblem(supported, a)).toBeNull();
+    expect(reviewProblem({ ...supported, support: [...reading.support!, { ...context, quote: JSON.stringify(context.quote) }] }, a))
+      .toContain('review needs quoted');
+    expect(reviewProblem({ ...reading, evidence: [context.location], support: [context] }, a)).toContain('review needs quoted');
   });
   test('disagreement goes to the stronger model with both readings and the full evidence', async () => {
     const fake = new Fake((req, out, n) => req.kind === 'availability' ? out : status(out, n === 1 ? 'holds' : 'violated'));
@@ -516,16 +553,23 @@ describe('final replies with independent same-turn evidence', () => {
     });
   test('the prompt lists receipts and individual Revisions and offers no no-write quotation for a writing turn', async () => {
     const { a } = fixture('event', 'holds'); createMap(a, 0);
+    const inputs: string[] = [];
     const fake = new Fake((req, out) => {
       if (req.kind === 'availability') return out;
-      const packet = JSON.parse(req.input.slice(req.input.indexOf('\n{') + 1));
+      inputs.push(req.input);
+      return out;
+    });
+    const result = await reviewAttempt(f11, a, fake, directory(a), { itemIds: ['asks-scope'] });
+    expect(result.reviews).toHaveLength(2);
+    expect(fake.requests.map(r => r.kind)).toEqual(['availability', 'availability', 'review', 'review']);
+    expect(inputs).toHaveLength(2);
+    for (const input of inputs) {
+      const packet = JSON.parse(input.slice(input.indexOf('\n{') + 1));
       expect(packet.citationGuide.receipts).toEqual(['receipts[0]']);
       expect(packet.citationGuide.revisions).toContain('maps[1].history[0]');
       expect(packet.citationGuide.noWrites).toEqual([]);
       expect(packet.turnWrites[0][0]).toBeNull();
-      return out;
-    });
-    await reviewAttempt(f11, a, fake, directory(a), { itemIds: ['asks-scope'] });
+    }
   });
 });
 
