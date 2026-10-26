@@ -20,6 +20,7 @@ export type Completeness = typeof completeness[number];
 
 /** Where the agent under test can learn the write `version` (ADR 0005). The runner never supplies it. */
 export type RulesSource =
+  | { kind: 'unknown'; reason: string }
   | { kind: 'instructions'; versionLine: string }
   | { kind: 'tool-parameter'; tool: 'map_create' | 'map_apply'; description: string };
 
@@ -32,6 +33,9 @@ export interface GivenRules {
   /** First event sequence number this phase covers. */
   fromSeq: number;
   compatibilityMode: 'instructions' | 'toolsOnly';
+  /** Release observed by the Controller at this phase; never evidence of model visibility. */
+  serviceVersion?: string;
+  /** Only content actually exposed by the client, or unknown. Controller imports are not a rules source. */
   rulesSource: RulesSource;
   instructions: Field<string>;
   toolDescriptions: Field<Record<string, string>>;
