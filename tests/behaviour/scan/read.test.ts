@@ -93,27 +93,31 @@ describe('Codex 0.164.x MCP completion records (Issue #102 shape, synthetic valu
     expect(report.leads).toEqual([]);
   });
 
-  it.each([false, true])('merges a shared call ID and keeps its completion despite trailing text (completion first: %s)', completionFirst => {
+  it.each(['completed', 'failed'].flatMap(status => [false, true].map(completionFirst => ({ status, completionFirst }))))
+    ('merges a shared call ID and keeps its $status result (completion first: $completionFirst)', ({ status, completionFirst }) => {
     const call = { ref: 'mixed#call', value: { type: 'response_item', payload: {
         type: 'function_call', call_id: 'same-call', name: 'mcp__wayfinder__map_read', arguments: '{"mapId":"Synthetic.Current"}',
       } } };
     const completion = { ref: 'mixed#completion', value: { type: 'event_msg', payload: { type: 'item_completed', turn_id: 'mixed-turn', item: {
-        type: 'McpToolCall', id: 'same-call', server: 'wayfinder', tool: 'map_read', status: 'completed',
+        type: 'McpToolCall', id: 'same-call', server: 'wayfinder', tool: 'map_read', status,
+        arguments: { mapId: 'Synthetic.Current' },
         result: { content: [], structuredContent: { kind: 'infrastructure_error' } },
       } } } };
     const sessions = nativeSessions([
       { ref: 'mixed#1', value: { type: 'session_meta', payload: { id: 'mixed' } } },
       ...(completionFirst ? [completion, call] : [call, completion]),
       { ref: 'mixed#output', value: { type: 'response_item', payload: {
-        type: 'function_call_output', call_id: 'same-call', output: 'storage failed',
+        type: 'function_call_output', call_id: 'same-call', output: '{"kind":"found"}',
       } } },
     ], 'codex', 'mixed');
     expect(sessions[0]!.calls).toEqual([{
       id: 'same-call', tool: 'map_read', turnId: 'mixed-turn', mapId: 'Synthetic.Current',
       ref: 'mixed#call', resultRef: 'mixed#completion', result: 'service-failure', requestId: null, requestIdType: null,
     }]);
-    expect(sessions[0]!.fragments).toContainEqual({ ref: 'mixed#call', role: 'tool',
-      text: JSON.stringify({ name: 'map_read', arguments: { mapId: 'Synthetic.Current' } }) });
+    expect(sessions[0]!.fragments).toEqual([
+      { ref: 'mixed#call', role: 'tool', text: JSON.stringify({ name: 'map_read', arguments: { mapId: 'Synthetic.Current' } }) },
+      { ref: 'mixed#completion', role: 'tool', text: JSON.stringify(completion.value.payload.item.result) },
+    ]);
     expect(sessions[0]!.fragments.some(f => f.ref === 'mixed#output')).toBe(false);
   });
 });

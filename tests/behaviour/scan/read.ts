@@ -51,6 +51,7 @@ export function blankSession(key: string, harness: Session['harness'], nativeId:
 export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harness: 'codex' | 'claude', fileRef: string): Session[] {
   const sessions = new Map<string, Session>();
   const completedCalls = new WeakSet<NativeCall>();
+  const callInputs = new WeakMap<NativeCall, Session['fragments'][number]>();
   const claudeQuestions = new Map<Session, Map<string, string[]>>();
   let current: Session | undefined;
   const get = (id: string | null, subagentId: string | null = null) => {
@@ -66,7 +67,10 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
     // A function_call arriving after its completion still supplies the input and its locator.
     call.ref = ref;
     if (!existing) s.calls.push(call);
-    s.fragments.push({ ref, role: 'tool', text: JSON.stringify({ name, arguments: parse(args) }) });
+    const input = { ref, role: 'tool' as const, text: JSON.stringify({ name, arguments: parse(args) }) };
+    const previous = callInputs.get(call);
+    if (previous) Object.assign(previous, input);
+    else { s.fragments.push(input); callInputs.set(call, input); }
     return call;
   };
   const result = (s: Session, id: string | null, value: unknown, ref: string) => {
