@@ -1,0 +1,154 @@
+// Each case starts Node afresh: environment-proxy mode is selected before module initialization.
+import { createServer, request } from 'node:http';
+import { connect } from 'node:net';
+import { spawn, execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { expect, test } from 'vitest';
+
+const attack = test.skipIf(!existsSync('/usr/bin/sandbox-exec'));
+const here = fileURLToPath(new URL('.', import.meta.url));
+const safeEnv = () => Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+  !/^(?:https?_proxy|all_proxy|no_proxy|node_options|node_use_env_proxy)$/i.test(key)));
+
+async function fixture(entry: 'mcp-only' | 'dedicated', mode: string, appendix = '') {
+  const root = realpathSync(mkdtempSync('/private/tmp/wf-runtime-privacy-'));
+  const echoedTokens: string[] = []; const descendants = new Set<number>(); let descendantRequests = 0;
+  let runnerPid = 0; let credentialsAtProxy = 0; let requestsAtProxy = 0; let positiveControl = 0;
+  const allowed = (port: number) => {
+    if ([18765, 18766].includes(port)) return false;
+    try {
+      const pids = execFileSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' }).trim().split('\n');
+      return pids.length > 0 && pids.every(pid => Number(pid) === process.pid || Number(pid) === runnerPid
+        || Number(execFileSync('ps', ['-o', 'ppid=', '-p', pid], { encoding: 'utf8' }).trim()) === runnerPid);
+    } catch { return false; }
+  };
+  const proxy = createServer((req, res) => {
+    if (req.headers['x-descendant']) { descendants.add(Number(req.headers['x-descendant'])); descendantRequests++; res.end('fixture'); return; }
+    if (req.headers['x-synthetic-token']) { echoedTokens.push(String(req.headers['x-synthetic-token'])); res.end('fixture'); return; }
+    requestsAtProxy++; if (req.headers.authorization) credentialsAtProxy++;
+    if (req.url?.includes('/positive-control')) positiveControl++;
+    const target = new URL(req.url!);
+    if (target.hostname !== '127.0.0.1' || !allowed(Number(target.port))) { res.writeHead(502).end(); return; }
+    const upstream = request(target, { method: req.method, headers: req.headers, agent: false }, reply => {
+      res.writeHead(reply.statusCode!, reply.headers); reply.pipe(res);
+    });
+    upstream.on('error', () => res.destroy()); req.pipe(upstream);
+  });
+  const sockets = new Set<import('node:net').Socket>();
+  proxy.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
+  proxy.on('connect', (req, socket, head) => {
+    const target = new URL(`http://${req.url}`);
+    if (target.hostname !== '127.0.0.1' || !allowed(Number(target.port))) { socket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); return; }
+    const upstream = connect(Number(target.port), '127.0.0.1', () => {
+      socket.write('HTTP/1.1 200 Connection Established\r\n\r\n'); if (head.length) upstream.write(head);
+      socket.pipe(upstream); upstream.pipe(socket);
+    });
+    // Only counters leave the fixture; never print a captured authorization value.
+    socket.on('data', bytes => { const text = bytes.toString(); if (/^(POST|GET|DELETE) /m.test(text)) requestsAtProxy++;
+      if (/\r\nauthorization:/i.test(text)) credentialsAtProxy++;
+      if (text.includes('/positive-control')) positiveControl++;
+    });
+    socket.on('close', () => upstream.destroy()); upstream.on('error', () => socket.destroy());
+  });
+  await new Promise<void>(resolve => proxy.listen(0, '127.0.0.1', resolve));
+  const port = (proxy.address() as { port: number }).port;
+  const positive = createServer((_req, res) => res.end('synthetic'));
+  await new Promise<void>(resolve => positive.listen(0, '127.0.0.1', resolve));
+  const target = (positive.address() as { port: number }).port;
+  const bin = join(root, 'fake-client.mjs');
+  writeFileSync(bin, readFileSync(join(here, 'fake-codex.mjs'), 'utf8') + '\n' + appendix, { mode: 0o700 });
+  const proxyUrl = `http://run:synthetic%40proxy-password@localhost:${port}`;
+  const childScript = join(root, 'batch.mjs');
+  writeFileSync(childScript, `
+import { runBatch } from ${JSON.stringify(pathToFileURL(join(here, 'run.ts')).href)};
+import { connectController } from ${JSON.stringify(pathToFileURL(join(here, 'controller.ts')).href)};
+import { startRoute } from ${JSON.stringify(pathToFileURL(join(here, 'relay.ts')).href)};
+import { syntheticClientState } from ${JSON.stringify(pathToFileURL(join(here, 'test-state.ts')).href)};
+await fetch('http://127.0.0.1:${target}/positive-control');
+const result = await runBatch({entry:${JSON.stringify(entry)},batchId:'RuntimePrivacy',scenarios:['S0b'],count:1,ceiling:1,
+  out:${JSON.stringify(join(root, 'records'))},scratchRoot:${JSON.stringify(root)},...syntheticClientState(${JSON.stringify(root)}),
+  proxyEnv:{HTTPS_PROXY:${JSON.stringify(proxyUrl)},NO_PROXY:'localhost'},
+  codex:{model:'fake',effort:'low',bin:${JSON.stringify(bin)},sandbox:true,timeoutMs:3000}});
+const transportRefusals = [];
+if (${JSON.stringify(mode)} !== 'off') for (const open of [()=>connectController(${target},'synthetic-controller-probe'),()=>startRoute(${target},'synthetic-session-probe',()=>{})]) {
+  try {const connection=await open();await connection.close();} catch(error){transportRefusals.push(error.message);}
+}
+process.send({...result,transportRefusals});
+`);
+  const args = [...(mode === 'argv' ? ['--use-env-proxy'] : []), childScript];
+  const env = { ...safeEnv(), HTTP_PROXY: `http://127.0.0.1:${port}`, http_proxy: `http://127.0.0.1:${port}`,
+    NO_PROXY: 'localhost', no_proxy: 'localhost', ...(mode === 'env' ? { NODE_USE_ENV_PROXY: '1' } : {}),
+    ...(mode === 'options' ? { NODE_OPTIONS: '--use-env-proxy' } : {}) };
+  const child = spawn(process.execPath, args, { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }); runnerPid = child.pid!;
+  let terminal = ''; let result: (Awaited<ReturnType<typeof import('./run.ts').runBatch>> & { transportRefusals: string[] }) | undefined;
+  child.stdout!.on('data', d => { terminal += d; }); child.stderr!.on('data', d => { terminal += d; });
+  child.on('message', message => { result = message as typeof result; });
+  const code = await new Promise<number | null>(resolve => child.on('close', resolve));
+  return { root, proxyUrl, terminal, result, code, credentialsAtProxy, requestsAtProxy, positiveControl, echoedTokens,
+    descendants: () => [...descendants], descendantRequests: () => descendantRequests,
+    close: async () => { for (const pid of descendants) try { process.kill(pid, 'SIGKILL'); } catch { /* owned red-test descendant already exited */ }
+      for (const socket of sockets) socket.destroy(); await Promise.all([
+      new Promise<void>(resolve => proxy.close(() => resolve())), new Promise<void>(resolve => positive.close(() => resolve()))]); rmSync(root, { recursive: true, force: true }); } };
+}
+
+attack.each(['mcp-only', 'dedicated'] as const)('%s refuses Node environment-proxy modes before authenticated traffic', async entry => {
+  for (const mode of ['off', 'env', 'argv', 'options']) {
+    const f = await fixture(entry, mode);
+    try {
+      expect(f.code).toBe(0);
+      expect(f.positiveControl > 0).toBe(mode !== 'off');
+      expect(f.credentialsAtProxy).toBe(0);
+      if (mode === 'off') expect(f.result?.outcomes[0]?.completeness).toBe('complete');
+      else { expect(f.result?.refusals).toContain('Node environment proxy mode is unsupported for authenticated local harness traffic'); expect(f.result?.outcomes).toEqual([]); expect(existsSync(join(f.root, 'records'))).toBe(false);
+        expect(f.result?.transportRefusals).toEqual(Array(2).fill('Node environment proxy mode is unsupported for authenticated local harness traffic')); }
+    } finally { await f.close(); }
+  }
+}, 45_000);
+
+
+attack.each(['mcp-only', 'dedicated'] as const)('%s sanitizes error events and crash stderr in outcomes, terminal and batch.json', async entry => {
+  for (const mode of ['error-event', 'crash']) {
+    const f = await fixture(entry, 'off', `
+const failureProxy = new URL(process.env.HTTPS_PROXY);
+const failureLogin = JSON.parse(readFileSync(join(process.env.CODEX_HOME, 'auth.json'), 'utf8')).OPENAI_API_KEY;
+const failureToken = process.env.WAYFINDER_TOKEN ?? '';
+if (failureToken) await new Promise(resolve => import('node:http').then(({request}) => {
+  const req = request({host:'127.0.0.1',port:failureProxy.port,headers:{'x-synthetic-token':failureToken}}, res => {res.resume();res.on('end', resolve);}); req.end(); }));
+const failureText = [process.env.HTTPS_PROXY, decodeURIComponent(failureProxy.password), failureLogin, failureToken].join(' ');
+${mode === 'error-event' ? "emit({type:'error', message:failureText});" : ''}
+console.error('synthetic failure ' + failureText); process.exit(${mode === 'error-event' ? 1 : 3});
+`);
+    try {
+      expect(f.code).toBe(0); expect(f.result?.outcomes[0]?.completeness).toBe('driver-failed');
+      const secrets = ['synthetic%40proxy-password', 'synthetic@proxy-password', 'synthetic-login-for-tests-only', ...f.echoedTokens];
+      for (const text of [f.terminal, JSON.stringify(f.result), readFileSync(join(f.root, 'records/batch.json'), 'utf8'),
+        readFileSync(join(f.root, 'records/S0b-1/attempt.json'), 'utf8')]) expect(secrets.some(secret => text.includes(secret))).toBe(false);
+      if (entry === 'dedicated') expect(f.echoedTokens.length).toBe(1);
+      expect(f.result?.outcomes[0]?.detail).toContain('<proxy-');
+    } finally { await f.close(); }
+  }
+}, 45_000);
+
+
+attack.each(['mcp-only', 'dedicated'] as const)('%s ends attached and detached clients before publishing an Attempt', async entry => {
+  for (const mode of ['complete', 'crash', 'timeout']) {
+    const f = await fixture(entry, 'off', `
+const {spawn: spawnDescendant} = await import('node:child_process');
+const descendantProxy = new URL(process.env.HTTPS_PROXY);
+const descendantCode = "const http=require('node:http'); const net=require('node:net'); const ping=()=>{const req=http.request({host:'127.0.0.1',port:"+descendantProxy.port+",headers:{'x-descendant':String(process.pid)}},res=>res.resume());req.on('error',()=>{});req.end();const socket=net.connect("+new URL(url).port+",'127.0.0.1');socket.on('connect',()=>socket.end());socket.on('error',()=>{});};ping();setInterval(ping,80);";
+for (const detached of [false,true]) spawnDescendant(process.execPath,['-e',descendantCode],{detached,stdio:'ignore'}).unref();
+await new Promise(resolve=>setTimeout(resolve,300));
+${mode === 'crash' ? 'process.exit(3);' : mode === 'timeout' ? 'await new Promise(resolve=>setTimeout(resolve,30_000));' : ''}
+`);
+    try {
+      expect(f.code).toBe(0); expect(f.result?.outcomes[0]?.completeness).toBe(mode === 'crash' ? 'driver-failed' : mode === 'timeout' ? 'timeout' : 'complete');
+      expect(f.descendants().length).toBeGreaterThanOrEqual(2);
+      const requests = f.descendantRequests();
+      await new Promise(resolve => setTimeout(resolve, 350));
+      expect(f.descendantRequests()).toBe(requests);
+      expect(f.descendants().every(pid => { try { process.kill(pid, 0); return false; } catch { return true; } })).toBe(true);
+    } finally { await f.close(); }
+  }
+}, 60_000);

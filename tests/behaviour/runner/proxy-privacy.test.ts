@@ -136,3 +136,20 @@ attack.each(['preparation', 'finalization'])('unexpected %s failure still releas
     expect(readdirSync(f.root).some(name => name.startsWith('wf-behave-'))).toBe(false);
   } finally { await f.close(); }
 });
+
+attack('cleanup rejection keeps the Batch outcome and saved Attempt consistently failed', async () => {
+  const start = relays.startRoute;
+  const f = await fixture('');
+  vi.spyOn(relays, 'startRoute').mockImplementation(async (...args) => {
+    const route = await start(...args); ownedRoutes.push(route); const close = route.close;
+    route.close = async () => { await close(); throw new Error('synthetic close failure'); }; return route;
+  });
+  try {
+    const result = await f.run(); expect(result.outcomes[0]?.completeness).toBe('driver-failed');
+    const record = JSON.parse(readFileSync(join(f.out, 'S0b-1/attempt.json'), 'utf8'));
+    expect(record.run.completeness).toBe('driver-failed');
+    expect(record.missing).toContain('isolation.cleanup');
+    expect(result.outcomes[0]?.record).toBe('S0b-1/attempt.json');
+    expect(ownedServices.every(service => !alive(service.pid))).toBe(true);
+  } finally { await f.close(); }
+});

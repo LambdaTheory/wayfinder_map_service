@@ -1,3 +1,4 @@
+import { requireDirectRuntime } from './direct-runtime.ts';
 // A private route per session attaches its credential and forwards the client's RPC body unchanged.
 // The Controller can interpose before a write without filling arguments or producing agent receipts.
 import { createServer, request } from 'node:http';
@@ -22,6 +23,7 @@ export interface Route {
 }
 
 export async function startRoute(target: number, token: string, observe: (record: RelayObservation) => void, excludedPorts: readonly number[] = []): Promise<Route> {
+  requireDirectRuntime();
   let cut = false;
   const upstream = new Set<ReturnType<typeof request>>();
   const server = createServer(async (req, res) => {

@@ -3,6 +3,7 @@
 import { spawn } from 'node:child_process';
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { trackClientTree } from './process-tree.ts';
 import { parseLines } from './normalize.ts';
 import type { Line } from './normalize.ts';
 import { IsolationError, verifyProfile } from './sandbox.ts';
@@ -122,11 +123,15 @@ export function executeTurn({ options: o, session: s, workdir, prompt, profile, 
   const started = Date.now();
   return new Promise(resolve => {
     const child = spawn(cmd as string, argv as string[], { cwd: workdir, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
+    const tree = child.pid ? trackClientTree(child.pid, [workdir, s.home]) : undefined;
+    let cleanupFailure: string | undefined;
+    const cleanup = () => tree?.terminate().catch(() => { cleanupFailure = 'isolation failure: owned client processes could not be cleared'; });
+    child.once('exit', () => { signal('SIGKILL'); void cleanup(); });
     let stdout = ''; let stderr = ''; let timedOut = false;
     let force: ReturnType<typeof setTimeout> | undefined;
     const signal = (name: NodeJS.Signals) => { if (child.pid) try { process.kill(-child.pid, name); } catch { /* already exited */ } };
     const kill = () => { signal('SIGTERM'); force ??= setTimeout(() => signal('SIGKILL'), 5000); force.unref(); };
-    const onExit = () => signal('SIGKILL');
+    const onExit = () => { signal('SIGKILL'); tree?.emergencyStop(); };
     process.once('exit', onExit);
     const timer = setTimeout(() => { timedOut = true; kill(); }, o.timeoutMs);
     const unregister = onChild?.(kill);
@@ -142,13 +147,14 @@ export function executeTurn({ options: o, session: s, workdir, prompt, profile, 
     });
     child.stderr.on('data', d => { stderr += d; });
     child.once('error', error => { stderr += String(error); });
-    child.once('close', (code, childSignal) => {
-      signal('SIGKILL'); // No detached descendants may outlive the native turn.
+    child.once('close', async (code, childSignal) => {
+      signal('SIGKILL');
+      await cleanup(); // Observed descendants in other groups; the shared cwd sweep runs at Attempt end.
       clearTimeout(timer); clearTimeout(force); unregister?.(); process.off('exit', onExit);
       for (const line of parseLines(buffered)) onLine?.(line);
       const lines = parseLines(stdout);
       s.thread = lines.find(e => e.type === 'thread.started')?.thread_id ?? s.thread;
-      const postIsolationFailure = verifyProfile(profile);
+      const postIsolationFailure = cleanupFailure ?? verifyProfile(profile);
       resolve({ ...(postIsolationFailure ? { postIsolationFailure } : {}), exitCode: code, signal: childSignal, timedOut, turnStarted: lines.some(e => e.type === 'turn.started'), stdout, stderr,
         startedAt: new Date(started).toISOString(), endedAt: new Date().toISOString(), durationMs: Date.now() - started, threadId: s.thread });
     });

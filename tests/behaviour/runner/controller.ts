@@ -1,3 +1,4 @@
+import { requireDirectRuntime } from './direct-runtime.ts';
 // The Controller: seeds Maps before the first turn and reads the evidence after the last, with its own
 // credential. Its writes follow the current release contract; it never writes for the agent (R2, R3).
 import { createHttpTestClient } from '../../helpers/mcp-http-client.mjs';
@@ -31,6 +32,7 @@ export function historyCredentials(maps: SeedMap[], reservedClientIds: string[])
 }
 
 export async function connectController(port: number, token: string, historyTokens: Record<string, string> = {}, observe: (event: EventRecord) => void = () => undefined): Promise<Controller> {
+  requireDirectRuntime();
   const { client, initializeResult } = await createHttpTestClient(port, token);
   const historicalClients = new Map<string, typeof client>();
   const instructions = initializeResult.instructions ?? '';
