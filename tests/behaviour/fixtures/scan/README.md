@@ -11,6 +11,7 @@ Every word, ID, fingerprint, request, launch and outcome here is invented. These
 | `codex/conflict.jsonl` | Conflict; no automatic verdict about subsequent client behaviour |
 | `codex-mcp-0.164.jsonl` | Separate reader fixture for Issue #102's Codex 0.164.x `item_completed` / `McpToolCall` shape: four product tools, turns, writes, reads, refusal, Conflict and failures; every value is synthetic |
 | `claude/normal.jsonl` | Explicit normal HITL approval followed by a write, never automatically failed |
+| `claude-ask-user-question.jsonl` | Separate reader fixture for Issue #104: AskUserQuestion answers and notes are human words at the result row; questions, option descriptions and previews are not |
 | Bookkeeping rows in `claude/normal.jsonl` | `summary` and `file-history-snapshot` without session IDs do not create extra sessions |
 | `claude/research.jsonl` | Skill invocation with an explicit operator research label |
 | `claude/sidechain.jsonl` | Child shares the parent's native ID but cannot inherit its launch/calls; purpose stays unknown |
