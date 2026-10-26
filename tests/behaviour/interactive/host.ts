@@ -19,7 +19,8 @@ import { W1, W7 } from '../scenarios/pace.ts';
 import { isolationSnapshot, isolationMeasurements, openDatabases } from './isolation.ts';
 import type { IsolationSnapshot } from './isolation.ts';
 import { privateText, writePrivate } from './privacy.ts';
-import { claudeProxyEnvironment, proxyVariables, syncCodexLogin } from './subscription.ts';
+import { syncCodexLogin } from './subscription.ts';
+import { proxyEnvironment, proxyRouting, proxySecrets, proxySummary } from '../proxy.ts';
 import type { Field } from '../evidence.ts';
 import type { InteractiveClient } from './native.ts';
 
@@ -36,6 +37,7 @@ export interface PreparedLauncher {
 }
 /** Prepare controls, never a model call. port is a credential-injecting relay, not the service itself. */
 export function launcher({ scratch, client, bin, port, model, effort, subscriptionHome, proxyEnv = {} }: LaunchOptions): PreparedLauncher {
+  proxyRouting(proxyEnv); // Refuse before preparing login state or launcher controls.
   scratch = realpathSync(scratch);
   const { controlDir, readOnlyDir } = prepareSandbox(scratch);
   try {
@@ -66,9 +68,9 @@ export function launcher({ scratch, client, bin, port, model, effort, subscripti
     const env: Record<string, string> = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, TMPDIR: join(home, 'tmp'),
       CODEX_HOME: join(home, '.codex'), CLAUDE_CONFIG_DIR: join(home, '.claude'), LANG: 'en_US.UTF-8', TERM: 'xterm-256color',
       DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' };
-    if (client === 'claude') for (const key of proxyVariables) if (proxyEnv[key] !== undefined) env[key] = proxyEnv[key]!;
     const executable = prepareClient(controlDir, bin);
-    const profile = writeProfile(controlDir, { home }, work, executable, { readOnlyRoots: [configuration], mutableReadOnlyFiles: mutable, localPorts: [port] });
+    const profile = writeProfile(controlDir, { home }, work, executable, { readOnlyRoots: [configuration], mutableReadOnlyFiles: mutable, localPorts: [port], proxyEnv });
+    Object.assign(env, profile.proxyEnvironment);
     const manifest: LaunchManifest = { client, bin: executable, args, workdir: work, env, profile, ...(codexLogin ? { codexLogin } : {}) };
     const manifestPath = join(controlDir, 'launch.json'); const text = JSON.stringify(manifest);
     writeFileSync(manifestPath, text, { mode: 0o600, flag: 'wx' });
@@ -127,13 +129,13 @@ export async function host(args: string[], options: { subscriptionHome: string; 
   try {
     scratch = mkdtempSync('/private/tmp/wayfinder-interactive-');
     const bin = realpathSync(executable);
-    const proxyEnv = client === 'claude' ? claudeProxyEnvironment(options.subscriptionHome, options.inheritedEnv ?? process.env) : {};
-    // Bypass hosts are public routing data; redacting them would corrupt loopback MCP evidence.
-    for (const [key, value] of Object.entries(proxyEnv)) if (key.toLowerCase() !== 'no_proxy') secrets[`proxy-${key}`] = value;
+    const proxyEnv = proxyEnvironment(client === 'claude' ? options.subscriptionHome : null, options.inheritedEnv ?? process.env);
+    const proxies = proxyRouting(proxyEnv);
+    Object.assign(secrets, proxySecrets(proxyEnv, proxies.environment));
     capture.service.commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkoutRoot, encoding: 'utf8' }).trim();
     before = observe([dir, scratch]);
     phase = 'service';
-    service = await startService(dir, controllerCredential, [agent]);
+    service = await startService(dir, controllerCredential, [agent], proxies.ports);
     controller = await connectController(service.port, controllerCredential.token);
     capture.service.version = controller.version;
     opened = openDatabases(service.pid);
@@ -142,7 +144,7 @@ export async function host(args: string[], options: { subscriptionHome: string; 
     writePrivate(join(dir, 'seed.json'), await controller.exportCatalog(), secrets);
     writePrivate(join(dir, 'controller-rules.json'), { instructions: controller.instructions, toolDescriptions: controller.toolDescriptions,
       note: 'Observed by the Controller only; this does not claim the client saw them.' }, secrets);
-    route = await startRoute(service.port, agent.token, event => relay.push(event));
+    route = await startRoute(service.port, agent.token, event => relay.push(event), proxies.ports);
     prepared = launcher({ scratch, client, bin, port: route.port, model, effort, subscriptionHome: options.subscriptionHome, proxyEnv });
     launchExposed = true;
     console.log(`Private Attempt: ${dir}\nClient command (approved Batch only): ${prepared.command}\nOpening line: ${scenario.turns[0]!.say}\nStop the client before finishing here. The host has a 60-minute ceiling.`);
@@ -183,11 +185,18 @@ export async function host(args: string[], options: { subscriptionHome: string; 
     } catch { capture.missing.push('events'); if (capture.run.completeness === 'complete') capture.run.completeness = 'driver-failed'; }
     try { await route?.close(); await controller?.close(); } finally {
       const stopped = await service?.stop();
-      writePrivate(join(raw, 'relay.json'), relay, secrets);
+      const retainRaw = (path: string, value: unknown, missing: string) => {
+        try { writePrivate(path, value, secrets); }
+        catch {
+          rmSync(path, { force: true }); // The service protocol file already exists before its privacy check.
+          capture.missing.push(missing); capture.run.completeness = 'driver-failed'; capture.run.detail = 'raw evidence withheld after privacy validation';
+        }
+      };
+      retainRaw(join(raw, 'relay.json'), relay, 'raw.relay.json');
       try { after = observe([dir, ...(scratch ? [scratch] : []), ...(prepared ? [prepared.controlDir] : [])]); } catch { after = unavailable(); }
       if (service) {
-        writePrivate(join(raw, 'service.log'), service.logs(), secrets);
-        if (existsSync(service.protocolReport)) writePrivate(service.protocolReport, readFileSync(service.protocolReport, 'utf8'), secrets);
+        retainRaw(join(raw, 'service.log'), service.logs(), 'raw.service.log');
+        if (existsSync(service.protocolReport)) retainRaw(service.protocolReport, readFileSync(service.protocolReport, 'utf8'), 'raw.protocol.jsonl');
       }
       let controlIntegrity: Field<boolean> = absent('launcher was not prepared');
       const controlFailures: string[] = [];
@@ -244,7 +253,7 @@ export async function host(args: string[], options: { subscriptionHome: string; 
       if (!capture.maps.length) capture.missing.push('maps');
       if (!capture.raw.files.some(file => file.startsWith('raw/native-'))) capture.missing.push('events');
       writePrivate(join(dir, 'capture.json'), capture, secrets);
-      writePrivate(join(dir, 'isolation.json'), { serviceStopped: stopped ? { known: true, value: stopped } : { known: false, reason: 'service never started' },
+      writePrivate(join(dir, 'isolation.json'), { proxy: prepared ? proxySummary(prepared.profile.proxyEnvironment) : { enabled: false, variables: [], unavailable: true }, serviceStopped: stopped ? { known: true, value: stopped } : { known: false, reason: 'service never started' },
         codexLoginSync: loginSync, controlIntegrity, controlFailures,
         controlDirectoryRemoved: prepared ? !existsSync(prepared.controlDir) : null,
         ...(prepared && existsSync(prepared.controlDir) ? { retainedControlDirectory: prepared.controlDir } : {}),

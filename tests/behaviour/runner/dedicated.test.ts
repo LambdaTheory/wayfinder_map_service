@@ -138,10 +138,12 @@ test('artifact capture redacts credentials without corrupting other bytes or fol
   const target = join(records, 'artifacts');
   const token = 'synthetic-secret';
   writeFileSync(join(source, 'binary'), Buffer.concat([Buffer.from([0, 255]), Buffer.from(token), Buffer.from([128, 0])]));
+  writeFileSync(join(source, 'text.json'), '{"text":"\\u4f60\\u597d 🧭 synthetic-secret","seq":1}');
   symlinkSync(auth, join(source, 'auth-link'));
   captureArtifacts(source, target, { credential: token });
   expect(readFileSync(join(target, 'binary'))).toEqual(Buffer.concat([Buffer.from([0, 255]), Buffer.from('<credential>'), Buffer.from([128, 0])]));
   expect(existsSync(join(target, 'auth-link'))).toBe(false);
+  expect(JSON.parse(readFileSync(join(target, 'text.json'), 'utf8'))).toEqual({ text: '你好 🧭 <credential>', seq: 1 });
 });
 
 async function launcherFixture() {

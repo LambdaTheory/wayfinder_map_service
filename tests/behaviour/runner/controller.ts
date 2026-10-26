@@ -1,6 +1,6 @@
 // The Controller: seeds Maps before the first turn and reads the evidence after the last, with its own
 // credential. Its writes follow the current release contract; it never writes for the agent (R2, R3).
-import { createHttpTestClient } from '../../helpers/mcp-http-client.mjs';
+import { createControllerClient } from './controller-client.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import type { EventRecord, WireRevision, WireState } from '../evidence.ts';
 import type { SeedMap } from '../scenario.ts';
@@ -31,9 +31,10 @@ export function historyCredentials(maps: SeedMap[], reservedClientIds: string[])
 }
 
 export async function connectController(port: number, token: string, historyTokens: Record<string, string> = {}, observe: (event: EventRecord) => void = () => undefined): Promise<Controller> {
-  const { client, initializeResult } = await createHttpTestClient(port, token);
-  const historicalClients = new Map<string, typeof client>();
-  const instructions = initializeResult.instructions ?? '';
+  const connection = await createControllerClient(port, token);
+  const { client } = connection;
+  const historicalClients = new Map<string, typeof connection>();
+  const instructions = client.getInstructions() ?? '';
   const version = /^version: (\S+)$/m.exec(instructions)?.[1];
   if (!version) throw new Error('the service instructions state no version');
   const toolDescriptions = Object.fromEntries((await client.listTools()).tools.map(t => [t.name, t.description ?? '']));
@@ -45,10 +46,10 @@ export async function connectController(port: number, token: string, historyToke
       if (!Object.hasOwn(historyTokens, author)) throw new Error('No credential for historical author');
       let historical = historicalClients.get(author);
       if (!historical) {
-        historical = (await createHttpTestClient(port, historyTokens[author]!)).client;
+        historical = await createControllerClient(port, historyTokens[author]!);
         historicalClients.set(author, historical);
       }
-      sender = historical;
+      sender = historical.client;
     }
     const base = { seq: 0, at: new Date().toISOString(), actor: 'controller' as const, session: null, turn: null,
       kind: 'tool-call' as const, callId: `controller:${callId++}`, server: 'wayfinder', tool: name, arguments: args,
@@ -128,7 +129,7 @@ export async function connectController(port: number, token: string, historyToke
       }
       return out;
     },
-    close: async () => { await Promise.all([client, ...historicalClients.values()].map(c => c.close())); },
+    close: async () => { await Promise.all([connection, ...historicalClients.values()].map(c => c.close())); },
   };
 }
 

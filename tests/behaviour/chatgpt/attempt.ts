@@ -10,7 +10,7 @@ import { connectController } from '../runner/controller.ts';
 import type { Controller } from '../runner/controller.ts';
 import { receiptsFrom } from '../runner/normalize.ts';
 import { checkoutRoot, freePort, newToken } from '../runner/service.ts';
-import { createHttpTestClient } from '../../helpers/mcp-http-client.mjs';
+import { createControllerClient } from '../runner/controller-client.mjs';
 import { clientProfiles } from '../clients.ts';
 import { upgradeChecks } from '../upgrade-checks.ts';
 import { observeIsolation } from './isolation.ts';
@@ -138,9 +138,9 @@ export class ChatGPTAttempt {
     this.service = await startLocalMcpService(this.serviceConfig);
     this.controller = await connectController(this.servicePort, this.tokens.controller);
     // Observe actual service metadata with a Controller credential in the same configured mode as ChatGPT.
-    const observation = await createHttpTestClient(this.servicePort, this.tokens.observer);
+    const observation = await createControllerClient(this.servicePort, this.tokens.observer);
     try { this.tools = (await observation.client.listTools()).tools as Tool[]; }
-    finally { await observation.client.close(); }
+    finally { await observation.close(); }
     this.saveRaw(`controller-tools-${this.phase}.json`, this.tools);
     const compatibilityMode = this.parameterDescription().includes(this.controller.version) ? 'toolsOnly' : 'instructions';
     if (this.phase === 'initial') this.record.service.version = this.controller.version;

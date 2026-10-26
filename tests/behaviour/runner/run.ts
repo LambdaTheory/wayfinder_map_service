@@ -7,8 +7,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { isDeepStrictEqual, parseArgs } from 'node:util';
-import { attemptSchema, classifyResult, leaks, redact } from '../evidence.ts';
+import { attemptSchema, classifyResult, leaks, redact, requiredFields } from '../evidence.ts';
 import type { AttemptRecord, Completeness, Entry, EventRecord, Field, GivenRules, SessionRecord } from '../evidence.ts';
+import { startProxyChannel } from './proxy-channel.ts';
+import { clearClientDirectories } from './process-tree.ts';
+import { ProxyError, proxyEnvironment, proxyRouting, proxySecrets, proxySummary } from '../proxy.ts';
 import { library } from '../library.ts';
 import { fixturesRoot, readiness, validateScenario } from '../scenario.ts';
 import type { ControllerAction, Scenario } from '../scenario.ts';
@@ -43,6 +46,8 @@ export interface BatchOptions {
   loginSource: ClientLogin | null;
   /** Root of the personal configuration to compare; tests inject a synthetic HOME. */
   personalConfigRoot: string;
+  /** Explicit input; tests omit it or supply synthetic proxies. CLI selects only six keys. */
+  proxyEnv?: Record<string, string>;
 }
 
 export interface PlannedAttempt { attemptId: string; scenario: Scenario }
@@ -157,6 +162,37 @@ export interface AttemptIsolation {
 }
 
 export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: () => boolean, register: (kill: () => void) => void): Promise<AttemptOutcome> {
+  const cleanup: (() => Promise<unknown>)[] = []; let kill = () => {};
+  const defer = <T>(action: () => T | Promise<T>): (() => Promise<T>) => {
+    let pending: Promise<T> | undefined;
+    const once = () => pending ??= Promise.resolve().then(action); cleanup.push(once); return once;
+  };
+  let outcome: AttemptOutcome = { attemptId: p.attemptId, scenario: p.scenario.id, completeness: 'driver-failed',
+    detail: 'Attempt failed before safe evidence could be retained' };
+  try { outcome = await runOwnedAttempt(o, p, cancelled, action => { kill = action; register(action); }, defer); }
+  catch { /* Unknown setup/finalization errors have no reliably complete secret inventory: keep the fixed diagnostic. */ }
+  finally {
+    let failed = false; try { kill(); } catch { failed = true; }
+    for (const action of cleanup.reverse()) try { await action(); } catch { failed = true; }
+    if (failed) {
+      outcome.completeness = 'driver-failed'; outcome.detail = 'owned Attempt cleanup failed';
+      if (outcome.record) {
+        const path = join(o.out, outcome.record);
+        try {
+          const saved = JSON.parse(readFileSync(path, 'utf8')) as AttemptRecord;
+          saved.run.completeness = 'driver-failed'; saved.run.detail = outcome.detail;
+          saved.missing = [...new Set([...saved.missing, 'isolation.cleanup'])];
+          writeFileSync(path, JSON.stringify(saved, null, 1), { mode: 0o600 });
+        } catch { rmSync(path, { force: true }); delete outcome.record; }
+      }
+    }
+  }
+  return outcome;
+}
+
+async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: () => boolean, register: (kill: () => void) => void,
+  defer: <T>(action: () => T | Promise<T>) => () => Promise<T>): Promise<AttemptOutcome> {
+  const proxies = proxyRouting(o.proxyEnv ?? {});
   const s = p.scenario;
   const upgradeMode = codexLifecycle(s.id) ?? null;
   if (upgradeMode && !o.codex.sandbox) return { attemptId: p.attemptId, scenario: s.id, completeness: 'not-run', detail: 'upgrade checks require the shared sandbox' };
@@ -171,8 +207,13 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   if (existsSync(dir)) return { attemptId: p.attemptId, scenario: s.id, completeness: 'not-run', detail: 'Attempt output directory already exists' };
   mkdirSync(join(dir, 'raw'), { recursive: true, mode: 0o700 });
   const scratch = mkdtempSync(join(o.scratchRoot, `wf-behave-${p.attemptId}-`));
+  defer(() => rmSync(scratch, { recursive: true, force: true }));
   const layout = prepareSandbox(scratch);
   const { controlDir } = layout;
+  defer(() => rmSync(controlDir, { recursive: true, force: true }));
+  const clearClients = defer(() => clearClientDirectories([scratch]));
+  const channel = await startProxyChannel(proxies.environment);
+  defer(() => channel.close());
   const profiles = new Map<string, ControlProfile>();
   const isolationFailures: string[] = [];
   const controller: Credential = { clientId: 'Behaviour-Controller', token: newToken() };
@@ -185,6 +226,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   const nativeSessions = sessions.map(s => s.codex);
   const secrets: Record<string, string> = { 'controller-token': controller.token,
     ...Object.fromEntries(sessions.flatMap(x => [[`token-${x.label}`, x.credential.token], ...loginSecrets(x.codex).map((v, i) => [`codex-login-${x.label}-${i}`, v])])) };
+  Object.assign(secrets, proxySecrets(o.proxyEnv ?? {}, proxies.environment), Object.fromEntries(Object.entries(proxySecrets(proxies.environment, channel.environment)).map(([name,value]) => [name.replace('proxy-', 'proxy-channel-'), value])));
   const startedAt = new Date().toISOString();
   const events: EventRecord[] = [];
   const emit = (event: EventRecord) => { events.push({ ...event, seq: events.length }); };
@@ -202,9 +244,19 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   const cache = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests');
   mkdirSync(cache, { recursive: true, mode: 0o700 });
   const serviceDir = mkdtempSync(join(cache, entry === 'dedicated' ? 'dedicated-' : 'attempt-'));
+  defer(() => rmSync(serviceDir, { recursive: true, force: true }));
 
   const rawFiles: string[] = [];
-  const writeRaw = (name: string, text: string) => { writeFileSync(join(dir, 'raw', name), tilde(redact(text, secrets)), { mode: 0o600 }); rawFiles.push(name); };
+  const writeRaw = (name: string, text: string) => {
+    try {
+      const safe = tilde(redact(text, secrets));
+      if (leaks(safe, secrets).length) throw new Error('credential survived redaction');
+      writeFileSync(join(dir, 'raw', name), safe, { mode: 0o600 }); rawFiles.push(name);
+    } catch {
+      rmSync(join(dir, 'raw', name), { force: true });
+      missing.push(`raw.${name}`); completeness = 'driver-failed'; detail = 'raw evidence withheld after privacy validation';
+    }
+  };
   const usage = { inputTokens: 0, outputTokens: 0 };
   let completeness: Completeness = 'complete';
   let detail: string | undefined;
@@ -224,15 +276,18 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
     if (upgradeMode) upgrade = await upgradeEvidence(upgradeMode);
     const historical = historyCredentials(s.seed.maps, [controller.clientId, ...sessions.map(x => x.credential.clientId)]);
     for (const [label, credential] of Object.entries(historical)) secrets[`history-token-${label}`] = credential.token;
-    service = await startService(serviceDir, controller, [...sessions.map(x => x.credential), ...Object.values(historical), ...(bait ? [bait] : [])]);
+    service = await startService(serviceDir, controller, [...sessions.map(x => x.credential), ...Object.values(historical), ...(bait ? [bait] : [])], proxies.ports);
+    service.stop = defer(service.stop);
     openDatabases(service.pid).forEach(d => opened.add(d));
     ctl = await connectController(service.port, controller.token, Object.fromEntries(Object.entries(historical).map(([label, c]) => [label, c.token])), emit);
+    ctl.close = defer(ctl.close);
     for (const map of s.seed.maps) seedHeads[map.mapId] = await ctl.seed(map, revision => { seedHeads[map.mapId] = revision; });
     seedingComplete = true;
     const workdir = prepareWorkdir(scratch, s.seed.fixtures, fixturesRoot);
     const nativeOptions = { ...o.codex, bin: prepareClient(controlDir, o.codex.bin) };
     if (entry === 'dedicated') {
-      dedicated = prepareDedicated(sessions[0]!.codex, service, controller, nativeOptions, layout, workdir);
+      dedicated = prepareDedicated(sessions[0]!.codex, service, controller, nativeOptions, layout, workdir, channel.environment, channel.permit);
+      secrets['launcher-probe-token'] = dedicated.probeToken;
       sessions[0]!.codex.codexHome = dedicated.codexHome;
       profiles.set(sessions[0]!.codex.home, dedicated.profile);
     }
@@ -256,8 +311,10 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
         if (entry.phase === 'cut') controllerEvent('relay-cut', { method: entry.rpc.method,
           tool: entry.rpc.method === 'tools/call' ? entry.rpc.params?.name : undefined,
           requestId: entry.rpc.id, scope: entry.scope, trigger: entry.trigger }, session.turn ?? null, session.label);
-      }, !!upgrade);
+      }, proxies.ports, !!upgrade);
+      session.route.close = defer(session.route.close);
     }
+    defer(() => channel.close()); // Close the capability before slower service/relay cleanup on an exceptional exit.
     const executeControllerAction = async (a: ControllerAction, session: Session, index: number, mapId?: string) => {
       controllerEvent(a.action, { status: 'started', detail: a.detail }, index);
       try {
@@ -335,20 +392,22 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       };
       let profile = profiles.get(session.codex.home);
       if (!profile) {
-        profile = writeProfile(controlDir, session.codex, workdir, nativeOptions.bin, { localPorts: [session.route!.port, ...(bait ? [service!.port] : [])] });
+        profile = writeProfile(controlDir, session.codex, workdir, nativeOptions.bin, { localPorts: [session.route!.port, ...(bait ? [service!.port] : [])], proxyEnv: channel.environment, ...(channel.permit ? { proxyPermit: channel.permit } : {}) });
         profiles.set(session.codex.home, profile);
       }
       const fromSeq = events.length;
       const previousRollout = session.rollout?.text ?? '';
       let n: ReturnType<typeof streamTurn> | undefined;
+      let releaseProxy = () => {};
       const request = { options: nativeOptions, session: session.codex, port: session.route!.port, workdir,
         prompt: turn.say, profile, onChild,
         onSpawn: (pid: number) => controllerEvent('client-process-started', { pid, resume: session.codex.thread !== null }, index, session.label),
         onLaunch: () => {
-          controllerEvent('isolation-check', { session: session.label, paths: Object.keys(profile.hashes), ok: true }, index);
+          releaseProxy = channel.activate();
+          controllerEvent('isolation-check', { session: session.label, paths: Object.keys(profile.hashes), proxy: proxySummary(profile.proxyEnvironment, channel.permit), ok: true }, index);
           n = streamTurn(turn.session, index, turn.say, new Date().toISOString(), workdir, emit);
-        }, onLine: (line: import('./normalize.ts').Line) => n?.line(line) };
-      const r = dedicated ? await runDedicatedTurn(request, dedicated) : await runTurn(request);
+        }, onExit: () => releaseProxy(), onLine: (line: import('./normalize.ts').Line) => n?.line(line) };
+      const r = await (dedicated ? runDedicatedTurn(request, dedicated) : runTurn(request)).finally(() => releaseProxy());
       n?.finish();
       if (dedicated) {
         try {
@@ -415,7 +474,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       if (r.timedOut) { completeness = 'timeout'; detail = `turn ${index} exceeded ${o.codex.timeoutMs} ms`; killAll(); return; }
       if (r.exitCode !== 0 || !r.turnStarted) {
         completeness = !r.turnStarted ? 'launch-failed' : looksRateLimited(r) ? 'rate-limited' : 'driver-failed';
-        detail = `turn ${index}: exit ${r.exitCode ?? r.signal}; ${[...n!.errors, r.stderr.trim().split('\n').at(-1) ?? ''].join(' ').slice(0, 300)}`;
+        detail = `turn ${index}: exit ${r.exitCode ?? r.signal}; ${[...n!.errors, r.stderr.trim().split('\n').at(-1) ?? ''].join(' ')}`;
         killAll(); return;
       }
       const missed = during.filter(a => !actionRuns.has(a));
@@ -427,6 +486,8 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       }
       for (const a of s.controller.filter(a => 'after' in a.when && a.when.after === index)) await runControllerAction(a, session, index);
     };
+    await channel.observe();
+    if (channel.evidence().blockedConnections) throw new IsolationError('client connection attempted before proxy activation');
     for (let index = 0; index < s.turns.length;) {
       if (cancelled()) { completeness = 'cancelled'; break; }
       const group = [index++];
@@ -450,9 +511,12 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
         killAll(); throw error;
       })));
       const failed = results.find(r => r.status === 'rejected');
+      await channel.observe();
+      if (channel.evidence().blockedConnections) { completeness = 'driver-failed'; detail = 'Client connection attempted while the proxy channel was inactive'; }
       if (failed?.status === 'rejected') throw failed.reason;
       if (completeness !== 'complete') break;
     }
+    await clearClients();
     if (dedicated && isolationFailures.length) missing.push('raw.work');
     else { captureArtifacts(workdir, join(dir, 'raw', 'work'), secrets); rawFiles.push('work/'); }
   } catch (error) {
@@ -461,11 +525,18 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       missing.push('events', 'raw.client');
     }
     if (completeness === 'complete') completeness = service ? 'driver-failed' : 'service-failed';
-    detail = `${detail ?? ''} ${String(error instanceof Error ? error.message : error)}`.trim().slice(0, 300);
+    detail = `${detail ?? ''} ${String(error instanceof Error ? error.message : error)}`.trim();
   }
   // A cancellation can end the native process while its relay hook is still restarting the owned service.
   // Drain those bounded operations before exporting or stopping anything, so no replacement child escapes cleanup.
   await Promise.allSettled(actionRuns.values());
+  await clearClients();
+  await channel.observe();
+  await channel.close();
+  const proxyEvidence = channel.evidence();
+  writeRaw('proxy-channel.json', JSON.stringify(proxyEvidence));
+  controllerEvent('proxy-channel', proxyEvidence);
+  if (proxyEvidence.blockedConnections) { completeness = 'driver-failed'; detail = 'Client connection attempted while the proxy channel was inactive'; isolationFailures.push(detail); }
   if (dedicated) {
     entryContext = dedicatedContext(dedicated, sessions[0]?.rollout?.text);
     writeRaw('entry-context.json', JSON.stringify({ launcher: dedicatedLauncherSource, context: entryContext, launches }, null, 1));
@@ -503,7 +574,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   // Raw SQLite can retain credentials in Map text, history, free pages and journals. Keep only
   // the redacted structured export; never patch database bytes or retain it after export failure.
   if (entry === 'dedicated') missing.push('raw.database');
-  const databaseCleanup = cleanupServiceDirectory(serviceDir, entry === 'dedicated' || !missing.includes('maps'));
+  const databaseCleanup = cleanupServiceDirectory(serviceDir, true);
   rmSync(scratch, { recursive: true, force: true });
   rmSync(controlDir, { recursive: true, force: true });
   const consensus = (key: 'visibleModel' | 'effort' | 'cliVersion'): Field<string> => {
@@ -518,6 +589,13 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   if (!given.length) given.push(initialRules(ctl?.version ?? 'unknown', ctl?.instructions ?? '', ctl?.toolDescriptions ?? {}, null));
   if (entry === 'dedicated') for (const rules of given)
     rules.extraContext = entryContext.map(c => `${c.source}: installed=${c.installed}; shownToModel=${c.shownToModel ?? 'unknown'}; raw/entry-context.json`);
+  if (detail) {
+    try {
+      const safe = tilde(redact(detail, secrets));
+      if (leaks(safe, secrets).length) throw new Error('unsafe detail');
+      detail = safe.slice(0, 300); // Truncate only after scrubbing, so a partial credential cannot escape detection.
+    } catch { completeness = 'driver-failed'; detail = 'Error detail withheld after privacy validation'; }
+  }
   const record: AttemptRecord = {
     schema: attemptSchema, attemptId: `${o.batchId}/${p.attemptId}`, batchId: o.batchId, subject: { kind: upgradeMode ? 'upgrade-check' : 'scenario', id: s.id, version: s.version },
     entry, combination: { harness: 'codex', requestedModel: o.codex.model, visibleModel, effort },
@@ -542,10 +620,18 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   record.missing = [...new Set([...missing, ...record.receipts.flatMap((r, i) => r.outcome.kind === 'unknown' ? [`receipts[${i}].outcome`] : []), ...unknownFields.filter(([, f]) => !f.known).map(([path]) => path)])];
   const isolation: AttemptIsolation = { ...(entry === 'dedicated' ? { dedicatedServiceRemoved: !existsSync(serviceDir), launcherInvocations: launches.length } : {}), sandbox: o.codex.sandbox, serviceStopped: stopped ?? null, servedOwnDatabase: service ? opened.has(service.databasePath) : false,
     touchedEverydayDatabase: touchedEverydayDatabase([...opened]), scratchRemoved: !existsSync(scratch), controlDirectoryRemoved: !existsSync(controlDir), databaseDirectoryRemoved: databaseCleanup.removed, retainedDatabase: databaseCleanup.retained, failures: isolationFailures, clientSkills: skills, attribution: attribution(record) };
-  const text = tilde(redact(JSON.stringify({ ...record, isolation }, null, 1), secrets));
-  if (leaks(text, secrets).length) return { attemptId: p.attemptId, scenario: s.id, completeness: 'driver-failed', detail: 'a credential survived redaction; record withheld' };
+  let text: string; let safeDetail: string | undefined;
+  try {
+    text = tilde(redact(JSON.stringify({ ...record, isolation }, null, 1), secrets));
+    const saved = JSON.parse(text) as AttemptRecord;
+    const missingField = requiredFields.some(path => path.split('.').reduce<unknown>((value, key) =>
+      value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined, saved) === undefined);
+    if (missingField || saved.schema !== attemptSchema || saved.run.completeness !== completeness || leaks(text, secrets).length)
+      throw new Error('invalid scrubbed evidence');
+    safeDetail = saved.run.detail;
+  } catch { return { attemptId: p.attemptId, scenario: s.id, completeness: 'driver-failed', detail: 'redaction could not preserve safe evidence; record withheld' }; }
   writeFileSync(join(dir, 'attempt.json'), text, { mode: 0o600 });
-  return { attemptId: p.attemptId, scenario: s.id, completeness, ...(detail ? { detail } : {}), record: join(p.attemptId, 'attempt.json') };
+  return { attemptId: p.attemptId, scenario: s.id, completeness, ...(safeDetail ? { detail: safeDetail } : {}), record: join(p.attemptId, 'attempt.json') };
 }
 
 export const personalConfigNamesRun = (text: string) => /wf-behave-|behaviour-runs|wayfinder-behaviour-tests|Behaviour[.-]/.test(text);
@@ -555,6 +641,7 @@ export async function runBatch(o: BatchOptions): Promise<{ outcomes: AttemptOutc
   if (o.entry === 'dedicated' && !o.codex.sandbox) refusals.push('Dedicated Entry requires the allowlist sandbox');
   if (refusals.length) return { outcomes: [], refusals };
   if (o.upgradeChecks?.length && !o.codex.sandbox) return { outcomes: [], refusals: ['upgrade checks require the shared sandbox'] };
+  try { proxyRouting(o.proxyEnv ?? {}); } catch (error) { return { outcomes: [], refusals: [(error as Error).message] }; }
   const outputError = outputRefusal(o.out);
   if (outputError) return { outcomes: [], refusals: [outputError] };
   if (existsSync(o.out)) return { outcomes: [], refusals: [`${tilde(o.out)} already exists; a Batch never reuses an output directory`] };
@@ -573,7 +660,7 @@ export async function runBatch(o: BatchOptions): Promise<{ outcomes: AttemptOutc
       else if (cancel) outcome = { attemptId: p.attemptId, scenario: p.scenario.id, completeness: 'cancelled', detail: 'cancelled before start' };
       else {
         try { outcome = await runAttempt(o, p, () => cancel, k => { kill = k; }); }
-        catch (error) { outcome = { attemptId: p.attemptId, scenario: p.scenario.id, completeness: 'driver-failed', detail: String(error instanceof Error ? error.message : error).slice(0, 300) }; }
+        catch { outcome = { attemptId: p.attemptId, scenario: p.scenario.id, completeness: 'driver-failed', detail: 'Attempt failed before safe evidence could be retained' }; }
       }
       outcomes.push(outcome);
       console.log(`${p.attemptId}: ${outcome.completeness}${outcome.detail ? ` (${outcome.detail})` : ''}`);
@@ -584,7 +671,7 @@ export async function runBatch(o: BatchOptions): Promise<{ outcomes: AttemptOutc
   const mentionsRun = Object.keys(after.files).filter(f => { const path = f.replace(/^~/, homedir());
     return existsSync(path) && personalConfigNamesRun(readFileSync(path, 'utf8')); });
   writeFileSync(join(o.out, 'batch.json'), JSON.stringify({ batchId: o.batchId, combination: `codex:${o.codex.model}:${o.codex.effort}`, entry: o.entry ?? 'mcp-only',
-    sandbox: o.codex.sandbox, plan: plan.map(p => p.attemptId), ceiling: o.ceiling, outcomes,
+    sandbox: o.codex.sandbox, proxy: proxySummary(o.proxyEnv ?? {}), plan: plan.map(p => p.attemptId), ceiling: o.ceiling, outcomes,
     ...(o.upgradeChecks?.length ? { kind: 'upgrade-checks', checks: o.upgradeChecks, count: o.count, plannedAttempts: plan.length,
       quota: { attemptCeiling: o.ceiling, nativeTurnCeiling: plan.slice(0, o.ceiling).reduce((n, p) => n + p.scenario.turns.length, 0), timeoutMsPerTurn: o.codex.timeoutMs, automaticRetries: 0, modelReviews: 0 } } : {}),
     isolation: { before, after, unchanged: JSON.stringify(before) === JSON.stringify(after), personalConfigNamingThisRun: mentionsRun } }, null, 1), { mode: 0o600 });
@@ -599,6 +686,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.error('usage: run.ts --batch <id> (--scenarios S0b,F11 | --upgrade-checks U-codex-process,U-codex-resume) --count 2 --ceiling 4 [--entry mcp-only|dedicated] [--model gpt-6-astra] [--effort xhigh]');
     process.exit(2);
   }
+  let proxyEnv: Record<string, string>;
+  try {
+    proxyEnv = proxyEnvironment(null, process.env);
+    proxyRouting(proxyEnv); // Refuse invalid routing before opening subscription state.
+  } catch (error) {
+    if (!(error instanceof ProxyError)) throw error;
+    console.error(`refused: ${error.message}`); process.exit(1);
+  }
   if (values.entry !== 'mcp-only' && values.entry !== 'dedicated') throw new Error('entry must be mcp-only or dedicated');
   const entry: BatchOptions['entry'] = values.entry;
   const selection = { entry, batchId: values.batch, scenarios: values.scenarios?.split(',') ?? [], upgradeChecks: values['upgrade-checks']?.split(',') ?? [], count: Number(values.count), ceiling: Number(values.ceiling) };
@@ -608,7 +703,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
   const result = await runBatch({ ...selection,
     out: values.out ?? join(homedir(), 'Library/Application Support/Wayfinder/behaviour-runs', values.batch), scratchRoot: '/private/tmp',
-    loginSource: { contents: readFileSync(join(homedir(), '.codex/auth.json'), 'utf8') }, personalConfigRoot: homedir(),
+    loginSource: { contents: readFileSync(join(homedir(), '.codex/auth.json'), 'utf8') }, personalConfigRoot: homedir(), proxyEnv,
     codex: { model: values.model, effort: values.effort, bin: values.codex, sandbox: !values['no-sandbox'], timeoutMs: Number(values['timeout-min']) * 60_000 } });
   for (const r of result.refusals) console.error(`refused: ${r}`);
   if (result.refusals.length) process.exit(1);

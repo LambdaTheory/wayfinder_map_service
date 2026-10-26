@@ -4,7 +4,7 @@
 
 ## Credential handling
 
-The real launcher's degraded-authentication fallback could return its primary token, which the runner had set to the Controller credential. The credential-owner check alone accepted that token because the Controller is a registered owner. The private shim now rejects the Controller's hash explicitly before recording or executing a client launch. Healthy per-launch credentials remain accepted; no shipped launcher change is needed.
+The real launcher's degraded-authentication fallback could return its primary token, which the runner had set to the Controller credential. The credential-owner check alone accepted that token because the Controller is a registered owner. The private shim rejects the Controller's hash explicitly before recording or executing a client launch. Issue #101 additionally replaced the launcher's primary file with a separate probe credential, rejected that credential's hash as client fallback too, and separated trusted direct service probes from the sandboxed client's proxy environment; the Controller token now stays in runner memory. Healthy per-launch credentials remain accepted; no shipped launcher change is needed.
 
 Both Entries now use `runner/artifacts.ts` to copy retained files. The shared redactor applies to directory and file basenames as well as file contents, including binary bytes. Collisions receive deterministic `.redacted-N` suffixes instead of overwriting files or merging directories. Symlinks and `node_modules` are omitted, and the shared sandbox helper checks regular files and their single-link requirement before reads.
 
