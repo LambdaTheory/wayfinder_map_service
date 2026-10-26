@@ -1,3 +1,4 @@
+import { syntheticClientState } from './test-state.ts';
 // The runner without a model: refusals before running, seeds against the real service, the sandbox profile,
 // and one end-to-end S0b Attempt played by a Codex stand-in that makes real MCP calls.
 import { spawnSync } from 'node:child_process';
@@ -20,6 +21,7 @@ import { checkoutRoot, freePort, newToken, startService } from './service.ts';
 import { createServer } from 'node:net';
 
 const scratch = realpathSync(mkdtempSync('/private/tmp/wf-behave-test-'));
+const clientState = syntheticClientState(scratch);
 const sandboxAvailable = spawnSync('which', ['sandbox-exec']).status === 0;
 const fakeCodex = fileURLToPath(new URL('./fake-codex.mjs', import.meta.url));
 // The service refuses databases under temporary directories or inside a repository; tests keep theirs in Caches.
@@ -38,7 +40,7 @@ describe('preflight', () => {
   });
   test('refuses raw output inside the checkout before starting a service or client', async () => {
     const out = join(checkoutRoot, 'tests/behaviour/must-not-create');
-    const options: BatchOptions = { batchId: 'T', scenarios: ['S0b'], count: 1, ceiling: 1, out, scratchRoot: scratch,
+    const options: BatchOptions = { batchId: 'T', scenarios: ['S0b'], count: 1, ceiling: 1, out, scratchRoot: scratch, ...clientState,
       codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs: 1000 } };
     expect((await runBatch(options)).refusals).toEqual(['raw records must stay outside repositories']);
     expect(existsSync(out)).toBe(false);
@@ -117,7 +119,7 @@ describe('one Attempt end to end, without a model', () => {
   test('S0b with the Codex stand-in: isolated, recorded, attributed, cleaned up', async () => {
     const out = join(records, 'runs', 'T-fake');
     const options: BatchOptions = { batchId: 'T-fake', scenarios: ['S0b'], count: 1, ceiling: 1, out,
-      codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs: 60_000 }, scratchRoot: scratch };
+      codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs: 60_000 }, scratchRoot: scratch, ...clientState };
     const { outcomes, refusals } = await runBatch(options);
     expect(refusals).toEqual([]);
     expect(outcomes.map(o => [o.attemptId, o.completeness])).toEqual([['S0b-1', 'complete']]);
@@ -142,7 +144,7 @@ describe('one Attempt end to end, without a model', () => {
 
 describe('every planned Attempt gets a result', () => {
   const options = (out: string, timeoutMs = 60_000): BatchOptions => ({ batchId: 'T-fail', scenarios: [], count: 1, ceiling: 1,
-    out, codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs }, scratchRoot: scratch });
+    out, codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs }, scratchRoot: scratch, ...clientState });
   const drill = (say: string): Scenario => ({ ...library.find(s => s.id === 'S12')!, id: 'Drill', turns: [{ session: 'A', kind: 'opening', say }] });
   const attempt = async (say: string, timeoutMs?: number, cancelled = () => false) => {
     const out = join(records, `fail-${Math.random().toString(36).slice(2)}`);
@@ -183,7 +185,7 @@ describe('inside the sandbox', () => {
     const s15 = library.find(s => s.id === 'S15')!;
     const drill: Scenario = { ...s15, id: 'Drill', turns: [s15.turns[0]!] };
     const outcome = await runAttempt({ batchId: 'T-sandbox', scenarios: [], count: 1, ceiling: 1, out,
-      codex: { model: 'fake-model', effort: 'low', bin: fake, sandbox: true, timeoutMs: 60_000 }, scratchRoot: scratch }, { attemptId: 'D-1', scenario: drill }, () => false, () => undefined);
+      codex: { model: 'fake-model', effort: 'low', bin: fake, sandbox: true, timeoutMs: 60_000 }, scratchRoot: scratch, ...clientState }, { attemptId: 'D-1', scenario: drill }, () => false, () => undefined);
     expect(outcome.completeness).toBe('complete');
     const record = JSON.parse(readFileSync(join(out, 'D-1', 'attempt.json'), 'utf8')) as AttemptRecord;
     const commands = record.events.flatMap(e => e.kind === 'command' ? [[e.command.replace(homedir(), '~'), e.exitCode]] : []);

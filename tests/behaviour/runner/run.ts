@@ -31,6 +31,10 @@ export interface BatchOptions {
   codex: CodexOptions;
   /** Where per-Attempt scratch (HOME, working directory) lives; outside the home directory, which the sandbox hides. */
   scratchRoot: string;
+  /** Explicit source: approved CLI Batches use the daily login; tests must supply synthetic state. */
+  loginSource: string | null;
+  /** Root of the personal configuration to compare; tests inject a synthetic HOME. */
+  personalConfigRoot: string;
 }
 
 export interface PlannedAttempt { attemptId: string; scenario: Scenario }
@@ -90,9 +94,9 @@ const everydayPid = () => lsof('-nP', `-iTCP:${everydayPort}`, '-sTCP:LISTEN', '
 const openDatabases = (pid: string | number) => lsof('-p', String(pid), '-Fn').split('\n').filter(l => l.startsWith('n') && /\.sqlite$/.test(l)).map(l => l.slice(1));
 
 /** Global state the runner must leave alone: personal client configuration and the everyday service. */
-export function isolationSnapshot() {
+export function isolationSnapshot(personalConfigRoot: string) {
   const files = ['.codex/config.toml', '.codex/auth.json', '.claude/settings.json', '.codex-wayfinder/config.toml', '.wayfinder-service/credentials.json']
-    .map(f => join(homedir(), f));
+    .map(f => join(personalConfigRoot, f));
   return { files: Object.fromEntries(files.map(f => [tilde(f), sha(f)])), everydayServicePid: everydayPid() };
 }
 
@@ -161,7 +165,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   const controller: Credential = { clientId: 'Behaviour-Controller', token: newToken() };
   const sessions: Session[] = [...new Set(s.turns.map(t => t.session))].map(label => {
     const credential = { clientId: `Behaviour.${o.batchId}.${p.attemptId}.${label}`, token: newToken() };
-    return { label, credential, codex: prepareSession(scratch, label, credential.token), rollout: null,
+    return { label, credential, codex: prepareSession(scratch, label, credential.token, o.loginSource), rollout: null,
       record: { label, nativeId: { known: false, reason: 'no thread started' }, clientId: credential.clientId,
         mcpSessionIds: { known: false, reason: 'no MCP connection observed by the session relay' }, turns: [] } };
   });
@@ -251,7 +255,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       session.turn = index;
       if (turn.freshProcess) {
         // A new HOME prevents the new conversation from silently loading an old transcript or thread.
-        session.codex = prepareSession(scratch, `${session.label}-turn-${index}`, session.credential.token);
+        session.codex = prepareSession(scratch, `${session.label}-turn-${index}`, session.credential.token, o.loginSource);
         nativeSessions.push(session.codex);
         loginSecrets(session.codex).forEach((secret, i) => { secrets[`codex-login-${session.label}-${index}-${i}`] = secret; });
         controllerEvent('fresh-process', { session: session.label, previousNativeId: session.record.nativeId }, index);
@@ -421,7 +425,7 @@ export async function runBatch(o: BatchOptions): Promise<{ outcomes: AttemptOutc
   if (existsSync(o.out)) return { outcomes: [], refusals: [`${tilde(o.out)} already exists; a Batch never reuses an output directory`] };
   if (o.scratchRoot.startsWith(homedir())) return { outcomes: [], refusals: ['scratch must live outside the home directory, which the sandbox hides'] };
   mkdirSync(o.out, { recursive: true, mode: 0o700 });
-  const before = isolationSnapshot();
+  const before = isolationSnapshot(o.personalConfigRoot);
   let cancel = false;
   let kill: (() => void) | undefined;
   const onSignal = () => { cancel = true; kill?.(); };
@@ -440,7 +444,7 @@ export async function runBatch(o: BatchOptions): Promise<{ outcomes: AttemptOutc
       console.log(`${p.attemptId}: ${outcome.completeness}${outcome.detail ? ` (${outcome.detail})` : ''}`);
     }
   } finally { process.off('SIGINT', onSignal); process.off('SIGTERM', onSignal); process.off('SIGHUP', onSignal); }
-  const after = isolationSnapshot();
+  const after = isolationSnapshot(o.personalConfigRoot);
   // Other clients may edit personal configuration during a Batch; what matters is that none of it names this run.
   const mentionsRun = Object.keys(after.files).filter(f => { const path = f.replace(/^~/, homedir());
     return existsSync(path) && personalConfigNamesRun(readFileSync(path, 'utf8')); });
@@ -460,6 +464,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
   const result = await runBatch({ batchId: values.batch, scenarios: values.scenarios.split(','), count: Number(values.count), ceiling: Number(values.ceiling),
     out: values.out ?? join(homedir(), 'Library/Application Support/Wayfinder/behaviour-runs', values.batch), scratchRoot: '/private/tmp',
+    loginSource: join(homedir(), '.codex/auth.json'), personalConfigRoot: homedir(),
     codex: { model: values.model, effort: values.effort, bin: values.codex, sandbox: !values['no-sandbox'], timeoutMs: Number(values['timeout-min']) * 60_000 } });
   for (const r of result.refusals) console.error(`refused: ${r}`);
   if (result.refusals.length) process.exit(1);

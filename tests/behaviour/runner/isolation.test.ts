@@ -1,21 +1,23 @@
+import { syntheticClientState } from './test-state.ts';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, expect, test } from 'vitest';
 import { findRollout, prepareSession, runTurn, verifyProfile, writeProfile } from './codex.ts';
-import { personalConfigNamesRun } from './run.ts';
+import { isolationSnapshot, personalConfigNamesRun } from './run.ts';
 import { cleanupServiceDirectory } from './service.ts';
 import { startRoute } from './relay.ts';
 
 const root = realpathSync(mkdtempSync('/private/tmp/wf-behave-isolation-'));
+const clientState = syntheticClientState(root);
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 const attack = test.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0);
 const shell = (profile: string, command: string) => spawnSync('sandbox-exec', ['-f', profile, '/bin/sh', '-c', command], { encoding: 'utf8' });
 
 attack('a session cannot read or overwrite another native HOME, including its predecessor', () => {
   const scratch = mkdtempSync(join(root, 'attempt-'));
-  const a = prepareSession(scratch, 'A', 'synthetic');
-  const b = prepareSession(scratch, 'B', 'synthetic');
+  const a = prepareSession(scratch, 'A', 'synthetic', clientState.loginSource);
+  const b = prepareSession(scratch, 'B', 'synthetic', clientState.loginSource);
   const transcript = join(a.codexHome, 'rollout.jsonl');
   writeFileSync(transcript, 'original');
   const work = join(scratch, 'work'); mkdirSync(work);
@@ -26,19 +28,19 @@ attack('a session cannot read or overwrite another native HOME, including its pr
   expect(shell(profile, `mkdir '${scratch}/home-A-turn-2'`).status).not.toBe(0);
   expect(readFileSync(transcript, 'utf8')).toBe('original');
   expect(b.home).not.toBe(a.home);
-  const fresh = prepareSession(scratch, 'A-turn-2', 'synthetic');
+  const fresh = prepareSession(scratch, 'A-turn-2', 'synthetic', clientState.loginSource);
   expect(shell(writeProfile(control, fresh, work, '/bin/sh').path, `cat '${transcript}'`).status).not.toBe(0);
 });
 
 test('prepareSession refuses a HOME pre-created by an earlier process', () => {
   const scratch = mkdtempSync(join(root, 'precreated-'));
   mkdirSync(join(scratch, 'home-A-turn-2'));
-  expect(() => prepareSession(scratch, 'A-turn-2', 'synthetic')).toThrow();
+  expect(() => prepareSession(scratch, 'A-turn-2', 'synthetic', clientState.loginSource)).toThrow();
 });
 
 attack('a client cannot replace the sandbox control file between turns', () => {
   const scratch = mkdtempSync(join(root, 'control-'));
-  const session = prepareSession(scratch, 'A', 'synthetic');
+  const session = prepareSession(scratch, 'A', 'synthetic', clientState.loginSource);
   const work = join(scratch, 'work'); mkdirSync(work);
   const control = mkdtempSync(join(root, 'runner-'));
   const profile = writeProfile(control, session, work, '/bin/sh').path;
@@ -70,7 +72,7 @@ test('the relay outage tells the client only a neutral gateway failure', async (
 // A trusted-process mutation simulates defense failure: the runner must still refuse the next launch.
 test('a changed control hash prevents the next client launch', async () => {
   const scratch = mkdtempSync(join(root, 'hash-'));
-  const session = prepareSession(scratch, 'A', 'synthetic');
+  const session = prepareSession(scratch, 'A', 'synthetic', clientState.loginSource);
   const work = join(scratch, 'work'); mkdirSync(work);
   const control = mkdtempSync(join(root, 'runner-'));
   const profile = writeProfile(control, session, work, '/bin/echo');
@@ -85,7 +87,7 @@ test('a changed control hash prevents the next client launch', async () => {
 
 attack('shared profile API allows read-only roots and appends root and literal write denies', () => {
   const scratch = mkdtempSync(join(root, 'api-'));
-  const session = prepareSession(scratch, 'A', 'synthetic');
+  const session = prepareSession(scratch, 'A', 'synthetic', clientState.loginSource);
   const work = join(scratch, 'work'); mkdirSync(work);
   const control = mkdtempSync(join(root, 'runner-'));
   const skill = join(work, 'skill'); mkdirSync(skill); writeFileSync(join(skill, 'SKILL.md'), 'fixed');
@@ -116,10 +118,19 @@ test('failed history export preserves the database but removes temporary credent
 
 test('the runner never follows a symlinked native rollout into private evidence', () => {
   const scratch = mkdtempSync(join(root, 'rollout-'));
-  const session = prepareSession(scratch, 'A', 'synthetic');
+  const session = prepareSession(scratch, 'A', 'synthetic', clientState.loginSource);
   session.thread = 'fixed-thread';
   const sessions = join(session.codexHome, 'sessions'); mkdirSync(sessions);
   const privateFile = join(scratch, 'runner-evidence'); writeFileSync(privateFile, 'synthetic');
   symlinkSync(privateFile, join(sessions, 'rollout-fixed-thread.jsonl'));
   expect(findRollout(session)).toBeNull();
+});
+
+test('session preparation and Batch snapshots use synthetic login state without real credential access', () => {
+  const scratch = mkdtempSync(join(root, 'login-source-'));
+  const state = syntheticClientState(scratch);
+  const session = prepareSession(scratch, 'A', 'synthetic', state.loginSource);
+  expect(readFileSync(join(session.codexHome, 'auth.json'), 'utf8')).toBe(readFileSync(state.loginSource, 'utf8'));
+  const snapshot = isolationSnapshot(state.personalConfigRoot);
+  expect(Object.keys(snapshot.files).every(path => path.startsWith(state.personalConfigRoot))).toBe(true);
 });

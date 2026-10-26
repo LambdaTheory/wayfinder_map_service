@@ -1,3 +1,4 @@
+import { syntheticClientState } from './test-state.ts';
 // Real Seatbelt attacks against disposable files, processes and services; no model is started.
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -10,12 +11,13 @@ import { newToken, startService } from './service.ts';
 const available = spawnSync('which', ['sandbox-exec']).status === 0;
 const attack = test.skipIf(!available);
 const root = realpathSync(mkdtempSync('/private/tmp/wf-behave-security-'));
+const clientState = syntheticClientState(root);
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 const shell = (profile: string, command: string) => spawnSync('sandbox-exec', ['-f', profile, '/bin/sh', '-c', command], { encoding: 'utf8' });
 function setup() {
   const scratch = mkdtempSync(join(root, 'attempt-'));
-  const a = prepareSession(scratch, 'A', newToken());
-  const b = prepareSession(scratch, 'B', newToken());
+  const a = prepareSession(scratch, 'A', newToken(), clientState.loginSource);
+  const b = prepareSession(scratch, 'B', newToken(), clientState.loginSource);
   const work = join(scratch, 'work'); mkdirSync(work);
   const control = mkdtempSync(join(root, 'control-'));
   return { scratch, a, b, work, control };

@@ -1,3 +1,4 @@
+import { syntheticClientState } from './test-state.ts';
 // Session orchestration with actual MCP calls and fixed native evidence; never starts a model.
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -15,6 +16,7 @@ import type { AttemptIsolation } from './run.ts';
 import { preflight, runAttempt } from './run.ts';
 
 const scratch = realpathSync(mkdtempSync('/private/tmp/wf-behave-sessions-'));
+const clientState = syntheticClientState(scratch);
 const cache = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests');
 mkdirSync(cache, { recursive: true, mode: 0o700 });
 const records = mkdtempSync(join(cache, 'sessions-'));
@@ -25,7 +27,7 @@ copyFileSync(fileURLToPath(new URL('./fake-codex.mjs', import.meta.url)), sandbo
 const scenario = (id: string) => library.find(s => s.id === id)!;
 const run = async (s: Scenario, model = 'fake-sessions', timeoutMs = 10_000, cancel?: { value: boolean; kill?: () => void }, sandbox = false) => {
   const out = mkdtempSync(join(records, 'attempt-'));
-  const outcome = await runAttempt({ batchId: 'T-sessions', scenarios: [], count: 1, ceiling: 1, out, scratchRoot: scratch,
+  const outcome = await runAttempt({ batchId: 'T-sessions', scenarios: [], count: 1, ceiling: 1, out, scratchRoot: scratch, ...clientState,
     codex: { model, effort: 'low', bin: sandbox ? sandboxDriver : fileURLToPath(new URL('./fake-codex.mjs', import.meta.url)), sandbox, timeoutMs } },
   { attemptId: `${s.id}-1`, scenario: s }, () => cancel?.value ?? false, kill => { if (cancel) cancel.kill = kill; });
   const record = JSON.parse(readFileSync(join(out, `${s.id}-1`, 'attempt.json'), 'utf8')) as AttemptRecord & { isolation: AttemptIsolation };

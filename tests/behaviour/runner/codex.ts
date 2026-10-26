@@ -65,8 +65,9 @@ export function sandboxProfile(home: string, workdir: string, blockedPorts: numb
     ...[home, workdir, ...readOnly, ...(access.denyWritePaths ?? [])].map(p => `(deny file-write* (literal ${q(p)}))`), ''].join('\n');
 }
 
-/** A private HOME and CODEX_HOME for one session, with a copy of the daily login (deleted with the scratch). */
-export function prepareSession(scratch: string, label: string, token: string): CodexSession {
+/** A private HOME and CODEX_HOME with an explicitly supplied login source (deleted with the scratch). */
+export function prepareSession(scratch: string, label: string, token: string, loginSource: string | null): CodexSession {
+  if (loginSource !== null && typeof loginSource !== 'string') throw new IsolationError('login source must be explicit');
   const home = join(scratch, `home-${label}`);
   const codexHome = join(home, '.codex');
   if (!/^[A-Za-z0-9_-]+$/.test(label)) throw new Error('unsafe session label');
@@ -74,8 +75,7 @@ export function prepareSession(scratch: string, label: string, token: string): C
   catch { throw new IsolationError('session HOME already exists or cannot be created'); }
   mkdirSync(join(home, 'tmp'), { mode: 0o700 });
   mkdirSync(codexHome, { recursive: true, mode: 0o700 });
-  const auth = join(homedir(), '.codex/auth.json');
-  if (existsSync(auth)) { copyFileSync(auth, join(codexHome, 'auth.json')); chmodSync(join(codexHome, 'auth.json'), 0o600); }
+  if (loginSource !== null && existsSync(loginSource)) { copyFileSync(loginSource, join(codexHome, 'auth.json')); chmodSync(join(codexHome, 'auth.json'), 0o600); }
   return { home, codexHome, token, thread: null };
 }
 
