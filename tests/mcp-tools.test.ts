@@ -121,6 +121,19 @@ test('W02: the map_apply description names every command and field its input sch
   }
 });
 
+test('W01/W02: F11 guidance requires a human instruction or agreement before moving work out of a Map', async () => {
+  const f = await fixture();
+  const instructions = f.client.getInstructions()!;
+  const description = (await f.client.listTools()).tools.find(tool => tool.name === 'map_apply')!.description!;
+  expect(instructions).toContain('A Ticket found beyond the Destination is never settled as a decision: release its Claim and propose a Scope Exclusion.');
+  expect(instructions).toContain("A question from the human is not an instruction or a verdict, even when you agree: answer it and ask before acting on it. Changing what a Map covers is the human's call: add or remove Scope Exclusions, change the Destination or Notes, or narrow a question or remove a Dependency to move work out, only on the human's explicit instruction or agreement to that proposal.");
+  expect(description).toContain("never move answers, recommendations or conversation into questions or Notes. Change Scope Exclusions, the Destination or Notes, or narrow a question or remove a Dependency to move work out, only on the human's explicit instruction or agreement; a question from the human is neither.");
+  expect(instructions).toContain('A Ticket question states only the question: no recommended answer, conversation or later outcome, and settling never rewrites it.');
+  for (const text of [instructions, description, workflowContract.markdown]) {
+    expect(text).not.toContain('add a Scope Exclusion and tell the human');
+  }
+});
+
 test('U00: writes name the release whose rules they follow; a missing or other version is refused before anything is read or written', async () => {
   const f = await fixture();
   const refused = (version: string | null) => ({ kind: 'rejected', code: 'version_mismatch', version, rules: 'wayfinder://workflow/exploration' });

@@ -4,6 +4,11 @@ All notable project changes are recorded here. Historical implementation evidenc
 
 Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Release Version, covers the service and the workflow it carries; `docs/spec/mcp-sqlite.md` §14.3 says which part to raise, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion` (`1.0.0` to `3.0.0` below), and the server reported a fixed `0.1.0`.
 
+## 3.0.0 (2026-10-26)
+
+- A human question is neither an instruction nor a verdict: answer it and ask before acting. Changing Scope Exclusions, the Destination or Notes, or narrowing a question or removing a Dependency to move work out, requires the human's explicit instruction or agreement. A Ticket found beyond the Destination now releases its Claim and proposes a Scope Exclusion. These mandatory rules appear in both the initialization instructions and the `map_apply` description; the four tool schemas and Map model are unchanged.
+- F11 reproduced three times on Release Version 2.0.2: agents treated the human's question as their own discovery that work was beyond the Destination, then changed the Map before the human answered. The former self-discovery rule allowed that path, so the new boundary covers both a human question and the agent's own finding ([#87 root cause and approved wording](https://github.com/kun-g/wayfinder_map_service/issues/87#issuecomment-6405351705)). This is a major release because it changes a mandatory rule.
+
 ## 2.0.2 (2026-10-25)
 
 - Behaviour unchanged. The `wayfinder` launcher (the dedicated Codex and Claude Code entry) moved from the workspace into this repository as `scripts/wayfinder-agent/`, so it is versioned with the service and is the entry the behaviour tests exercise. It serves from the repository it lives in by default (`WAYFINDER_AGENT_CHECKOUT` still overrides), and its instruction files are now `agent-instructions.md` and `agent-instructions.matt.md`, installed into each state directory under the name its harness expects. Upstream Matt skills path is overridable with `WAYFINDER_AGENT_MATT_SKILLS`.
