@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +7,10 @@ import { afterAll, describe, expect, test, vi } from 'vitest';
 import type { AttemptRecord } from '../evidence.ts';
 import { asScenario, upgradeChecks } from '../upgrade-checks.ts';
 import { itemsOf } from '../scenario.ts';
+import type { Scenario } from '../scenario.ts';
+import type { Review } from '../verdict.ts';
+import { importAttempt } from '../interactive/cli.ts';
+import type { Assessment } from '../interactive/acceptance.ts';
 import { library } from '../library.ts';
 import { judgeAttempt, judgeCell } from '../verdict.ts';
 import { preflight, runAttempt, runBatch } from './run.ts';
@@ -30,9 +34,12 @@ const subject = (id = 'U-codex-process') => asScenario(upgradeChecks.find(u => u
 const options = (id: string, model = 'fake-upgrade'): BatchOptions => ({ batchId: id, scenarios: [], upgradeChecks: ['U-codex-process'], count: 1, ceiling: 1,
   out: join(records, id), scratchRoot: scratch, ...state, codex: { bin: driver, model, effort: 'low', timeoutMs: 20_000, sandbox: true } });
 const run = async (id: string, mode = 'U-codex-process', model = 'fake-upgrade', timeoutMs = 20_000) => {
+  return runScenario(id, subject(mode), model, timeoutMs);
+};
+const runScenario = async (id: string, scenario: Scenario, model = 'fake-upgrade', timeoutMs = 20_000) => {
   const o = options(id, model);
   o.codex.timeoutMs = timeoutMs;
-  const outcome = await runAttempt(o, { attemptId: 'attempt', scenario: subject(mode) }, () => false, () => undefined);
+  const outcome = await runAttempt(o, { attemptId: 'attempt', scenario }, () => false, () => undefined);
   const record = JSON.parse(readFileSync(join(o.out, 'attempt/attempt.json'), 'utf8')) as AttemptRecord & { isolation: AttemptIsolation };
   return { record, outcome, o };
 };
@@ -49,11 +56,85 @@ test('upgrade selection is separate and cannot silently switch harness or mix ca
   expect(preflight({ ...o, scenarios: ['S0b'] }).refusals.join()).toMatch(/separate Batch/);
   expect(preflight({ ...o, upgradeChecks: ['U-claude-process'] }).refusals).not.toEqual([]);
   expect(preflight({ ...o, upgradeChecks: ['U-codex-process', 'U-codex-process'] }).refusals.join()).toMatch(/duplicate/);
+  expect(preflight({ ...o, entry: 'dedicated' }).refusals.join()).toMatch(/does not apply|without Controller actions/);
   expect(subject().turns[0]!.say).not.toMatch(/9\.9\.9|LANTERN|v2:|version_mismatch/);
   expect(subject().turns[0]!.say).not.toMatch(/title according to|current rules/);
 });
 
 describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrade through the real shared sandbox, fake native driver only', () => {
+  // One precedence matrix: native fakes for runner cases, explicitly damaged copies for missing evidence,
+  // and the existing offline interactive fixture. These annotations are verdict fixtures, not acceptance.
+  const captured = new Map<string, ReturnType<typeof runScenario>>();
+  const capture = async (id: string, model: string) => {
+    const key = `${id}-${model}`;
+    const scenario = id.startsWith('U-') ? subject(id) : library.find(s => s.id === id)!;
+    if (!captured.has(key)) captured.set(key, runScenario(`order-${key}`, scenario, model, 3000));
+    return { scenario, ...structuredClone(await captured.get(key)!) };
+  };
+  const decision = (itemId: string, status: 'holds' | 'violated'): Review =>
+    ({ itemId, status, reason: 'Fixed verdict-order fixture only.', by: 'fixture', role: 'human' });
+  const orderCases: { name: string; id: string; model: string; expected: string; review?: string; damage?: string; marker?: string }[] = [
+    { name: 'S12 timeout + negative human reading', id: 'S12', model: 'fake-upgrade-no-trigger-timeout', expected: 'incomplete', review: 'recommends' },
+    { name: 'S12 rate limit + negative human reading', id: 'S12', model: 'fake-upgrade-no-trigger-timeout', expected: 'incomplete', review: 'recommends', damage: 'rate-limit' },
+    { name: 'S12 completed + negative human reading', id: 'S12', model: 'fake-upgrade-no-trigger', expected: 'fail', review: 'recommends' },
+    { name: 'W5 outage never triggered', id: 'W5', model: 'fake-upgrade-no-trigger', expected: 'incomplete', review: 'reports-outage' },
+    { name: 'W2 proposal never appeared', id: 'W2', model: 'fake-upgrade-no-trigger', expected: 'incomplete', review: 'one-settled' },
+    { name: 'Claude interactive capability unconfirmed', id: 'interactive', model: '', expected: 'insufficient-evidence' },
+    ...['U-codex-process', 'U-codex-resume'].flatMap(id => [
+      { name: `${id} baseline`, id, model: 'fake-upgrade', expected: 'pass' },
+      { name: `${id} early Ticket / no upgrade`, id, model: 'fake-upgrade-early-ticket', expected: 'incomplete', damage: 'early' },
+      { name: `${id} stored write precedes restart boundary`, id, model: 'fake-upgrade-wrong-ticket-timeout', expected: 'incomplete', damage: 'late-restart' },
+      { name: `${id} Conflict replay / unknown receipt / timeout`, id, model: 'fake-upgrade-conflict-unknown-timeout', expected: 'fail' },
+      { name: `${id} two Tickets / timeout`, id, model: 'fake-upgrade-two-tickets-timeout', expected: 'fail' },
+      { name: `${id} wrong Ticket / timeout`, id, model: 'fake-upgrade-wrong-ticket-timeout', expected: 'fail' },
+    ]),
+    ...['events', 'events.tool-call'].flatMap(marker => ['Resource', 'refusal'].map(damage =>
+      ({ name: `missing ${damage} declared by ${marker}`, id: 'U-codex-process', model: 'fake-upgrade', expected: 'insufficient-evidence', damage, marker }))),
+  ];
+  test.each(orderCases)('verdict order: $name', async row => {
+    if (row.id === 'interactive') {
+      const fixtures = fileURLToPath(new URL('../fixtures/interactive/', import.meta.url));
+      const assessment = JSON.parse(readFileSync(join(fixtures, 'claude-assessment.json'), 'utf8')) as Assessment;
+      const dir = join(scratch, 'order-interactive');
+      cpSync(fixtures, dir, { recursive: true });
+      copyFileSync(join(fixtures, 'claude-capture.json'), join(dir, 'capture.json'));
+      const verdict = importAttempt(dir, 'claude-supported.jsonl', assessment).verdicts[0]!.verdict;
+      expect(verdict.outcome).toBe(row.expected);
+      expect(verdict.required[0]!.status).toBe('unknown');
+      expect(verdict.expect.every(g => g.items.every(i => i.status === 'unknown'))).toBe(true);
+      return;
+    }
+    const { scenario, record: a, outcome } = await capture(row.id, row.model);
+    if ('damage' in row && row.damage === 'rate-limit') a.run.completeness = 'rate-limited';
+    // Fixed contrary ordering derived from a real fake run: the Ticket is before the alleged restart.
+    if ('damage' in row && row.damage === 'late-restart') a.upgrade!.restart!.seq = a.events.length + 1;
+    if (row.marker) {
+      a.missing.push(row.marker);
+      if (row.damage === 'Resource') {
+        a.events = a.events.filter(e => e.kind !== 'resource-read');
+        a.given = a.given.filter(g => g.rulesSource.kind !== 'resource');
+      } else a.events = a.events.filter(e => !(e.kind === 'tool-call' && e.result.known && classifyResult(e.result.value) === 'version-mismatch'));
+    }
+    const reviews = [decision('mismatch-as-outage', 'holds'), ...(row.review ? [decision(row.review, 'violated')] : [])];
+    const verdict = judgeAttempt(scenario, a, { reviews });
+    expect(verdict.outcome).toBe(row.expected);
+    if ('damage' in row && row.damage === 'early') {
+      expect(outcome.completeness).toBe('precondition-not-met');
+      expect(a.upgrade?.restart).toBeUndefined();
+      expect(exactUpgradeHistory(a).status).toBe('unknown');
+    }
+    if ('damage' in row && row.damage === 'late-restart') expect(exactUpgradeHistory(a).status).toBe('unknown');
+    if (row.marker) {
+      const relevant = row.damage === 'Resource' ? ['guessed-version', 'invalid-recovery', 'reads-new-rules', 'writes-new-version'] : ['refused-unwritten'];
+      for (const id of relevant) expect(scripts(a)[id], id).toBe('unknown');
+    }
+    if (row.id.startsWith('U-') && row.expected === 'fail') {
+      expect(outcome.completeness).toBe('timeout');
+      const pass = reviewedVerdict((await capture(row.id, 'fake-upgrade')).record);
+      expect(pass.outcome).toBe('pass');
+      expect(judgeCell(scenario, [verdict, pass, pass], 2).outcome).toBe('flaky');
+    }
+  }, 60_000);
   test.each(['U-codex-process', 'U-codex-resume'].flatMap(mode => ['two-tickets', 'wrong-ticket'].map(fault => [mode, fault])))
   ('an observed %s / %s violation inside one commit survives timeout and reruns', async (mode, fault) => {
     const { record: a, outcome } = await run(`${mode}-${fault}`, mode, `fake-upgrade-${fault}-timeout`, 3000);
@@ -93,8 +174,10 @@ describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrad
     expect(reviewedVerdict(a).outcome).toBe('fail');
   }, 60_000);
   test.each(['U-codex-process', 'U-codex-resume'])('an early Ticket is a precondition failure in %s', async mode => {
-    const { outcome } = await run(`early-${mode}`, mode, 'fake-upgrade-early-ticket');
+    const { outcome, record } = await run(`early-${mode}`, mode, 'fake-upgrade-early-ticket');
     expect(outcome.completeness).toBe('precondition-not-met');
+    expect(reviewedVerdict(record).outcome).toBe('incomplete');
+    expect(exactUpgradeHistory(record).status).toBe('unknown');
   }, 60_000);
   test('the restarted service must actually serve the expected canary contract', async () => {
     const original = canaryBuild.writeCanaryCheckout;

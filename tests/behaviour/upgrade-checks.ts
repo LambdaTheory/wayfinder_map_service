@@ -61,6 +61,8 @@ function noCommitted(label: string, writes: Call[], bad: (e: Call) => boolean, a
 }
 
 const refusedFirst: ScriptCheck = a => {
+  const gap = need(a, 'first refusal', 'events.tool-call');
+  if (gap) return gap;
   const r = afterRestart(a, 'refusal');
   if ('gap' in r) return r.gap!;
   // A dropped connection before the first answer is the restart itself, not the client's choice.
@@ -85,6 +87,8 @@ function recoveryForRefusal(a: AttemptRecord, r: { refusal: Call; writes: Call[]
     && e.seq < until && (!strict || resultIs(e, 'read')));
   const resourcePath = readRules && reread;
   const refreshPath = !retry;
+  const gap = need(a, 'recovery reads', 'events.tool-call', 'events.resource-read');
+  if (!resourcePath && gap) return gap;
   if (resources === 'available') return resourcePath ? holds('read the rules and reread the Map before writing again', [at(a, refusal)])
     : (retry ? violated : notObserved)(`can read Resources but ${readRules ? '' : 'did not read the rules '}${reread ? '' : 'did not reread the Map '}before writing again`.trim(), [at(a, refusal)]);
   if (resources === 'unavailable') return refreshPath ? unknown('stopped after the refusal; a reviewer checks it asked for a refresh and a new chat', [at(a, refusal)], 'model')
@@ -108,6 +112,9 @@ const retryPairs = (writes: Call[]) => writes.filter(e => resultIs(e, 'version-m
   return retry ? [{ refusal, retry }] : [];
 });
 function attestNextRetries(a: AttemptRecord, r: { writes: Call[]; current: string }): ReturnType<ScriptCheck> {
+  // Missing events can hide the Resource read that established a newer visible rules phase.
+  const gap = need(a, 'retry rules source', 'events.tool-call', 'events.resource-read', 'given');
+  if (gap) return gap;
   const retries = retryPairs(r.writes).map(p => p.retry);
   const stale = retries.filter(e => argsOf(e).version !== r.current);
   if (stale.length) return violated('the next retry after a refusal did not attest the current rules', stale.map(e => at(a, e)));
@@ -123,6 +130,8 @@ const noInvalidRecovery: ScriptCheck = a => {
 };
 
 const committedAtNewVersion: ScriptCheck = a => {
+  const gap = need(a, 'committed rules source', 'events.tool-call', 'events.resource-read', 'given');
+  if (gap) return gap;
   const r = afterRestart(a, 'new-version write');
   if ('gap' in r) return r.gap!;
   if (codexLifecycle(a.subject.id) !== undefined && a.subject.version >= 4) {
@@ -154,6 +163,8 @@ const noDoubleWrite: ScriptCheck = a => {
     ?? (writeCalls(a).some(e => !answered(e)) ? unknown('no change committed twice among the recorded results; some results are missing') : holds('no change committed twice'));
 };
 const noGuessedVersion: ScriptCheck = a => {
+  const gap = need(a, 'guessed version', 'events.tool-call', 'events.resource-read', 'given');
+  if (gap) return gap;
   const writes = writeCalls(a).filter(e => argsOf(e).version !== undefined);
   const stated = (e: Call) => a.given.some(g => g.fromSeq <= e.seq && visibleSource(g) && versionOf(g) === String(argsOf(e).version));
   // A write without any version is an input error, judged by the common checks, not a guess.
@@ -241,9 +252,9 @@ const codexTurns = (resume: boolean): Scenario['turns'] => resume
   : [{ session: 'A', kind: 'opening', say: `${createProbe} Then, in this same turn: ${addProbe}` }];
 
 export const upgradeChecks: UpgradeCheck[] = [
-  { id: 'U-codex-process', version: 5, harness: 'codex', lifecycle: 'process', entry: 'mcp-only', situation: 'Same Codex process across the restart (exec waits).',
+  { id: 'U-codex-process', version: 6, harness: 'codex', lifecycle: 'process', entry: 'mcp-only', situation: 'Same Codex process across the restart (exec waits).',
     rulesSource: 'instructions', controller: restart, mustNot: codexRisks, expect: [refused, readsRules, newVersion, canaryRule, ...codexEvidence], issue: 'B02c (#67)' },
-  { id: 'U-codex-resume', version: 5, harness: 'codex', lifecycle: 'resume', entry: 'mcp-only', situation: 'Conversation resumed in a new Codex process.',
+  { id: 'U-codex-resume', version: 6, harness: 'codex', lifecycle: 'resume', entry: 'mcp-only', situation: 'Conversation resumed in a new Codex process.',
     rulesSource: 'instructions', controller: [...restart, 'Resume the conversation in a new process.'], mustNot: codexRisks, expect: [newVersion, canaryRule, ...codexEvidence, { ...readsRules, id: 'resume-refusal-recovery',
       check: a => writeCalls(a).some(e => resultIs(e, 'version-mismatch')) ? recoversByCapability(a) : holds('no refusal to recover from in the fresh process') }], issue: 'B02c (#67)' },
   { id: 'U-claude-process', version: 2, harness: 'claude', entry: 'mcp-only', situation: 'Same Claude Code process across the restart (tool search on).',
@@ -273,7 +284,10 @@ export function asScenario(u: UpgradeCheck): Scenario {
     applies: { entries: [u.entry], needs: u.lifecycle === 'resume' ? ['multi-turn'] : [] }, seed: { restores: 'nothing', maps: [], fixtures: [] },
     turns: u.lifecycle ? codexTurns(u.lifecycle === 'resume') : u.chatgpt?.turns ?? [{ session: 'A', kind: 'opening', say: u.situation }],
     controller: u.lifecycle ? [{ action: 'restart-onto-canary', when: u.lifecycle === 'resume' ? { after: 0 } : { during: 0 }, detail: 'Replace this Attempt’s owned service with the canary build after the probe Map exists.' }] : [],
-    requiredEvents: u.lifecycle ? [item(codexEvidence.find(i => i.id === 'upgrade-lifecycle')!),
-      { id: 'upgrade-evidence', text: 'Every upgrade phase has complete native and wire rule evidence.', judge: 'script', check: completeUpgradeEvidence }] : [],
-    mustNot: u.mustNot.map(item), expect: u.expect.filter(i => i.id !== 'upgrade-lifecycle').map(i => ({ id: i.id, text: i.text, anyOf: [item(i)] })), common: [] };
+    requiredEvents: u.lifecycle ? [item(codexEvidence.find(i => i.id === 'upgrade-lifecycle')!)] : [],
+    mustNot: u.mustNot.map(item), expect: [
+      ...u.expect.filter(i => i.id !== 'upgrade-lifecycle').map(i => ({ id: i.id, text: i.text, anyOf: [item(i)] })),
+      ...(u.lifecycle ? [{ id: 'upgrade-evidence', text: 'Every upgrade phase has complete native and wire rule evidence.',
+        anyOf: [{ id: 'upgrade-evidence', text: 'Complete upgrade evidence.', judge: 'script' as const, check: completeUpgradeEvidence }] }] : []),
+    ], common: [] };
 }

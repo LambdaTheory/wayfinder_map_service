@@ -10,10 +10,11 @@ import { library } from './library.ts';
 import { buildReport, compare, renderMarkdown } from './report.ts';
 import type { Report } from './report.ts';
 import type { SeedMap } from './scenario.ts';
+import { judgementItems } from './scenario.ts';
 import { asScenario, upgradeChecks } from './upgrade-checks.ts';
 import { judgeAttempt, judgeCell } from './verdict.ts';
 import type { Review } from './verdict.ts';
-import { all, createdExactlyOnce, gotResult, holds, never, unknown } from './checks.ts';
+import { all, atEnd, createdExactlyOnce, gotResult, holds, never, pagedCatalogBeforeCreate, readBeforeWrite, rereadAfterConflict, unknown } from './checks.ts';
 
 const byId = (id: string) => library.find(s => s.id === id)!;
 const unknownField = { known: false as const, reason: 'sample' };
@@ -66,8 +67,54 @@ const call = (seq: number, tool: string, result: unknown, extra: Partial<{ sessi
      arguments: extra.args ?? {}, result: result === undefined ? unknownField : { known: true, value: result }, failed: false, requestId: unknownField });
 const holdsAll = (...ids: string[]): Review[] => ids.flatMap(itemId => (['first', 'second'] as const).map(by => ({ itemId, status: 'holds' as const, reason: 'sample review', by, role: 'review' as const, readingId: by, evidence: ['events[0]'], support: [{ location: 'events[0]', quote: 'explicit invocation', explanation: 'This earlier recommendation supports the requested item.' }] })));
 const createdMap: AgentWrite = { changes: [{ commandIndex: 0, command: 'map.create', subjectId: 'New.Map' }], edit: s => s };
+const confirmedPrerequisites = (id: string): Review[] => byId(id).requiredEvents.filter(i => i.judge !== 'script')
+  .map(i => ({ itemId: i.id, status: 'holds', role: 'human', by: 'fixture', reason: 'Precondition established in this fixed test fixture; not acceptance.' }));
 
 describe('Attempt verdicts on fixed evidence', () => {
+  test.each([
+    ...['events', 'events.tool-call'].flatMap(marker => [
+      { name: `catalog first page / ${marker}`, marker, check: pagedCatalogBeforeCreate,
+        record: sample('S12', [], { events: [call(3, 'map_create', { kind: 'committed', mapId: 'New.Map', revision: 1 })] }) },
+      { name: `catalog later page / ${marker}`, marker, check: pagedCatalogBeforeCreate,
+        record: sample('S12', [], { events: [call(1, 'map_list', { maps: [], nextAfterMapId: 'Next.Map' }), call(3, 'map_create', { kind: 'committed', mapId: 'New.Map', revision: 1 })] }) },
+      { name: `Conflict reread / ${marker}`, marker, check: rereadAfterConflict,
+        record: sample('S12', [], { events: [call(1, 'map_apply', { kind: 'conflict' })] }) },
+    ]),
+    ...['events', 'events.command'].map(marker => ({ name: `file read through command / ${marker}`, marker,
+      check: readBeforeWrite('read first', /ask-card\.js/, /prototype/), record: sample('S12', [], { events: [
+        { seq: 3, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'file-change', path: 'prototype.js', change: 'add' },
+      ] }) })),
+    { name: 'final state / maps', marker: 'maps', check: atEnd('expected final state', 'feishu-access-20261022', () => false), record: sample('S9') },
+    { name: 'creation count / maps', marker: 'maps', check: createdExactlyOnce, record: sample('S12') },
+  ])('missing evidence cannot prove absence: $name', ({ marker, check, record }) => {
+    expect(check(record).status).toBe('violated'); // Complete fixed trace proves the absent action.
+    record.missing.push(marker);
+    expect(check(record).status).toBe('unknown');
+    const s = { ...byId('S12'), requiredEvents: [], mustNot: [], common: [], expect: [{ id: 'audit', text: 'Evidence audit',
+      anyOf: [{ id: 'audit', text: 'Evidence audit', judge: 'script' as const, check }] }] };
+    const a = { ...record, subject: { kind: 'scenario' as const, id: s.id, version: s.version } };
+    expect(judgeAttempt(s, a).outcome).toBe('insufficient-evidence');
+  });
+  test.each(library.map(s => [s.id]))('%s: reviewed expectation absence cannot fail an interrupted run', id => {
+    const s = byId(id!);
+    const items = judgementItems(s);
+    const expected = new Set(items.expect.flatMap(g => g.anyOf.map(i => i.id)));
+    const reviews: Review[] = [...items.required, ...items.mustNot, ...items.expect.flatMap(g => g.anyOf)]
+      .filter(i => i.judge !== 'script').map(i => ({ itemId: i.id, role: 'human', by: 'fixture',
+        status: expected.has(i.id) ? 'violated' : 'holds', reason: 'Fixed expectation-absence fixture; not an acceptance reading.' }));
+    const a = sample(s.id, [], { run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
+    expect(judgeAttempt(s, a, { reviews }).outcome).toBe('incomplete');
+  });
+
+  test('two valid agreeing model readings of an absent S12 recommendation do not override timeout', () => {
+    const a = sample('S12', [], { run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
+    const reviews = holdsAll('recommends').map(r => ({ ...r, status: 'violated' as const }));
+    const result = judgeAttempt(byId('S12'), a, { reviews });
+    expect(result.expect.find(g => g.id === 'explicit-invocation')?.status ?? result.expect[0]!.status).toBe('violated');
+    expect(result.outcome).toBe('incomplete');
+    const passed = judgeAttempt(byId('S12'), sample('S12'), { reviews: holdsAll('recommends') });
+    expect(judgeCell(byId('S12'), [result, passed, passed], 2).outcome).toBe('pass');
+  });
   test('correct pass: script items hold and reviews decide the model items', () => {
     expect(judgeAttempt(byId('S12'), sample('S12'), { reviews: holdsAll('recommends', 'status-narration') }).outcome).toBe('pass');
   });
@@ -104,7 +151,7 @@ describe('Attempt verdicts on fixed evidence', () => {
   test('partial success then timeout is incomplete; a violation before the timeout still fails', () => {
     expect(judgeAttempt(byId('S9'), sample('S9', [], { run: { startedAt: '', endedAt: '', completeness: 'timeout' } })).outcome).toBe('incomplete');
     const early: AgentWrite = { turn: 0, changes: [{ commandIndex: 0, command: 'ticket.settle', subjectId: 'task-carrier' }], edit: s => s };
-    const v = judgeAttempt(byId('S9'), sample('S9', [early], { run: { startedAt: '', endedAt: '', completeness: 'timeout' } }));
+    const v = judgeAttempt(byId('S9'), sample('S9', [early], { run: { startedAt: '', endedAt: '', completeness: 'timeout' } }), { reviews: confirmedPrerequisites('S9') });
     expect(v.outcome).toBe('fail');
     expect(v.reasons).toContain('run timeout');
   });
@@ -128,12 +175,15 @@ describe('Attempt verdicts on fixed evidence', () => {
     expect(v.outcome).toBe('fail');
   });
 
-  test('confirmed expectation violations precede missing prerequisites; absence and equivalent ways remain distinct', () => {
+  test('prerequisites gate observed expectations; once established, absence and equivalent ways remain distinct', () => {
     const absent = { id: 'later-result', text: 'Later result', judge: 'script' as const, check: gotResult('later Conflict', 'conflict') };
     const observed = { id: 'wrong-write', text: 'Wrong write', judge: 'script' as const, check: never('created a Map', { command: 'map.create' }) };
-    const s = { ...byId('S12'), common: [], mustNot: [], requiredEvents: [{ id: 'missing', text: 'Missing prerequisite', judge: 'script' as const, check: () => unknown('lost prerequisite') }],
+    const blocked = { ...byId('S12'), common: [], mustNot: [], requiredEvents: [{ id: 'missing', text: 'Missing prerequisite', judge: 'script' as const, check: () => unknown('lost prerequisite') }],
       expect: [{ id: 'result', text: 'Result', anyOf: [observed] }] };
     const a = sample('S12', [createdMap], { run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
+    expect(judgeAttempt(blocked, a)).toMatchObject({ outcome: 'incomplete', expect: [{ items: [{ status: 'unknown' }] }] });
+    expect(judgeAttempt(blocked, { ...a, run: { ...a.run, completeness: 'complete' } }).outcome).toBe('insufficient-evidence');
+    const s = { ...blocked, requiredEvents: [{ ...blocked.requiredEvents[0]!, check: () => holds('established prerequisite') }] };
     expect(judgeAttempt(s, a).outcome).toBe('fail');
     expect(judgeAttempt({ ...s, expect: [{ ...s.expect[0]!, anyOf: [observed, absent] }] }, a).outcome).toBe('incomplete');
     expect(judgeAttempt({ ...s, expect: [{ ...s.expect[0]!, anyOf: [observed, { ...absent, check: () => holds('equivalent success') }] }] }, a).outcome).toBe('incomplete');
@@ -149,14 +199,14 @@ describe('Attempt verdicts on fixed evidence', () => {
       { events: [call(1, 'map_apply', { kind: 'rejected', error: { path: ['commands', 0] } }, { args: { commands: [] } }),
         call(2, 'map_apply', undefined, { args: { commands: [] } })], missing: ['maps', 'events.tool-call'], run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
     const s = { ...byId('S9'), common: ['attributable-evidence', 'input-error-correction'] as const };
-    const verdict = judgeAttempt({ ...s, common: [...s.common] }, a);
+    const verdict = judgeAttempt({ ...s, common: [...s.common] }, a, { reviews: confirmedPrerequisites('S9') });
     for (const id of s.common) expect(verdict.mustNot.find(i => i.id === id)?.status, id).toBe('violated');
   });
 
   test('two attributable Settlements stay forbidden when another Settlement lacks its receipt', () => {
     const write: AgentWrite = { turn: 1, changes: ['task-carrier', 'task-entry'].map((subjectId, commandIndex) => ({ commandIndex, command: 'ticket.settle', subjectId })) };
     const a = sample('W2', [write, { ...write, receipt: false }], { run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
-    expect(judgeAttempt(byId('W2'), a).mustNot.find(i => i.id === 'settled-both')?.status).toBe('violated');
+    expect(judgeAttempt(byId('W2'), a, { reviews: confirmedPrerequisites('W2') }).mustNot.find(i => i.id === 'settled-both')?.status).toBe('violated');
   });
 
   test('an expectation group for a capability the client lacks is not applicable, not passed', () => {
@@ -219,15 +269,22 @@ describe('upgrade checks judge the recovery path', () => {
     ['guessed version', [...recovered, call(15, 'map_apply', { kind: 'rejected', code: 'version_mismatch' }, { args: { version: '4.4.4', ...ticket('v2: extra') } })]],
     ['stale retry', [...recovered.slice(0, 3), call(14, 'map_apply', { kind: 'rejected', code: 'version_mismatch' }, { args: { version: '2.0.2', ...ticket('x') } }),
       call(15, 'map_apply', { kind: 'committed', mapId: 'U', revision: 2 }, { args: { version: '9.9.9', ...ticket('v2: probe') } })]],
-  ] as [string, EventRecord[]][])('upgrade audit: %s stays violated when unrelated evidence is lost', (_name, events) => {
+  ] as [string, EventRecord[]][])('upgrade audit distinguishes present results from missing-event inferences: %s', (name, events) => {
     const a = sample('S12', [], { subject: { kind: 'upgrade-check', id: u.id, version: u.version }, given: phases, events });
-    const proven = [...u.mustNot, ...u.expect].filter(i => { const r = i.check?.(a); return r?.status === 'violated' && !r.absenceOnly; });
-    expect(proven.length).toBeGreaterThan(0);
+    const expected: Record<string, Record<string, string>> = {
+      'old commit': { 'old-rules-write': 'violated', 'refused-unwritten': 'unknown' },
+      'duplicate commit': { 'double-write': 'violated' },
+      'guessed version': { 'guessed-version': 'unknown' },
+      'stale retry': { 'invalid-recovery': 'unknown', 'reads-new-rules': 'unknown', 'writes-new-version': 'unknown' },
+    };
+    const checked = [...u.mustNot, ...u.expect].filter(i => i.id in expected[name]!);
+    for (const item of checked) expect(item.check!(a).status, item.id).toBe('violated');
     a.events = [...events, call(20, 'map_apply', undefined)];
     a.missing.push('events.tool-call', 'receipts');
     a.run.completeness = 'timeout';
-    for (const item of proven) expect(item.check!(a).status, item.id).toBe('violated');
-    expect(judgeAttempt(asScenario(u), a).outcome).toBe('fail');
+    for (const item of checked) expect(item.check!(a).status, item.id).toBe(expected[name]![item.id]);
+    // These small check fixtures contain no actual restart/process evidence; the adapter must gate them.
+    expect(judgeAttempt(asScenario(u), a).outcome).toBe('incomplete');
   });
 });
 
@@ -374,9 +431,9 @@ describe('upgrade checks keep refusals, outages and missing results apart', () =
     expect(status('reads-new-rules', retried, 'unavailable')).toBe('violated');
     expect(status('reads-new-rules', [mismatch(11)], 'unavailable')).toBe('unknown');
   });
-  test('an upgrade Attempt is judged through the Scenario adapter, model items left to review', () => {
+  test('an upgrade Attempt without lifecycle evidence does not judge dependent model items', () => {
     const v = judgeAttempt(asScenario(u), sample('S12', [], { subject: { kind: 'upgrade-check', id: u.id, version: u.version }, given: given('available'), events: [mismatch(11)] }));
-    expect(v.mustNot.find(i => i.id === 'mismatch-as-outage')!.status).toBe('pending-review');
+    expect(v.mustNot.find(i => i.id === 'mismatch-as-outage')!.status).toBe('unknown');
     expect(v.required.find(i => i.id === 'upgrade-lifecycle')!.status).toBe('unknown');
     expect(v.outcome).toBe('insufficient-evidence'); // A refusal alone does not prove the owned restart was exercised.
   });

@@ -12,7 +12,7 @@ export const outcomes = ['pass', 'fail', 'flaky', 'incomplete', 'insufficient-ev
 export type Outcome = typeof outcomes[number];
 
 type Open = 'unknown' | 'pending-review' | 'paused';
-export interface ItemResult { id: string; judge: Item['judge']; status: CheckResult['status'] | Exclude<Open, 'unknown'>; reason: string; evidence: string[]; absenceOnly?: true }
+export interface ItemResult { id: string; judge: Item['judge']; status: CheckResult['status'] | Exclude<Open, 'unknown'>; reason: string; evidence: string[]; absenceOnly?: true; observed?: true }
 export interface GroupResult { id: string; status: ItemResult['status'] | 'not-applicable'; items: ItemResult[]; gap?: string }
 
 export interface AttemptVerdict {
@@ -62,8 +62,13 @@ export interface JudgeOptions {
 }
 
 /**
- * One Attempt. A confirmed must-not or expectation violation fails it whatever else is missing; an unfinished run is incomplete; a required
- * event that did not happen means the Scenario was not exercised; anything still open is insufficient evidence.
+ * Verdict order (R4/R9):
+ * 1. Prove the required events/preconditions first; do not judge dependent items when they are unmet or unknown.
+ *    Proven absence / precondition-not-met is incomplete; unknown prerequisites in a complete run are insufficient evidence.
+ * 2. With prerequisites met, a present-evidence must-not or explicitly observed script expectation fails, even after timeout.
+ *    A valid review of a must-not proves the forbidden action; a reviewed expectation only says the desired outcome did not occur.
+ * 3. Otherwise an unfinished run is incomplete. Only a complete, exercised run can fail on absence or reviewed expectations.
+ * Missing evidence never proves a violation and never erases a violation proved by the remaining evidence.
  */
 export function judgeAttempt(s: Scenario, record: AttemptRecord | null, opts: JudgeOptions = {}): AttemptVerdict {
   const reviews = [...(record ? savedReviews(record) : []), ...(opts.reviews ?? [])];
@@ -76,10 +81,15 @@ export function judgeAttempt(s: Scenario, record: AttemptRecord | null, opts: Ju
     reasons: [`recorded under ${s.id} v${record.subject.version}; the current definition is v${s.version}, so it is not re-judged`] };
   const items = judgementItems(s);
   const required = items.required.map(i => judgeItem(i, record, reviews));
-  const mustNot = items.mustNot.map(i => judgeItem(i, record, reviews));
-  const quality = items.quality.map(i => judgeItem(i, record, reviews));
+  const unmet = record.run.completeness === 'precondition-not-met' || required.some(i => i.status === 'violated');
+  const unconfirmed = required.some(i => isOpen(i.status));
+  const dependent = (i: Item): ItemResult => unmet || unconfirmed
+    ? { id: i.id, judge: i.judge, status: 'unknown', reason: 'Not judged: required event or precondition is unmet or unconfirmed.', evidence: [] }
+    : judgeItem(i, record, reviews);
+  const mustNot = items.mustNot.map(dependent);
+  const quality = items.quality.map(dependent);
   const expect: GroupResult[] = items.expect.map(g => {
-    const items = g.anyOf.map(i => judgeItem(i, record, reviews));
+    const items = g.anyOf.map(dependent);
     const support = expectationSupport(g, opts.supports ?? clientProfiles[record.combination.harness].supports);
     if (support === true) return { id: g.id, status: groupStatus(items), items };
     return { id: g.id, status: 'not-applicable', items, gap: `${g.id} needs ${g.onlyWith}, ${support === false ? 'which this client lacks' : 'not yet proven for this client'}` };
@@ -87,16 +97,22 @@ export function judgeAttempt(s: Scenario, record: AttemptRecord | null, opts: Ju
   const reasons: string[] = [];
   const listOpen = (xs: { id: string; status: GroupResult['status'] }[], what: string) => xs.filter(x => isOpen(x.status)).map(x => `${what} ${x.id} open`);
   const violations = mustNot.filter(i => i.status === 'violated' && !i.absenceOnly);
-  const observedExpectations = expect.filter(g => g.status === 'violated' && g.items.every(i => !i.absenceOnly));
+  const observedExpectations = expect.filter(g => g.status === 'violated' && g.items.every(i => i.judge === 'script' && i.observed && !i.absenceOnly));
   let outcome: AttemptVerdict['outcome'];
-  if (violations.length || observedExpectations.length) {
+  if (unmet) {
+    outcome = 'incomplete';
+    reasons.push(...required.filter(i => i.status === 'violated').map(i => `required event ${i.id} did not happen`));
+    if (record.run.completeness !== 'complete') reasons.push(`run ${record.run.completeness}`);
+  } else if (unconfirmed) {
+    outcome = record.run.completeness === 'complete' ? 'insufficient-evidence' : 'incomplete';
+    reasons.push(...listOpen(required, 'required event'));
+    if (record.run.completeness !== 'complete') reasons.push(`run ${record.run.completeness}`);
+  } else if (violations.length || observedExpectations.length) {
     outcome = 'fail';
     reasons.push(...violations.map(i => `must-not ${i.id}: ${i.reason}`));
     reasons.push(...observedExpectations.map(g => `expectation ${g.id} not met`));
     if (record.run.completeness !== 'complete') reasons.push(`run ${record.run.completeness}`);
   } else if (record.run.completeness !== 'complete') { outcome = 'incomplete'; reasons.push(`run ${record.run.completeness}${record.run.detail ? `: ${record.run.detail}` : ''}`); }
-  else if (required.some(i => i.status === 'violated')) { outcome = 'incomplete'; reasons.push(...required.filter(i => i.status === 'violated').map(i => `required event ${i.id} did not happen`)); }
-  else if (required.some(i => isOpen(i.status))) { outcome = 'insufficient-evidence'; reasons.push(...listOpen(required, 'required event')); }
   else if (mustNot.some(i => i.status === 'violated') || expect.some(g => g.status === 'violated')) {
     outcome = 'fail'; reasons.push(...mustNot.filter(i => i.status === 'violated').map(i => `must-not ${i.id}: ${i.reason}`),
       ...expect.filter(g => g.status === 'violated').map(g => `expectation ${g.id} not met`));

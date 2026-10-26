@@ -20,6 +20,8 @@ export interface CheckResult {
   reason: string;
   /** A negative result based only on an expected outcome not yet occurring; needs a complete, exercised run. */
   absenceOnly?: true;
+  /** Script opt-in: present evidence proves a contradiction, even if the rest of the run is incomplete. */
+  observed?: true;
   /** Evidence locations, e.g. `events[12]`, `maps.feishu-access-20261022.history[3]`, `receipts[0]`. */
   evidence: string[];
   /** Who decides when a script cannot: the reviewer chain of R4, or the human directly. */

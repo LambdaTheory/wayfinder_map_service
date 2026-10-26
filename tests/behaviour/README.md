@@ -54,7 +54,7 @@ For subsequent scans, pass `--state "$PREVIOUS_SCAN_OUTPUT/state.json"` to retai
 - **Controller actions:** conflicting writes, cut routes, restarts. Each action that should provoke a reaction needs a script-proven required event.
 - **Verdict items:** `requiredEvents` are proven first; any confirmed `mustNot` fails; every `expect` group needs evidence for one of its equivalent ways. Items are judged by script, or by a model or the human with a written criterion. An item whose correct behaviour is not yet decided is `paused` and goes to the human.
 
-Script checks answer `holds`, `violated` or `unknown`. Missing records (the `missing` markers of `evidence.ts`) or a write without a receipt never become `holds`; only a receipt places a write in a session and turn. Checks scan for conclusive violations before returning a gap. `violated(...)` denotes an observed contradiction; `notObserved(...)` sets `absenceOnly` for a desired action or end state that has not yet happened, which cannot establish failure while a run is unfinished or its preconditions are unresolved. Compound checks preserve this distinction and prefer observed violations.
+Script checks answer `holds`, `violated` or `unknown`. Missing records (the `missing` markers of `evidence.ts`) or a write without a receipt never become `holds`; only a receipt places a write in a session and turn. Checks may retain violations proved by present records despite unrelated gaps, but cannot infer that an action never happened from a missing trace. `violated(...)` explicitly sets `observed: true` for a script-proven contradiction; `notObserved(...)` sets `absenceOnly` for a desired action or end state not yet observed. A model/human expectation marked `violated` does not acquire the script's observation flag. Compound checks preserve this distinction. Required events gate dependent checks before either kind of violation is judged.
 
 ## Adding a Scenario
 
@@ -168,7 +168,23 @@ These invoke the actual launcher with a synthetic login and fake Codex, exercise
 
 ## Verdicts and the report
 
-`verdict.ts` judges one Attempt against its Scenario: a confirmed must-not (common checks included) or applicable expectation-group violation fails it even if the run was cut short, a prerequisite is unresolved or other evidence is missing. An expectation group is conclusively refuted only when every equivalent way is refuted by observation; an absent way can still occur later, and an evidenced equivalent success still satisfies the group. Otherwise an unfinished run is `incomplete`, a required event that did not happen means the Scenario was not exercised (`incomplete`), and any item a script could not decide stays open (`insufficient-evidence`) until two independent reviews agree, an arbitration settles their disagreement, or Kun decides; an item left open for missing evidence only Kun can decide, and a record made under an older Scenario version is never re-judged by the current one. Only when every must-not and expectation group is decided does an Attempt `pass`. A cell (Scenario × Entry × Combination × release) keeps every Attempt: pass and fail together are `flaky`, a failure is never hidden by another Attempt, an undecided Attempt blocks a pass, fewer decided Attempts than the run matrix requires (two for Codex · `gpt-6-astra`, one otherwise) is `incomplete`, another Combination is due one more Attempt after an anomaly or a result unlike the main Combination's, a new Combination or model needs a two-Attempt baseline, and real-problem Scenarios report whether the failure was reproduced on their original Combination.
+`verdict.ts` judges one Attempt against its Scenario in this order (R4/R9):
+
+| Order | Evidence condition | Verdict |
+| --- | --- | --- |
+| 1 | Required event did not happen, or the run is `precondition-not-met` | `incomplete`; dependent items are not judged |
+| 1 | Required event/capability is unconfirmed | `insufficient-evidence` for a complete run, otherwise `incomplete`; dependent items are not judged |
+| 2 | Prerequisites hold; present evidence proves a must-not (including a valid R4 review), or every applicable equivalent expectation is script-proven `observed` | `fail`, even with later gaps or timeout |
+| 3 | No proven violation and the run is unfinished | `incomplete`; a negative model/human expectation alone cannot override interruption |
+| 4 | Complete, exercised run; a must-not or every equivalent expectation is refuted | `fail` |
+| 5 | Otherwise required evidence/reviews remain open | `insufficient-evidence`; missing records never establish a violation |
+| 6 | All applicable groups and must-nots decided | `pass`, or `not-applicable` if no expectation applies |
+
+An evidenced equivalent success satisfies its group; an absent way can still occur later. A script's missing-evidence result stays open until Kun decides, while an explicit model escalation follows the two independent readings and arbitration path. Quality observations alone cannot fail an Attempt. Evidence coverage is distinct from a lifecycle prerequisite: missing unrelated evidence blocks an otherwise passing result but does not erase a proved violation after the required event. The [upgrade runbook's regression matrix](../../docs/implementation/behaviour-upgrade-runner.md#third-review-verdict-order-regressions) records both sides of this boundary.
+
+A record made under an older Scenario version is never re-judged by the current one. Codex upgrade definitions are v6; other Scenarios retain their definitions. Before comparing any historical real Batch affected by these shared verdict/helper changes, B03 must explicitly compare its original verdict with the new verdict on the same evidence, record both engine commits and explain every difference. Do not silently regenerate or relabel its report, or claim a behaviour improvement from the judging change. No historical real Batch was opened or re-judged for this fix.
+
+A cell (Scenario × Entry × Combination × release) keeps every Attempt: pass and fail together are `flaky`, a failure is never hidden by another Attempt, an undecided Attempt blocks a pass, fewer decided Attempts than the run matrix requires (two for Codex · `gpt-6-astra`, one otherwise) is `incomplete`, another Combination is due one more Attempt after an anomaly or a result unlike the main Combination's, a new Combination or model needs a two-Attempt baseline, and real-problem Scenarios report whether the failure was reproduced on their original Combination.
 
 ```sh
 node tests/behaviour/cli.ts check <attempt.json>…                       # one Attempt, item by item

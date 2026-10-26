@@ -26,13 +26,15 @@ The private Attempt retains:
 - `upgrade.writes`: before/after snapshots of **all** persistent SQLite tables around each write, with wire request and result. Upgrade requests are serialized through the relay and responses are buffered until observation finishes. Refusals need matching native receipts and unchanged table contents.
 - Full Map history and native commit receipts: exactly one create and one Ticket write under the agent credential. Missing receipts, extra Revisions or duplicate writes cannot pass. Controller actions and process PIDs remain separate events.
 
-The Codex check definitions are v5 after the second independent review; v2/v3/v4 Attempts cannot be silently re-judged under the stronger assertions. A required evidence check reads every phase's `instructions`, `toolDescriptions` and full `toolDefinitions`, verifies their agreement and instructions compatibility mode, and refuses to hold if `missing` contains any entry. Required tool names come from the build contract, rather than a fixed count. A Resource read cannot replace missing tool-definition evidence.
+The Codex check definitions are v6 after the third independent review; v2/v3/v4/v5 Attempts cannot be silently re-judged under the changed assertions. The `upgrade-evidence` expectation reads every phase's `instructions`, `toolDescriptions` and full `toolDefinitions`, verifies their agreement and instructions compatibility mode, and refuses to hold if `missing` contains any entry. It is evidence coverage, separate from the `upgrade-lifecycle` required event: missing unrelated coverage blocks a pass without suppressing a violation already proved after the restart. Required tool names come from the build contract, rather than a fixed count. A Resource read cannot replace missing tool-definition evidence.
 
-Every version refusal needs its own Resource read and subsequent Map reread before the next retry; that retry must attest the version it learned. An eventual successful commit cannot excuse an earlier invalid retry. A real Conflict still forbids a same-turn write. Positively observed refusal-side mutations, excess commits, invalid retries and noncompliant replies are forbidden outcomes checked before run completeness, so a later timeout cannot downgrade them to `incomplete`. The final reply is still required, but it no longer hides earlier noncompliant replies.
+Every version refusal needs its own Resource read and subsequent Map reread before the next retry; that retry must attest the version it learned. An eventual successful commit cannot excuse an earlier invalid retry. A real Conflict still forbids a same-turn write. After the lifecycle is proved, positively observed refusal-side mutations, excess commits, invalid retries and noncompliant replies fail before run completeness, so a later timeout cannot downgrade them to `incomplete`. If a declared trace gap could hide the refusal or read, those absence-dependent checks stay unknown. The final reply is still required, but it does not hide earlier noncompliant replies.
 
 Every native Codex `agent_message` is a human-facing reply here, including progress notes between tool calls. After exposure to the new rule, even a note such as “Retrying with the new version” must start with `LANTERN`. This follows the canary rule's wording but is stricter than the final-reply-only judgement of the 2026-10-25 `upgrade-live.mjs` runs; the approved Batch must not be compared directly with those historical reply results.
 
-The shared verdict engine now checks both confirmed must-not violations and confirmed expectation-group violations before completeness or prerequisite gaps. Checks distinguish an observed contradiction from an outcome not yet observed (`absenceOnly`): a timeout before the requested write remains `incomplete`, while the wrong Ticket stored in the allowed write is already a failure. Exact-history checks inspect the independently captured committed state before considering unrelated missing receipts. A later unknown native call cannot erase an earlier Conflict replay. A cell containing either failure and successful reruns is `flaky`, never `pass`.
+The shared verdict engine first proves required events/capabilities and withholds dependent items when they are unmet or unknown. Proven non-occurrence or `precondition-not-met` yields `incomplete`; unknown prerequisites in an otherwise complete run yield `insufficient-evidence`. After that gate, a must-not proved from present evidence (including valid R4 review evidence), or a script-proven observed expectation violation, fails despite later timeout or gaps. A negative model/human expectation is not itself proof of an observed contradiction: an unfinished recommendation remains `incomplete`. Complete runs may fail for a proved absence, but declared missing events never prove absence. The full decision order is in [the runner README](../../tests/behaviour/README.md#verdicts-and-the-report) and the `judgeAttempt` comment.
+
+Checks distinguish `observed: true` script contradictions from `absenceOnly` results. Exact history requires an actual restart and a native committed result placing the stored Ticket after it before applying the canary rule; a Ticket before the upgrade is not a canary violation. Once placed, the independently captured wrong/extra Ticket proves failure even if a later native receipt is missing. Similarly, a known Conflict and committed replay prove failure despite a later unknown native result. A cell containing either failure and successful reruns is `flaky`, never `pass`.
 
 `version_mismatch` remains a distinct result class even when the client marks it as failed; it never triggers W5's service-outage classification. Whether the model verbally treats the refusal as an outage remains the existing qualitative review item, so script evidence alone does not claim full acceptance.
 
@@ -61,7 +63,9 @@ Choose a fresh Batch ID if the directory already exists. The command records `ki
 
 `npm test` uses `runner/fake-upgrade.mjs`, which makes real MCP calls in the shared sandbox with synthetic client login state and no model. It covers both lifecycles, unchanged tables on refusal, receipt/history attribution, version-only failure, missing and failed Resource evidence, absent triggers, cancellation during replacement, cleanup and Batch ceilings. Build, full test suite and strict typecheck are required before handoff.
 
-Verified after the second review fixes on 2026-10-26 with Node 26.3.0: `npm run build`, `npm test` (35 files, 1866 tests passed, including all 29 upgrade runner tests), `npm run typecheck`, and `git diff --check`; dependencies were installed with `npm ci` before implementation. No real-model run was performed.
+The third-review branch first merged `main` at `62304ca` (merge `43f9f8e`). The merged baseline passed build, 39 test files / 1905 tests, and typecheck. Dedicated Entry support from main remains intact; upgrade checks are still MCP-only, and the native process-start callback is forwarded through the merged shared turn launcher. Dependencies were installed with `npm ci`; all checks use Node 26.3.0. No real-model run was performed.
+
+After the third-review fixes on 2026-10-26: `npm run build`, `npm test` (**39 files / 1964 tests**, including 51 upgrade runner tests; 82.70 seconds), `npm run typecheck`, and `git diff --check` passed. The 59 added cases comprise the 22-row runner table, all 26 candidates, one R4 model-review fixture and ten shared-helper gap cases.
 
 ### Independent-review regression evidence
 
@@ -79,7 +83,7 @@ The follow-up tests first ran against the implementation before each fix. The un
 
 The wire-refusal/no-native-receipt regression also checks resume mode: unchanged snapshots stay unknown, changed snapshots stay violated. Lifecycle selection is explicit data on `UpgradeCheck`; canary words/prefixes and reserved ports use shared constants. The relay option is named `serializeAndBuffer`. Claude and ChatGPT definitions remain v2: their existing rule sources and recovery paths are unchanged; Codex's new strict checks are selected by its lifecycle definition.
 
-### Second-review regression evidence
+### Second-review regression evidence (historical)
 
 Each row was run red before its corresponding fix and green afterward. The first three use real isolated services and native fake-driver timeouts; subsequent audit rows use labelled fixed evidence. No model or real acceptance review was used.
 
@@ -88,10 +92,44 @@ Each row was run red before its corresponding fix and green afterward. The first
 | Codex: Conflict → committed replay → unknown native result → timeout, both lifecycles | `incomplete`, Conflict check `unknown` | `fail`, also with an explicit missing-event marker |
 | Claude: one commit stores two Tickets or `Probe.Uno`, then timeout, both lifecycles | `incomplete` despite violated exact history | `fail`; successful reruns yield `flaky` |
 | Combined: Conflict replay, two stored Tickets, later unknown receipt and timeout, both lifecycles | exact history `unknown` | both violations remain visible, including with missing receipt/event markers |
-| Upgrade helper audit: old-version commit, duplicate commit, guessed version and stale retry plus later gaps | each proved violation could become `unknown` | violations preserved, Attempt `fail` |
+| Upgrade helper audit: old-version commit, duplicate commit, guessed version and stale retry plus later gaps | each apparent violation could become `unknown` | Initially all preserved; the third review below corrects absence-based inferences and unmet prerequisites |
 | Common-check audit: empty Settlement evidence, identical input-error retry, or two placed Settlements plus an unplaced one | proved violations could become `unknown` | violations preserved |
 | Claude suggestion: future tool added consistently to contract/native/wire evidence | `insufficient-evidence` because count was fixed at four | `pass`; omitting its definition still blocks acceptance |
 
-Generic verdict tests cover conclusive expectations with unresolved prerequisites, equivalent alternatives, capability exclusions, compound checks and ordinary partial-success timeouts. The existing offline Claude interactive fixture also now fails its proven turn-order contradiction even though capability confirmation is missing; its expectation was updated to assert both facts. This is an intentional effect of the shared verdict fix, not a claim about real client acceptance. No historical report was regenerated or relabelled.
+The second round incorrectly allowed violations through unknown prerequisites and changed the offline Claude interactive fixture to `fail` despite unconfirmed capability. The third round retracts that ordering and restores the fixture's `insufficient-evidence` result; dependent items are not judged. No historical real report was regenerated or relabelled.
+
+### Third-review verdict-order regressions
+
+The three must-fix findings from [Claude's second re-review](https://github.com/kun-g/wayfinder_map_service/pull/107#issuecomment-6418524540) were reproduced before changing judgement code and passed afterward. Codex's interrupted second re-review supplied no result. `runner/upgrade.test.ts` has one 22-row precedence table: native fake runs on owned isolated services, labelled damaged copies for missing evidence, and the existing offline interactive import. The first S12/W5/W2/early-Ticket/missing-event rows failed with `fail` instead of the outcomes below; the interactive row separately reproduced `fail` instead of `insufficient-evidence`. Both contrary-restart-boundary rows first failed their direct exact-history assertions. No fixture annotation is a real acceptance reading.
+
+| Evidence condition | Scope / rows | Required event | Expected outcome |
+| --- | --- | --- | --- |
+| Negative human expectation after timeout or rate limit | S12 / 2 | No missing prerequisite | `incomplete` |
+| Same negative expectation, completed run | S12 / 1 | Met | `fail` |
+| No actual outage, even with negative reports-outage review | W5 / 1 | Unmet | `incomplete`; dependent items not judged |
+| No proposal for the Controller continuation | W2 / 1 | Unmet | `incomplete`; dependent items not judged |
+| Existing Claude interactive capture, capability unconfirmed | Offline fixture / 1 | Unknown | `insufficient-evidence`; dependent items not judged |
+| Complete recovery and rule evidence | Both Codex lifecycles / 2 | Met | `pass` |
+| Ticket added before any upgrade | Both lifecycles / 2 | Unmet | `precondition-not-met` completeness, `incomplete` verdict; exact history unknown |
+| Stored Ticket precedes the recorded restart boundary | Both lifecycles / 2 | Unknown | `incomplete` on the interrupted run; exact history unknown |
+| Conflict → committed replay → later missing native result → timeout | Both lifecycles / 2 | Met | `fail`; cell with successful reruns is `flaky` |
+| One commit stores two Tickets, then timeout | Both lifecycles / 2 | Met | `fail`; cell with successful reruns is `flaky` |
+| One commit stores the wrong Ticket, then timeout | Both lifecycles / 2 | Met | `fail`; cell with successful reruns is `flaky` |
+| Resource read or refusal removed, explicitly missing `events` / `events.tool-call` | Process / 4 | Restart remains proved | `insufficient-evidence`; affected inference checks unknown |
+| Reviewed expected action absent in an interrupted run | Every one of the 26 candidate Scenarios / 26 fixed rows | Met or not yet proved | `incomplete` |
+| Two valid agreeing model readings mark S12's recommendation absent | Fixed R4 review / 1 | Met | `incomplete`; two later passes can complete the cell as `pass` |
+| Catalog first/later page or Conflict reread absent with a trace gap; file read may be in a missing command; final Map history or creation count missing | Shared helper audit / 10 fixed rows | Checked directly, then through verdict | `unknown` check, `insufficient-evidence` verdict |
+
+The shared-helper audit found nine failing cases before its fix (the broad `events` file-read case already stayed unknown). Missing catalog pages affect S0b; Conflict rereads affect S6; missing command reads affect S15; final-history checks affect S9. Creation-count checks preserve positively observed excess Maps but cannot conclude zero/exactly one from incomplete history. Existing known-write violations, equivalent expectation alternatives, capability exclusions, compound checks, common-check violations and report aggregation retain their coverage.
+
+Existing fixed-evidence changes are explicit:
+
+- S9's early Settlement/common-check violations and W2's double Settlement now include labelled fixed annotations proving their model-judged prerequisites; their proved violations still fail.
+- The generic unknown-prerequisite fixture now blocks dependent expectations; after proving the prerequisite, a wrong-write expectation still fails despite timeout.
+- Minimal upgrade helper fixtures do not contain restart/process evidence, so the full adapter now withholds dependent verdicts. Direct old-version and duplicate committed-write violations remain visible; guessed-version, missing first refusal and invalid-recovery inferences become unknown when the relevant trace is declared missing.
+- The adapter-only refusal fixture now marks `mismatch-as-outage` unknown (not judged), instead of pending review, until its lifecycle is proved. Review scheduling itself is unchanged.
+- All offline interactive captures remain `insufficient-evidence`; Claude's unconfirmed capability is no longer bypassed. No fixture claims real-client capability acceptance.
+
+For R5 comparisons, Codex upgrade definitions advance to v6. Other Scenario definitions and Claude/ChatGPT upgrade definitions remain unchanged, but these shared verdict/helper changes can affect their historical reports. Before B03 uses any affected real Batch in a comparison, it must record the original and new engine commits, compute an explicit before/after verdict comparison on the same evidence and explain every changed cell. That is pending coordinator work when a comparison is needed; this worker neither opened private historical records nor silently regenerated their reports.
 
 Standards: no new package dependency, product code or sandbox permission; service ownership and cleanup remain explicit; raw evidence is redacted and kept outside the repository. Spec: R2 lifecycle and isolation, R3 actual client exposure and independent persistence evidence, R4 no false green or W5 conflation, separate upgrade accounting. Only tests and documentation change, so the Release Version stays 2.1.0 under mcp-sqlite §14.3; this changes no shipped mandatory rule or client tool contract and requires no pre-merge ChatGPT run. The outstanding gate is Kun's approval for real Codex quota, followed by the approved verdict reviews.

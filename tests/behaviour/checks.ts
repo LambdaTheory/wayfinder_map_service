@@ -5,9 +5,9 @@ import type { AttemptRecord, EventRecord, ResultClass, WireRevision, WireState, 
 import type { CheckResult, ScriptCheck } from './scenario.ts';
 
 export const holds = (reason: string, evidence: string[] = []): CheckResult => ({ status: 'holds', reason, evidence });
-export const violated = (reason: string, evidence: string[] = []): CheckResult => ({ status: 'violated', reason, evidence });
+export const violated = (reason: string, evidence: string[] = []): CheckResult => ({ status: 'violated', reason, evidence, observed: true });
 /** An outcome not observed by the end; interruption or unmet preconditions cannot prove it failed. */
-export const notObserved = (reason: string, evidence: string[] = []): CheckResult => ({ ...violated(reason, evidence), absenceOnly: true });
+export const notObserved = (reason: string, evidence: string[] = []): CheckResult => ({ status: 'violated', reason, evidence, absenceOnly: true });
 export const unknown = (reason: string, evidence: string[] = [], escalate: 'model' | 'human' = 'human'): CheckResult =>
   ({ status: 'unknown', reason, evidence, escalate });
 
@@ -204,6 +204,8 @@ export const wroteAfterConflict: ScriptCheck = a => {
 
 /** Expectation: after each Conflict the session rereads the Map with `map_read` in the same turn. */
 export const rereadAfterConflict: ScriptCheck = a => {
+  const gap = need(a, 'reread after a Conflict', 'events.tool-call');
+  if (gap) return gap;
   const conflicts = mapCalls(a, 'map_apply').filter(e => resultIs(e, 'conflict'));
   if (!conflicts.length) return need(a, 'reread after a Conflict', 'events.tool-call') ?? notObserved('no Conflict to react to');
   const missing = conflicts.filter(c => !mapCalls(a, 'map_read').some(r => r.seq > c.seq && r.session === c.session && r.turn === c.turn));
@@ -212,6 +214,8 @@ export const rereadAfterConflict: ScriptCheck = a => {
 
 /** Expectation: before its first `map_create`, the session paged `map_list` to the end (no `nextAfterMapId` left). */
 export const pagedCatalogBeforeCreate: ScriptCheck = a => {
+  const gap = need(a, 'catalog paged before create', 'events.tool-call');
+  if (gap) return gap;
   const create = mapCalls(a, 'map_create')[0];
   if (!create) return need(a, 'catalog paged before create', 'events.tool-call') ?? notObserved('no map_create');
   const lists = mapCalls(a, 'map_list').filter(e => e.seq < create.seq && e.session === create.session);
@@ -262,7 +266,7 @@ export function readBeforeWrite(label: string, read: RegExp, write: RegExp): Scr
     const reads = [...evs(a, 'file-read').filter(e => read.test(e.path)), ...evs(a, 'command').filter(e => read.test(e.command))]
       .filter(e => e.seq < firstWrite.seq);
     if (reads.length) return holds(label, [...reads.map(e => at(a, e)), at(a, firstWrite)]);
-    return a.missing.includes('events.file-read') || a.missing.includes('events') ? unknown(`${label}: reads were not recorded`, [at(a, firstWrite)], 'model')
+    return need(a, label, 'events.file-read', 'events.command') ? unknown(`${label}: reads were not recorded`, [at(a, firstWrite)], 'model')
       : violated(`wrote ${firstWrite.path} before reading ${read}`, [at(a, firstWrite)]);
   };
 }
@@ -291,6 +295,8 @@ export function finalState(a: AttemptRecord, mapId: string): WireState | null {
 /** Expectation about the final state of one Map. */
 export function atEnd(label: string, mapId: string, pred: (s: WireState) => boolean): ScriptCheck {
   return a => {
+    const gap = need(a, label, 'maps');
+    if (gap) return gap;
     const s = finalState(a, mapId);
     if (!s) return unknown(`${label}: no history for ${mapId}`);
     return pred(s) ? holds(label, [`maps.${mapId}.history[-1]`]) : notObserved(`not true at the end: ${label}`, [`maps.${mapId}.history[-1]`]);
@@ -304,7 +310,8 @@ export function mapsCreated(a: AttemptRecord): number {
 
 export const createdExactlyOnce: ScriptCheck = a => {
   const n = mapsCreated(a);
-  return n === 1 ? holds('created one Map') : n === 0 ? notObserved('created no Map') : violated(`created ${n} Maps`);
+  if (n > 1) return violated(`created ${n} Maps`);
+  return need(a, 'created exactly one Map', 'maps') ?? (n === 1 ? holds('created one Map') : notObserved('created no Map'));
 };
 
 export function all(label: string, ...checks: ScriptCheck[]): ScriptCheck {

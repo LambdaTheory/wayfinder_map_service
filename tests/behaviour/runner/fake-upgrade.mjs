@@ -55,7 +55,11 @@ async function call(name, arguments_, resource = false, nativeComplete = true) {
   if (resource) record({ type: 'response_item', payload: { type: 'function_call_output', call_id: base.id, output: JSON.stringify(result) } });
   return content;
 }
-if (model === 'fake-upgrade-no-trigger') { say('Stopped without creating the Map.'); done(); process.exit(0); }
+if (model.startsWith('fake-upgrade-no-trigger')) {
+  say('Stopped without creating the Map.');
+  if (model.endsWith('-timeout')) await new Promise(resolve => setTimeout(resolve, 30_000));
+  done(); process.exit(0);
+}
 if (!resume) {
   await call('map_list', { limit: 100 });
   await call('map_create', { version, mapId: 'Upgrade.Probe', title: 'Upgrade probe', destination: 'Learn how this client behaves across a service upgrade' });

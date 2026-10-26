@@ -1,4 +1,4 @@
-// Strict Codex upgrade assertions (definition v5). Older Attempts are not re-judged.
+// Strict Codex upgrade assertions (definition v6). Older Attempts are not re-judged.
 import { isDeepStrictEqual } from 'node:util';
 import { holds, unknown, violated, notObserved, writeCalls, resultIs, at } from './checks.ts';
 import type { ScriptCheck } from './scenario.ts';
@@ -88,10 +88,14 @@ export const noExtraCommits: ScriptCheck = a => {
 };
 
 export const exactUpgradeHistory: ScriptCheck = a => {
+  if (!a.upgrade?.restart) return unknown('the upgrade did not run; no post-restart Ticket rule can be judged');
   // An independently captured committed state proves a violation even if a later native receipt is lost.
   const probe = a.maps.find(m => m.mapId === 'Upgrade.Probe');
   const stored = a.upgrade?.restart && probe?.history.find(r => r.revision === 2 && r.kind === 'apply'
     && a.sessions.some(s => s.clientId === r.author.clientId));
+  const afterRestart = stored && writeCalls(a).some(e => e.seq > a.upgrade!.restart!.seq && resultIs(e, 'committed')
+    && object(e.result.value).mapId === probe!.mapId && object(e.result.value).revision === stored.revision);
+  if (stored && !afterRestart) return unknown('the stored Ticket write is not placed after the restart by native evidence');
   if (stored && (stored.state.tickets.length !== 1 || stored.state.tickets[0]!.id !== 'Probe.One'
     || !stored.state.tickets[0]!.title.startsWith(ticketTitlePrefix)))
     return violated('final stored Ticket does not follow the canary rule exactly once', ['maps']);
