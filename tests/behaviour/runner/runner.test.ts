@@ -16,7 +16,7 @@ import { normalizeTurn, readsIn, receiptsFrom, relativePath } from './normalize.
 import { preflight, runAttempt, runBatch } from './run.ts';
 import type { BatchOptions } from './run.ts';
 import type { Scenario } from '../scenario.ts';
-import { freePort, newToken, startService } from './service.ts';
+import { checkoutRoot, freePort, newToken, startService } from './service.ts';
 import { createServer } from 'node:net';
 
 const scratch = realpathSync(mkdtempSync('/private/tmp/wf-behave-test-'));
@@ -31,11 +31,17 @@ afterAll(() => { rmSync(scratch, { recursive: true, force: true }); rmSync(recor
 
 describe('preflight', () => {
   test('refuses what this runner cannot do, before anything runs', () => {
-    const { refusals } = preflight({ batchId: 'T1', scenarios: ['S6', 'W5', 'S7', 'P1'], count: 1, ceiling: 4 });
-    expect(refusals.join('\n')).toMatch(/S6: Controller actions \(conflicting-write\)/);
-    expect(refusals.join('\n')).toMatch(/W5: Controller actions \(cut-agent-route\)/);
+    const { refusals } = preflight({ batchId: 'T1', scenarios: ['S5', 'S6', 'S10', 'W5', 'S7', 'P1'], count: 1, ceiling: 4 });
+    expect(refusals.join('\n')).not.toMatch(/S6|W5/);
     expect(refusals.join('\n')).toMatch(/P1: no such Scenario/);
     expect(refusals.join('\n')).not.toMatch(/S7/);
+  });
+  test('refuses raw output inside the checkout before starting a service or client', async () => {
+    const out = join(checkoutRoot, 'tests/behaviour/must-not-create');
+    const options: BatchOptions = { batchId: 'T', scenarios: ['S0b'], count: 1, ceiling: 1, out, scratchRoot: scratch,
+      codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs: 1000 } };
+    expect((await runBatch(options)).refusals).toEqual(['raw records must stay outside repositories']);
+    expect(existsSync(out)).toBe(false);
   });
   test('plans count Attempts per Scenario', () => {
     const { plan, refusals } = preflight({ batchId: 'T1', scenarios: ['S0b', 'F11'], count: 2, ceiling: 4 });

@@ -5,6 +5,7 @@ import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, re
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parseLines } from './normalize.ts';
+import type { Line } from './normalize.ts';
 import { reservedPorts } from './service.ts';
 
 export interface CodexOptions {
@@ -105,25 +106,38 @@ export function codexArgs(o: CodexOptions, port: number, workdir: string, thread
   return threadId ? ['exec', 'resume', ...config, threadId, '-'] : ['exec', ...config, '-C', workdir, '-'];
 }
 
-export interface TurnRequest { options: CodexOptions; session: CodexSession; port: number; workdir: string; prompt: string; profile: string; onChild?: (kill: () => void) => void }
+export interface TurnRequest { options: CodexOptions; session: CodexSession; port: number; workdir: string; prompt: string; profile: string; onChild?: (kill: () => void) => (() => void); onLine?: (line: Line) => void }
 
 /** Run one turn and keep the session's thread. The child gets only the environment it needs, never the runner's. */
-export function runTurn({ options: o, session: s, port, workdir, prompt, profile, onChild }: TurnRequest): Promise<TurnResult> {
+export function runTurn({ options: o, session: s, port, workdir, prompt, profile, onChild, onLine }: TurnRequest): Promise<TurnResult> {
   const args = codexArgs(o, port, workdir, s.thread);
   const [cmd, argv] = o.sandbox ? ['sandbox-exec', ['-f', profile, o.bin, ...args]] : [o.bin, args];
   const env = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: s.home, CODEX_HOME: s.codexHome, TMPDIR: join(s.home, 'tmp'),
     LANG: 'en_US.UTF-8', WAYFINDER_TOKEN: s.token };
   const started = Date.now();
   return new Promise(resolve => {
-    const child = spawn(cmd as string, argv as string[], { cwd: workdir, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(cmd as string, argv as string[], { cwd: workdir, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
     let stdout = ''; let stderr = ''; let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); setTimeout(() => child.kill('SIGKILL'), 5000).unref(); }, o.timeoutMs);
-    onChild?.(() => child.kill('SIGTERM'));
-    child.stdout.on('data', d => { stdout += d; });
+    let force: ReturnType<typeof setTimeout> | undefined;
+    const signal = (name: NodeJS.Signals) => { if (child.pid) try { process.kill(-child.pid, name); } catch { /* already exited */ } };
+    const kill = () => { signal('SIGTERM'); force ??= setTimeout(() => signal('SIGKILL'), 5000); force.unref(); };
+    const timer = setTimeout(() => { timedOut = true; kill(); }, o.timeoutMs);
+    const unregister = onChild?.(kill);
+    let buffered = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (d: string) => {
+      stdout += d; buffered += d;
+      let end: number;
+      while ((end = buffered.indexOf('\n')) >= 0) {
+        for (const line of parseLines(buffered.slice(0, end))) onLine?.(line);
+        buffered = buffered.slice(end + 1);
+      }
+    });
     child.stderr.on('data', d => { stderr += d; });
     child.once('error', error => { stderr += String(error); });
     child.once('close', (code, signal) => {
-      clearTimeout(timer);
+      clearTimeout(timer); clearTimeout(force); unregister?.();
+      for (const line of parseLines(buffered)) onLine?.(line);
       const lines = parseLines(stdout);
       s.thread = lines.find(e => e.type === 'thread.started')?.thread_id ?? s.thread;
       resolve({ exitCode: code, signal, timedOut, turnStarted: lines.some(e => e.type === 'turn.started'), stdout, stderr,

@@ -26,6 +26,9 @@ export type Surface = 'available' | 'unavailable' | 'undocumented';
 
 /** What the client was actually given in one phase of the Attempt; content it did not show its model is never claimed as read. */
 export interface GivenRules {
+  /** The logical session and first turn whose native log proves this rule exposure. */
+  session?: string;
+  turn?: number;
   /** `initial` at the first connection; later phases after a Controller restart or an app refresh (upgrade checks). */
   phase: 'initial' | 'after-restart' | 'after-refresh';
   /** First event sequence number this phase covers. */
@@ -90,7 +93,7 @@ export interface SessionRecord {
   clientId: string;
   /** MCP session IDs the service issued to this session (reconnects add more): the join key with service metadata (B07). */
   mcpSessionIds: Field<string[]>;
-  turns: { index: number; input: string; startedAt: string; endedAt: string; durationMs: number }[];
+  turns: { nativeId?: Field<string>; index: number; input: string; startedAt: string; endedAt: string; durationMs: number }[];
 }
 
 /** Who acted. Controller seeding, injected Conflicts and evidence reads never count as agent behaviour. */
