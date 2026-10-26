@@ -104,6 +104,8 @@ All scan evidence is synthetic. Fixed tests cover every Issue sample, metadata-o
 
 Validation uses Node 26.3.0, `npm ci`, `npm run build`, the complete `npm test` suite, `npm run typecheck` and `git diff --check`. The existing fake runner reads daily login/configuration and snapshots service credentials even in model-free tests. To honor this task's private-read boundary, the complete suite was run with a temporary Vitest setup that returns `false` from `existsSync` for the real `.codex*`, `.claude*`, `.wayfinder-service`, workspace `contexts` and `raw` roots, and throws before reads/copies of those paths. All other filesystem operations, tests and assertions remain unchanged; the temporary setup/config is removed afterward. No real credentials are copied. This guard is verification setup, not part of the scan command or a runner modification.
 
+Final verification on 2026-10-26: build, **23 test files / 1496 tests** (including **16 scan tests**), strict type checking and whitespace checks passed after fetching/merging current `origin/main` at `00c2f4e`. All scenarios used fixed evidence or fake drivers; models started: **0**. The PR identifies the final implementation commit.
+
 Two earlier isolation attempts were rejected by existing tests and retained as diagnostic context: changing HOME caused one runner path/sandbox assertion failure; an outer macOS sandbox prevented nested sandbox tests and exposed the runner's attempted private configuration reads. Neither is reported as a pass. The successful filesystem guard preserves the actual home path for existing sandbox assertions while presenting private client configuration as absent.
 
 | Issue acceptance | Fixed evidence |
