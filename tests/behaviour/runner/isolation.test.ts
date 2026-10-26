@@ -1,6 +1,6 @@
 import { syntheticClientState } from './test-state.ts';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, expect, test } from 'vitest';
 import { findRollout, prepareSession, runTurn, verifyProfile, writeProfile } from './codex.ts';
@@ -133,4 +133,36 @@ test('session preparation and Batch snapshots use synthetic login state without 
   expect(readFileSync(join(session.codexHome, 'auth.json'), 'utf8')).toBe(readFileSync(state.loginSource, 'utf8'));
   const snapshot = isolationSnapshot(state.personalConfigRoot);
   expect(Object.keys(snapshot.files).every(path => path.startsWith(state.personalConfigRoot))).toBe(true);
+});
+
+attack('a mutable read-only file permits trusted content refresh but no client write, sibling read or replacement', () => {
+  const scratch = mkdtempSync(join(root, 'mutable-'));
+  const session = prepareSession(scratch, 'A', 'synthetic', clientState.loginSource);
+  const work = join(scratch, 'work'); mkdirSync(work);
+  const control = mkdtempSync(join(root, 'runner-'));
+  const source = join(scratch, 'source'); mkdirSync(source);
+  const auth = join(source, 'auth.json'); writeFileSync(auth, 'synthetic-first');
+  const sibling = join(source, 'private'); writeFileSync(sibling, 'synthetic-private');
+  const profile = writeProfile(control, session, work, '/bin/sh', { mutableReadOnlyFiles: [auth] });
+  expect(shell(profile.path, `cat '${auth}'`).stdout).toBe('synthetic-first');
+  expect(shell(profile.path, `cat '${sibling}'`).status).not.toBe(0);
+  expect(shell(profile.path, `echo forged > '${auth}'`).status).not.toBe(0);
+  expect(shell(profile.path, `mv '${source}' '${source}-moved'`).status).not.toBe(0);
+  writeFileSync(auth, 'synthetic-refreshed');
+  expect(verifyProfile(profile)).toBeNull();
+  expect(shell(profile.path, `cat '${auth}'`).stdout).toBe('synthetic-refreshed');
+  renameSync(auth, auth + '-original'); writeFileSync(auth, 'synthetic-replacement');
+  expect(verifyProfile(profile)).toMatch(/isolation failure/);
+});
+
+attack('mutable read-only entries reject directories and another session file through a symlink', () => {
+  const scratch = mkdtempSync(join(root, 'mutable-refusal-'));
+  const a = prepareSession(scratch, 'A', 'synthetic', clientState.loginSource);
+  const b = prepareSession(scratch, 'B', 'synthetic', clientState.loginSource);
+  const work = join(scratch, 'work'); mkdirSync(work);
+  const control = mkdtempSync(join(root, 'runner-'));
+  const other = join(b.home, 'token'); writeFileSync(other, 'synthetic');
+  const alias = join(work, 'alias'); symlinkSync(other, alias);
+  for (const file of [scratch, alias]) expect(() => writeProfile(control, a, work, '/bin/sh', { mutableReadOnlyFiles: [file] })).toThrow();
+  expect(shell(writeProfile(control, a, work, '/bin/sh').path, `cat '${alias}'`).status).not.toBe(0);
 });

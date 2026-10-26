@@ -39,6 +39,8 @@ export interface TurnResult {
 /** Shared Entry API: final denies override every earlier allow. Paths must already exist. */
 export interface SandboxAccess {
   readOnlyRoots?: string[];
+  /** Exact files: trusted content refresh is allowed, but file/parent identity stays pinned. */
+  mutableReadOnlyFiles?: string[];
   denyWriteRoots?: string[];
   denyWritePaths?: string[];
   /** Only these loopback ports are reachable (the own relay and optional isolated bait service). */
@@ -56,13 +58,14 @@ export function sandboxProfile(home: string, workdir: string, blockedPorts: numb
     `(deny file-read* (subpath ${q(personal)}) (subpath "/private/tmp") (subpath "/private/var/folders")${workspace && !workspace.startsWith(personal) ? ` (subpath ${q(workspace)})` : ''})`,
     '(allow file-read-metadata)',
     `(allow file-read* ${[home, workdir, ...readOnly].map(p => `(subpath ${q(p)})`).join(' ')})`,
+    ...(access.mutableReadOnlyFiles ?? []).map(p => `(allow file-read* (literal ${q(p)}))`),
     '(deny file-write*)',
     `(allow file-write* ${[home, workdir, '/dev'].map(p => `(subpath ${q(p)})`).join(' ')})`,
     '(deny network-outbound (remote tcp "localhost:*") (remote udp "localhost:*"))',
     ...(access.localPorts ?? []).map(port => `(allow network-outbound (remote tcp "localhost:${port}"))`),
     ...blockedPorts.map(port => `(deny network-outbound (remote ip "localhost:${port}"))`),
     ...[...readOnly, ...(access.denyWriteRoots ?? [])].map(p => `(deny file-write* (subpath ${q(p)}))`),
-    ...[home, workdir, ...readOnly, ...(access.denyWritePaths ?? [])].map(p => `(deny file-write* (literal ${q(p)}))`), ''].join('\n');
+    ...[home, workdir, ...readOnly, ...(access.mutableReadOnlyFiles ?? []), ...(access.denyWritePaths ?? [])].map(p => `(deny file-write* (literal ${q(p)}))`), ''].join('\n');
 }
 
 /** A private HOME and CODEX_HOME with an explicitly supplied login source (deleted with the scratch). */
@@ -193,6 +196,8 @@ export interface ControlProfile {
   /** Immutable expected hashes kept in runner memory, never read back from client-writable storage. */
   hashes: Readonly<Record<string, string>>;
   readOnlyRoots: string[];
+  mutableReadOnlyFiles: string[];
+  identities: Readonly<Record<string, string>>;
 }
 
 function fileHash(path: string): string {
@@ -211,6 +216,20 @@ function treeHashes(roots: string[]): Record<string, string> {
     } else result[path] = fileHash(path);
   };
   for (const root of roots) visit(root);
+  return result;
+}
+
+/** Mutable file contents are excluded; replacement, symlinks and changed parents still refuse launch. */
+function fileIdentities(files: string[]): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const file of files) {
+    for (let path = file;; path = dirname(path)) {
+      const stat = lstatSync(path, { bigint: true });
+      if (path === file ? !stat.isFile() : !stat.isDirectory()) throw new IsolationError('mutable read-only file or parent replaced');
+      result[path] = `${path === file ? 'file' : 'directory'}:${stat.dev}:${stat.ino}`;
+      if (dirname(path) === path) break;
+    }
+  }
   return result;
 }
 
@@ -236,23 +255,28 @@ export function writeProfile(controlDir: string, session: CodexSession, workdir:
     const baseline = [realpathSync(homedir()), '/private/tmp', '/private/var/folders'];
     if (existsSync(join(homedir(), 'workspace'))) baseline.push(realpathSync(join(homedir(), 'workspace')));
     const readOnlyRoots = (access.readOnlyRoots ?? []).map(p => realpathSync(p));
-    for (const root of [controlDir, ...readOnlyRoots]) {
+    const mutableReadOnlyFiles = (access.mutableReadOnlyFiles ?? []).map(p => realpathSync(p));
+    if (mutableReadOnlyFiles.some(file => readOnlyRoots.some(root => contains(root, file))))
+      throw new IsolationError('mutable files must be outside immutable read-only trees');
+    const identities = Object.freeze(fileIdentities(mutableReadOnlyFiles));
+    const exposed = [...readOnlyRoots, ...mutableReadOnlyFiles];
+    for (const root of [controlDir, ...exposed]) {
       if ([home, workdir, ...baseline].some(p => contains(root, p)) || otherHomes.some(p => overlaps(root, p)))
         throw new IsolationError('control/read-only root contains a protected root or overlaps another session HOME');
     }
-    if ([home, workdir].some(p => overlaps(controlDir, p)) || readOnlyRoots.some(p => overlaps(controlDir, p)))
+    if ([home, workdir].some(p => overlaps(controlDir, p)) || exposed.some(p => overlaps(controlDir, p)))
       throw new IsolationError('control directory must be disjoint from writable and client-readable roots');
     const protectedParents: string[] = [];
     for (let p = controlDir;; p = dirname(p)) { protectedParents.push(p); if (dirname(p) === p) break; }
     const path = join(controlDir, `${basename(home)}.sb`);
     const resolved = bin.includes('/') ? bin : spawnSync('which', [bin], { encoding: 'utf8' }).stdout.trim();
     const text = sandboxProfile(home, workdir, reservedPorts, resolved ? dirname(realpathSync(resolved)) : undefined,
-      { ...access, readOnlyRoots, denyWriteRoots: [...(access.denyWriteRoots ?? []).map(p => realpathSync(p)), controlDir],
-        denyWritePaths: [...(access.denyWritePaths ?? []).map(p => realpathSync(p)), ...protectedParents] })
+      { ...access, readOnlyRoots, mutableReadOnlyFiles, denyWriteRoots: [...(access.denyWriteRoots ?? []).map(p => realpathSync(p)), controlDir],
+        denyWritePaths: [...(access.denyWritePaths ?? []).map(p => realpathSync(p)), ...protectedParents, ...Object.keys(identities)] })
       + `(deny file-read* (subpath ${JSON.stringify(controlDir)}))\n`;
     writeFileSync(path, text, { flag: 'wx', mode: 0o600 });
     const profile = { path, readOnlyRoots };
-    return { ...profile, hashes: Object.freeze(profileHashes(profile)) };
+    return { ...profile, hashes: Object.freeze(profileHashes(profile)), mutableReadOnlyFiles, identities };
   } catch (error) {
     if (error instanceof IsolationError) throw error;
     throw new IsolationError(`cannot prepare sandbox: ${String(error)}`);
@@ -265,6 +289,10 @@ const profileHashes = (profile: Pick<ControlProfile, 'path' | 'readOnlyRoots'>) 
 /** Checked before every launch, even a resume; a mismatch never launches the client. */
 export function verifyProfile(profile: ControlProfile): string | null {
   try {
+    const identities = fileIdentities(profile.mutableReadOnlyFiles);
+    if (Object.keys(identities).length !== Object.keys(profile.identities).length
+      || Object.keys(profile.identities).some(p => identities[p] !== profile.identities[p]))
+      return 'isolation failure: mutable read-only file or parent replaced';
     const current = profileHashes(profile);
     const expected = profile.hashes;
     if (Object.keys(current).length !== Object.keys(expected).length || Object.keys(expected).some(p => current[p] !== expected[p]))
