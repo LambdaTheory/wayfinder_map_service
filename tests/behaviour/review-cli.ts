@@ -143,6 +143,8 @@ export class CliReviewDriver implements ReviewDriver {
       const cmd = '/usr/bin/sandbox-exec'; let args = reviewArgs(target); let authArgs: string[];
       let authEnv = env;
       if (target.cli === 'claude') {
+        // Claude's per-uid /tmp directory ignores TMPDIR; keep its private files inside this review's sandbox.
+        env.CLAUDE_CODE_TMPDIR = join(runtime, 'claude-tmp'); mkdirSync(env.CLAUDE_CODE_TMPDIR, { mode: 0o700 });
         env.CLAUDE_CONFIG_DIR = join(runtime, 'claude'); mkdirSync(env.CLAUDE_CONFIG_DIR);
         env.CLAUDE_SECURESTORAGE_CONFIG_DIR = ''; // The launcher's shared daily keychain route, never a copied keychain entry.
         env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1'; env.DISABLE_AUTOUPDATER = '1';
