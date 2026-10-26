@@ -79,26 +79,23 @@ async function fixture(entry: 'mcp-only' | 'dedicated', mode: string, appendix =
   const childScript = join(root, 'batch.mjs');
   writeFileSync(childScript, `
 import { runBatch } from ${JSON.stringify(pathToFileURL(join(here, 'run.ts')).href)};
-import { connectController } from ${JSON.stringify(pathToFileURL(join(here, 'controller.ts')).href)};
-import { startRoute } from ${JSON.stringify(pathToFileURL(join(here, 'relay.ts')).href)};
 import { syntheticClientState } from ${JSON.stringify(pathToFileURL(join(here, 'test-state.ts')).href)};
 await fetch('http://127.0.0.1:${target}/positive-control');
 const result = await runBatch({entry:${JSON.stringify(entry)},batchId:'RuntimePrivacy',scenarios:['S0b'],count:1,ceiling:1,
   out:${JSON.stringify(join(root, 'records'))},scratchRoot:${JSON.stringify(root)},...syntheticClientState(${JSON.stringify(root)}),
   proxyEnv:{HTTPS_PROXY:${JSON.stringify(proxyUrl)},NO_PROXY:'localhost'},
   codex:{model:'fake',effort:'low',bin:${JSON.stringify(bin)},sandbox:true,timeoutMs:3000}});
-const transportRefusals = [];
-if (${JSON.stringify(mode)} !== 'off') for (const open of [()=>connectController(${target},'synthetic-controller-probe'),()=>startRoute(${target},'synthetic-session-probe',()=>{})]) {
-  try {const connection=await open();await connection.close();} catch(error){transportRefusals.push(error.message);}
-}
-process.send({...result,transportRefusals});
+process.send(result);
 `);
-  const args = [...(mode.startsWith('argv') ? [mode.split(':')[1] ?? '--use-env-proxy'] : []), childScript];
+  const config = join(root, 'node.config.json');
+  writeFileSync(config, JSON.stringify({nodeOptions:{'use-env-proxy':true}}));
+  const args = [...(mode.startsWith('argv') ? [mode.split(':')[1] ?? '--use-env-proxy'] : []),
+    ...(mode === 'explicit-config' ? ['--experimental-config-file=' + config] : mode === 'default-config' ? ['--experimental-default-config-file'] : []), childScript];
   const env = { ...safeEnv(), HTTP_PROXY: `http://127.0.0.1:${port}`, http_proxy: `http://127.0.0.1:${port}`,
     NO_PROXY: 'localhost', no_proxy: 'localhost', ...(mode === 'env' ? { NODE_USE_ENV_PROXY: '1' } : {}),
     ...(mode.startsWith('options') ? { NODE_OPTIONS: mode.split(':')[1] ?? '--use-env-proxy' } : {}) };
-  const child = spawn(process.execPath, args, { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }); runnerPid = child.pid!;
-  let terminal = ''; let result: (Awaited<ReturnType<typeof import('./run.ts').runBatch>> & { transportRefusals: string[] }) | undefined;
+  const child = spawn(process.execPath, args, { env, cwd: root, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }); runnerPid = child.pid!;
+  let terminal = ''; let result: Awaited<ReturnType<typeof import('./run.ts').runBatch>> | undefined;
   child.stdout!.on('data', d => { terminal += d; }); child.stderr!.on('data', d => { terminal += d; });
   child.on('message', message => { result = message as typeof result; });
   const watchdog = watchdogMs ? setTimeout(() => { watchdogFired = true; for (const pid of descendants) try { process.kill(pid,'SIGKILL'); } catch {} }, watchdogMs) : undefined;
@@ -110,19 +107,25 @@ process.send({...result,transportRefusals});
       new Promise<void>(resolve => proxy.close(() => resolve())), new Promise<void>(resolve => positive.close(() => resolve()))]); rmSync(root, { recursive: true, force: true }); } };
 }
 
-attack.each(['mcp-only', 'dedicated'] as const)('%s refuses Node environment-proxy modes before authenticated traffic', async entry => {
-  for (const mode of ['off', 'env', ...['--use-env-proxy', '--use_env_proxy', '--use-env_proxy', '--use_env-proxy'].flatMap(flag => ['argv:' + flag, 'options:' + flag])]) {
-    const f = await fixture(entry, mode);
-    try {
-      expect(f.code).toBe(0);
-      expect(f.positiveControl > 0).toBe(mode !== 'off');
-      expect(f.credentialsAtProxy).toBe(0);
-      if (mode === 'off') expect(f.result?.outcomes[0]?.completeness).toBe('complete');
-      else { expect(f.result?.refusals).toContain('Node environment proxy mode is unsupported for authenticated local harness traffic'); expect(f.result?.outcomes).toEqual([]); expect(existsSync(join(f.root, 'records'))).toBe(false);
-        expect(f.result?.transportRefusals).toEqual(Array(2).fill('Node environment proxy mode is unsupported for authenticated local harness traffic')); }
-    } finally { await f.close(); }
-  }
-}, 45_000);
+const proxyModes = ['explicit-config', 'default-config', 'off', 'env',
+  ...['--use-env-proxy', '--use_env_proxy', '--use-env_proxy', '--use_env-proxy'].flatMap(flag => ['argv:' + flag, 'options:' + flag])];
+attack.each((['mcp-only', 'dedicated'] as const).flatMap(entry => proxyModes.map(mode => ({entry,mode}))))('$entry keeps credentials direct with Node proxy mode $mode while client traffic uses the Attempt channel', async ({entry,mode}) => {
+  const f = await fixture(entry, mode, `
+const modelProxy = new URL(process.env.HTTPS_PROXY);
+await new Promise((resolve,reject)=>import('node:http').then(({request})=>{
+ const req=request({host:'127.0.0.1',port:modelProxy.port,headers:{'x-native-probe':'yes'}},res=>{res.resume();res.on('end',resolve);});req.on('error',reject);req.end();}));
+`);
+  try {
+    expect(f.code).toBe(0);
+    expect(f.positiveControl > 0).toBe(mode !== 'off');
+    expect(f.credentialsAtProxy).toBe(0);
+    expect(f.result?.refusals).toEqual([]);
+    expect(f.result?.outcomes[0]?.completeness).toBe('complete');
+    expect(f.nativeProxyCalls).toBe(2);
+    const channel = JSON.parse(readFileSync(join(f.root, 'records/S0b-1/raw/proxy-channel.json'), 'utf8'));
+    expect(channel).toEqual({enabled:true,connections:2,blockedConnections:0,closed:true});
+  } finally { await f.close(); }
+}, 30_000);
 
 
 attack.each(['mcp-only', 'dedicated'] as const)('%s sanitizes error events and crash stderr in outcomes, terminal and batch.json', async entry => {

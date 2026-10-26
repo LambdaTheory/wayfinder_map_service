@@ -1,4 +1,4 @@
-import { requireDirectRuntime } from './direct-runtime.ts';
+import { directAgent } from './direct-http.ts';
 // A private route per session attaches its credential and forwards the client's RPC body unchanged.
 // The Controller can interpose before a write without filling arguments or producing agent receipts.
 import { createServer, request } from 'node:http';
@@ -23,7 +23,7 @@ export interface Route {
 }
 
 export async function startRoute(target: number, token: string, observe: (record: RelayObservation) => void, excludedPorts: readonly number[] = []): Promise<Route> {
-  requireDirectRuntime();
+  const agent = directAgent();
   let cut = false;
   const upstream = new Set<ReturnType<typeof request>>();
   const server = createServer(async (req, res) => {
@@ -42,7 +42,7 @@ export async function startRoute(target: number, token: string, observe: (record
         return;
       }
       await route.before?.(rpc);
-      const proxy = request({ hostname: '127.0.0.1', port: target, method: req.method, path: req.url,
+      const proxy = request({ agent, hostname: '127.0.0.1', port: target, method: req.method, path: req.url,
         headers: { ...req.headers, authorization: `Bearer ${token}`, host: `127.0.0.1:${target}` } }, response => {
         const id = response.headers['mcp-session-id'];
         if (typeof id === 'string') route.sessionIds.add(id);
@@ -72,8 +72,8 @@ export async function startRoute(target: number, token: string, observe: (record
   const releasePorts = protectPorts([port, target]);
   const route: Route = { port, sessionIds: new Set(),
     cut: () => { cut = true; },
-    close: async () => { for (const req of upstream) req.destroy(); server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(e => { releasePorts(); if (e) reject(e); else resolve(); })); } };
-  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(route.port, '127.0.0.1', resolve); }).catch(error => { releasePorts(); throw error; });
+    close: async () => { for (const req of upstream) req.destroy(); agent.destroy(); server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(e => { releasePorts(); if (e) reject(e); else resolve(); })); } };
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(route.port, '127.0.0.1', resolve); }).catch(error => { agent.destroy(); releasePorts(); throw error; });
   return route;
 }
 

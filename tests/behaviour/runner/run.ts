@@ -11,7 +11,6 @@ import { attemptSchema, classifyResult, leaks, redact, requiredFields } from '..
 import type { AttemptRecord, Completeness, Entry, EventRecord, Field, GivenRules, SessionRecord } from '../evidence.ts';
 import { startProxyChannel } from './proxy-channel.ts';
 import { clearClientDirectories } from './process-tree.ts';
-import { nodeProxyRefusal, requireDirectRuntime } from './direct-runtime.ts';
 import { ProxyError, proxyEnvironment, proxyRouting, proxySecrets, proxySummary } from '../proxy.ts';
 import { library } from '../library.ts';
 import { fixturesRoot, readiness, validateScenario } from '../scenario.ts';
@@ -53,7 +52,6 @@ export interface AttemptOutcome { attemptId: string; scenario: string; completen
 /** Refusals reported before anything runs: the runner never switches model or Entry or drops a Scenario silently (R2). */
 export function preflight(o: Pick<BatchOptions, 'scenarios' | 'count' | 'ceiling' | 'batchId' | 'entry'>): { plan: PlannedAttempt[]; refusals: string[] } {
   const refusals: string[] = [];
-  const runtimeRefusal = nodeProxyRefusal(); if (runtimeRefusal) refusals.push(runtimeRefusal);
   const entry = o.entry ?? 'mcp-only';
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(o.batchId)) refusals.push('batch id must be a short identifier');
   if (!Number.isInteger(o.count) || o.count < 1) refusals.push('count must be a positive integer');
@@ -185,7 +183,6 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
 
 async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: () => boolean, register: (kill: () => void) => void,
   defer: <T>(action: () => T | Promise<T>) => () => Promise<T>): Promise<AttemptOutcome> {
-  requireDirectRuntime();
   const proxies = proxyRouting(o.proxyEnv ?? {});
   const s = p.scenario;
   const entry = o.entry ?? 'mcp-only';
@@ -635,8 +632,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.error('usage: run.ts --batch <id> --scenarios S0b,F11 --count 2 --ceiling 4 [--entry mcp-only|dedicated] [--model gpt-6-astra] [--effort xhigh]');
     process.exit(2);
   }
-  const runtimeRefusal = nodeProxyRefusal();
-  if (runtimeRefusal) { console.error(`refused: ${runtimeRefusal}`); process.exit(1); }
   let proxyEnv: Record<string, string>;
   try {
     proxyEnv = proxyEnvironment(null, process.env);
