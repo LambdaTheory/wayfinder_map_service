@@ -15,6 +15,7 @@ Nothing here starts a service or a model. Runs that spend model quota happen onl
 | `library.ts`, `scenarios/` | The 26 candidates of spec §3 |
 | `upgrade-checks.ts` | Upgrade compatibility checks, listed apart from the 26 |
 | `seeds/` | Seed Maps; `f11.json` is the redacted capture of a real Map |
+| `capture/`, `captures/` | Read-only problem capture tool, synthetic verification and admitted/paused capture traces (B04) |
 | `fixtures/` | Working-directory fixtures copied into the agent's directory |
 | `runner/` | The runner: isolated service, Controller, Codex Driver, normalizer (B02a) |
 | `verdict.ts`, `report.ts` | Verdicts of Attempts and cells, and the comparison report (B03a) |
@@ -44,7 +45,7 @@ Script checks answer `holds`, `violated` or `unknown`. Missing records (the `mis
 1. Write it in the matching file under `scenarios/` and add it to `library.ts`; a new real problem also gets its ID in `candidateIds`.
 2. Write must-not items as the wrong action itself and expectations as the right action, each with the evidence that proves it.
 3. Run `node tests/behaviour/cli.ts validate` and `npm test`.
-4. A real problem starts from the Revision before the incident and the human's own words (R6); record the conversion in `seed.derivedFrom` and redact private paths and credentials.
+4. A real problem starts from the Revision before the incident and the human's own words (R6). Follow the [capture maintainer guide](../../docs/implementation/behaviour-capture.md) to generate and review the seed, conversion/redaction record and Scenario skeleton. Two non-reproductions retain the Scenario; missing words or an unresolved verdict retain a paused intake draft without invented text.
 
 ## Running a Batch
 

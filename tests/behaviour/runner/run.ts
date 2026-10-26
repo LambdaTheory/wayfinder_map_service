@@ -14,7 +14,7 @@ import { fixturesRoot, readiness, validateScenario } from '../scenario.ts';
 import type { Scenario } from '../scenario.ts';
 import { clientSkills, findRollout, loginSecrets, looksRateLimited, prepareSession, prepareWorkdir, runTurn, writeProfile } from './codex.ts';
 import type { CodexOptions, CodexSession } from './codex.ts';
-import { connectController } from './controller.ts';
+import { connectController, historyCredentials } from './controller.ts';
 import { initialRules, normalizeTurn, parseLines, readRollout, receiptsFrom } from './normalize.ts';
 import type { RolloutFacts } from './normalize.ts';
 import { checkoutRoot, everydayPort, newToken, startService } from './service.ts';
@@ -49,7 +49,6 @@ export function preflight(o: Pick<BatchOptions, 'scenarios' | 'count' | 'ceiling
     if (s.controller.length) refusals.push(`${id}: Controller actions (${s.controller.map(a => a.action).join(', ')}) are not supported by this runner yet (B02b)`);
     if (s.turns.some(t => t.concurrent || t.freshProcess)) refusals.push(`${id}: concurrent or fresh-process sessions are not supported by this runner yet (B02b)`);
     if (new Set(s.turns.map(t => t.session)).size > 1) refusals.push(`${id}: several sessions are not supported by this runner yet (B02b)`);
-    if (s.seed.restores === 'history') refusals.push(`${id}: history seeds are not supported by this runner yet (B04)`);
     for (let k = 1; k <= o.count; k++) plan.push({ attemptId: `${id}-${k}`, scenario: s });
   }
   return { plan, refusals };
@@ -121,10 +120,12 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   const opened = new Set<string>();
   let skills: string[] = [];
   try {
-    service = await startService(join(dir, 'service'), controller, sessions.map(x => x.credential));
+    const historical = historyCredentials(s.seed.maps);
+    for (const [label, credential] of Object.entries(historical)) secrets[`history-token-${label}`] = credential.token;
+    service = await startService(join(dir, 'service'), controller, [...sessions.map(x => x.credential), ...Object.values(historical)]);
     openDatabases(service.pid).forEach(d => opened.add(d));
-    ctl = await connectController(service.port, controller.token);
-    for (const map of s.seed.maps) seedHeads[map.mapId] = await ctl.seed(map);
+    ctl = await connectController(service.port, controller.token, Object.fromEntries(Object.entries(historical).map(([label, c]) => [label, c.token])));
+    for (const map of s.seed.maps) seedHeads[map.mapId] = await ctl.seed(map, revision => { seedHeads[map.mapId] = revision; });
     const workdir = prepareWorkdir(scratch, s.seed.fixtures, fixturesRoot);
     const profile = writeProfile(scratch, o.codex.bin);
     let seq = 0;
