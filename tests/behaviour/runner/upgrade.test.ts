@@ -89,6 +89,25 @@ describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrad
   test('legacy structured Resource completion remains supported', async () => {
     expect(reviewedVerdict((await run('structured-resource', 'U-codex-process', 'fake-upgrade-structured-resource')).record).outcome).toBe('pass');
   }, 60_000);
+  test.each(['U-codex-process', 'U-codex-resume'])('a known failed Resource read cannot excuse a retry in %s', async mode => {
+    const { record: a } = await run(`failed-resource-${mode}`, mode, 'fake-upgrade-failed-resource');
+    expect(a.run.completeness).toBe('complete');
+    expect(a.missing).toEqual([]);
+    expect(a.events.find(e => e.kind === 'tool-call' && e.tool === 'read_mcp_resource'))
+      .toMatchObject({ failed: true, result: { known: false, reason: 'the call failed' } });
+    expect(a.events.find(e => e.kind === 'resource-read')).toMatchObject({ ok: false });
+    expect(scripts(a)).toMatchObject({ 'invalid-recovery': 'violated',
+      [mode === 'U-codex-process' ? 'reads-new-rules' : 'resume-refusal-recovery']: 'violated',
+      'guessed-version': mode === 'U-codex-process' ? 'violated' : 'holds' });
+    if (mode === 'U-codex-process') expect(scripts(a)['writes-new-version']).toBe('violated');
+    expect(reviewedVerdict(a).outcome).toBe('fail');
+    a.run.completeness = 'timeout';
+    const failed = reviewedVerdict(a);
+    expect(failed.outcome).toBe('fail');
+    const passed = reviewedVerdict((await run(`failed-resource-control-${mode}`, mode, 'fake-upgrade-text-resource')).record);
+    expect(passed.outcome).toBe('pass');
+    expect(judgeCell(subject(mode), [failed, passed, passed], 2).outcome).toBe('flaky');
+  }, 60_000);
   test.each(['U-codex-process', 'U-codex-resume'])('a lost native Resource result leaves recovery unknown in %s', async mode => {
     const { record: a, outcome } = await run(`lost-resource-${mode}`, mode, 'fake-upgrade-lost-resource');
     expect(outcome.completeness).toBe('complete');

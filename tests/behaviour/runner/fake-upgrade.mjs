@@ -61,8 +61,12 @@ async function call(name, arguments_, resource = false, nativeComplete = true) {
   const nativeResult = resource && model !== 'fake-upgrade-structured-resource'
     ? { content: [{ type: 'text', text: resourceText }], structured_content: null }
     : { content: [], structured_content: content };
-  if (nativeComplete) emit({ type: 'item.completed', item: { ...base, result: nativeResult, error: null, status: 'completed' } });
-  if (resource) record({ type: 'response_item', payload: { type: 'function_call_output', call_id: base.id, output: resourceText } });
+  // A negative fixture: the native helper fails to deliver the Resource, yet the fake still retries.
+  const resourceFailed = resource && model === 'fake-upgrade-failed-resource';
+  if (nativeComplete) emit({ type: 'item.completed', item: { ...base, result: resourceFailed ? null : nativeResult,
+    error: resourceFailed ? { message: 'Synthetic Resource delivery failure' } : null, status: resourceFailed ? 'failed' : 'completed' } });
+  if (resource) record({ type: 'response_item', payload: { type: 'function_call_output', call_id: base.id,
+    output: resourceFailed ? 'Synthetic Resource delivery failure' : resourceText } });
   return content;
 }
 if (model.startsWith('fake-upgrade-no-trigger')) {
@@ -79,7 +83,7 @@ if (!resume) {
 }
 let head = await call('map_read', { mapId: 'Upgrade.Probe' });
 let learned = init.instructions;
-if (resume && (requestedModel.startsWith('fake-upgrade-text-') || ['fake-upgrade-lost-resource', 'fake-upgrade-stale-lost-resource'].includes(model))) version = oldVersion;
+if (resume && (requestedModel.startsWith('fake-upgrade-text-') || ['fake-upgrade-lost-resource', 'fake-upgrade-stale-lost-resource', 'fake-upgrade-failed-resource'].includes(model))) version = oldVersion;
 const write = (expectedRevision = head.revision.revision) => call('map_apply', { version, mapId: 'Upgrade.Probe', expectedRevision,
   commands: [{ kind: 'ticket.create', ticket: { id: model.includes('wrong-ticket') ? 'Probe.Uno' : 'Probe.One', title: `${learned.includes('LANTERN') ? 'v2: ' : ''}Probe`, question: 'Does the client pick up new rules after an upgrade?', type: 'research' } },
     ...(model.includes('two-tickets') ? [{ kind: 'ticket.create', ticket: { id: 'Probe.Two', title: 'v2: Extra', question: 'Extra?', type: 'research' } }] : [])] });

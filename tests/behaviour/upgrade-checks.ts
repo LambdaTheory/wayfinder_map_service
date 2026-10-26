@@ -28,7 +28,8 @@ const versionOf = (g: GivenRules) => g.rulesSource.kind === 'instructions' || g.
 const phaseOf = (a: AttemptRecord, e: Call) => a.given.findLast(g => g.fromSeq <= e.seq);
 const strictRecovery = (a: AttemptRecord) => codexLifecycle(a.subject.id) !== undefined && a.subject.version >= 3;
 // An unfinished call is flushed at turn end. Its seq cannot show whether it preceded a retry in that same turn.
-const unresolvedRules = (a: AttemptRecord, e: Call) => workflowResourceCalls(a, !strictRecovery(a)).filter(r => r.session === e.session && r.turn === e.turn && callResultMissing(a, r));
+// A known failed call supplied no rules: its absent result cannot excuse a later retry.
+const unresolvedRules = (a: AttemptRecord, e: Call) => workflowResourceCalls(a, !strictRecovery(a)).filter(r => !r.failed && r.session === e.session && r.turn === e.turn && callResultMissing(a, r));
 /** Positive claims about rules need the actual client source, not just a matching write or a Controller version. */
 const visibleSource = (a: AttemptRecord, g: GivenRules | undefined) => g !== undefined && !!versionOf(g)
   && (g.rulesSource.kind === 'resource' ? g.resourceText?.known === true && !resourceResultMissing(a, g.fromSeq)
@@ -184,9 +185,9 @@ const noGuessedVersion: ScriptCheck = a => {
   const writes = writeCalls(a).filter(e => argsOf(e).version !== undefined);
   const stated = (e: Call) => a.given.some(g => g.fromSeq <= e.seq && visibleSource(a, g) && versionOf(g) === String(argsOf(e).version));
   const release = afterRestart(a, 'possible Resource version');
-  // A lost read can explain the service's current version, not an arbitrary value such as 7.7.7.
+  // A lost read can explain the service's current version only after restart, not an arbitrary value such as 7.7.7.
   // Without the service-version evidence the possible read still cannot prove a guess.
-  const possiblyRead = (e: Call) => unresolvedRules(a, e).length > 0 && ('gap' in release || argsOf(e).version === release.current);
+  const possiblyRead = (e: Call) => unresolvedRules(a, e).length > 0 && ('gap' in release || (release.writes.includes(e) && argsOf(e).version === release.current));
   // A write without any version is an input error, judged by the common checks, not a guess.
   const guessed = writes.filter(e => visibleSource(a, phaseOf(a, e)) && !stated(e) && !possiblyRead(e));
   if (guessed.length) return violated('a write with a version its visible rules source did not state', guessed.map(e => at(a, e)));

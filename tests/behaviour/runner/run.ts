@@ -336,6 +336,7 @@ async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: ()
           upgrade.restart = { seq: events.length, ...pids, port: service.port };
           controllerEvent('owned-service-restarted', upgrade.restart, index);
           ctl = await connectController(service.port, controller.token, {}, emit);
+          ctl.close = defer(ctl.close);
           const observed = { version: ctl.version, instructions: ctl.instructions, toolDescriptions: ctl.toolDescriptions };
           const expected = { version: upgrade.contracts.after.version, instructions: upgrade.contracts.after.instructions, toolDescriptions: upgrade.contracts.after.toolDescriptions };
           const matches = isDeepStrictEqual(observed, expected);
@@ -699,7 +700,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const selection = { entry, batchId: values.batch, scenarios: values.scenarios?.split(',') ?? [], upgradeChecks: values['upgrade-checks']?.split(',') ?? [], count: Number(values.count), ceiling: Number(values.ceiling) };
   const early = preflight(selection);
   if (early.refusals.length || (selection.upgradeChecks.length && values['no-sandbox'])) {
-    console.error(early.refusals.join('\n') || 'upgrade checks require the shared sandbox'); process.exit(1);
+    console.error(early.refusals.map(r => `refused: ${r}`).join('\n') || 'refused: upgrade checks require the shared sandbox'); process.exit(1);
   }
   const result = await runBatch({ ...selection,
     out: values.out ?? join(homedir(), 'Library/Application Support/Wayfinder/behaviour-runs', values.batch), scratchRoot: '/private/tmp',
