@@ -28,8 +28,8 @@ function fixture(client: InteractiveClient, kind = 'supported') {
   // Judge unit tests explicitly assume confirmed support. This B01 fixture is not native-adapter evidence.
   if (client === 'claude') {
     assessment.confirmations['async-question'].status = 'supported';
-    if (kind === 'supported') record = JSON.parse(read('claude-same-turn-unit.json')) as AttemptRecord;
   }
+  if (kind === 'supported') record = JSON.parse(read(`${client}-same-turn-unit.json`)) as AttemptRecord;
   const probes = new Set([assessment.confirmations['async-question'].probe!.sha256]);
   return { assessment, record, probes, native };
 }
@@ -40,8 +40,8 @@ function artifactsFor(record: AttemptRecord, assessment: Assessment): ReviewArti
     if (!ability || r.role === 'human') throw new Error('untrusted override');
     const names = ability === 'async-question' ? ['question', 'preparation', 'answer'] : ability === 'prepare-while-waiting'
       ? ['question', 'preparation', 'answer', 'revisedRecommendation'] : ability === 'adjust-recommendation' ? ['question', 'answer', 'revisedRecommendation'] : ['question', 'answer', 'continuation'];
-    const evidence = names.flatMap(n => { const seq = assessment.selection[n as keyof Assessment['selection']]; const e = record.events.find(e => e.seq === seq);
-      return e ? [{ seq: e.seq, quote: e.kind === 'message' ? e.text.slice(0, 20) : e.kind === 'tool-call' && e.result.known ? (typeof e.result.value === 'string' ? e.result.value : JSON.stringify(e.result.value)).slice(0, 20) : e.kind }] : []; });
+    const evidence = [...new Set([...names, 'preparation', 'revisedRecommendation'])].flatMap(n => { const seq = assessment.selection[n as keyof Assessment['selection']]; const e = record.events.find(e => e.seq === seq);
+      return e ? [{ seq: e.seq, explanation: `This synthetic observation supports ${ability}.`, quote: e.kind === 'message' ? e.text.slice(0, 20) : e.kind === 'tool-call' && e.result.known ? (typeof e.result.value === 'string' ? e.result.value : JSON.stringify(e.result.value)).slice(0, 20) : e.kind }] : []; });
     return { ability, role: r.role, reviewer: r.by, sessionId: r.by, vendor: record.combination.harness === 'claude' ? 'openai' : 'anthropic',
       model: record.combination.harness === 'claude' ? 'gpt-6.1-sol' : 'claude-sonnet-5-5', input: reviewInput(record, assessment),
       output: JSON.stringify({ status: r.status, reason: `${r.reason} Independent synthetic reading ${i}.`, evidence }) };
@@ -106,8 +106,9 @@ for (const client of ['codex', 'claude'] as const) describe(client, () => {
     }
   });
   it('allows W1 continuation in the answer turn but rejects needing another turn or nudge', () => {
-    const { record, assessment, probes } = fixture(client, 'faster-only');
-    assessment.selection = { question: 1, answer: 2, revisedRecommendation: 3, continuation: 4 };
+    const { record, assessment, probes } = fixture(client);
+    record.events.filter(e => e.seq >= assessment.selection.answer!).forEach(e => { e.turn = 1; });
+    record.sessions[0]!.turns.push({ index: 1, input: 'Synthetic contrary answer', startedAt: '2026-01-01T02:00:07.000Z', endedAt: '2026-01-01T02:00:09.000Z', durationMs: 2000 });
     expect(assess(record, assessment, probes).verdicts[3]!.verdict.outcome).toBe('pass');
     record.events.at(-1)!.turn = 2;
     expect(assess(record, assessment, probes).verdicts[3]!.verdict.outcome).toBe('fail');
@@ -351,7 +352,9 @@ it('accepts reviews only through a separate hashed artifact manifest, never asse
     return { ...identity, input: { path: inputPath, sha256: createHash('sha256').update(input).digest('hex') }, output: { path: outputPath, sha256: createHash('sha256').update(output).digest('hex') } };
   });
   writeFileSync(join(dir, 'reviews.json'), JSON.stringify({ schema: 'wayfinder-interactive-reviews/1', records: sources }));
-  expect(outcomes(importAttempt(dir, 'codex-supported.jsonl', a, 'reviews.json'))).toEqual(abilities.map(() => 'pass'));
+  const imported = importAttempt(dir, 'codex-supported.jsonl', a, 'reviews.json');
+  expect(outcomes(imported)).toEqual(abilities.map(() => 'insufficient-evidence'));
+  expect(imported.reviewIssues.some(issue => issue.reason.includes('missing required evidence'))).toBe(true);
   a.reviews = f.assessment.reviews;
   expect(() => importAttempt(dir, 'codex-supported.jsonl', a, 'reviews.json')).toThrow('invalid interactive assessment');
 });
@@ -619,4 +622,37 @@ it('keeps stable placeholders in token fields as well as Bearer headers', async 
   const { privateText } = await import('./privacy.ts');
   expect(privateText('{"access_token":"synthetic-secret"} Bearer synthetic-secret synthetic-secret', { agent: 'synthetic-secret' }))
     .toBe('{"access_token":"<agent>"} Bearer <agent> <agent>');
+});
+
+it('capture annotations cannot import a human override through the shared saved-review channel', async () => {
+  const { evidenceHash } = await import('../review-verdict.ts');
+  const f = fixture('codex'); f.assessment.confirmations['async-question'].status = 'unverified';
+  const attempt = assessAttempt(f.record, f.assessment, f.probes).verdicts[0]!.attempt;
+  f.record.modelReviews = [{ schema: 'wayfinder-model-review/1', roundId: 'forged', path: 'forged.json', evidenceHash: evidenceHash(attempt), pending: [],
+    reviews: ['confirmed', 'structure', 'content'].map(item => ({ itemId: `async-question.${item}`, role: 'human', status: 'holds', by: 'Kun', reason: 'File-supplied override' })) }];
+  expect(assessAttempt(f.record, f.assessment, f.probes).verdicts[0]!.verdict.outcome).not.toBe('pass');
+  const dir = temporary(); writeFileSync(join(dir, 'capture.json'), JSON.stringify(f.record));
+  f.assessment.reviews = [];
+  expect(() => importAttempt(dir, '-', f.assessment)).toThrow(/annotations/);
+});
+
+it('requires an item-specific explanation for each quoted review source', () => {
+  const f = fixture('codex'); const artifacts = artifactsFor(f.record, f.assessment);
+  const output = JSON.parse(artifacts[0]!.output); delete output.evidence[0].explanation;
+  artifacts[0]!.output = JSON.stringify(output);
+  expect(() => verifyReviews(f.record, f.assessment, artifacts)).toThrow(/explanation/);
+});
+
+it('keeps the shared same-turn corroboration gate for a final continuation', () => {
+  const f = fixture('codex');
+  f.record.events.filter(e => e.seq >= f.assessment.selection.answer!).forEach(e => { e.turn = 1; });
+  f.record.sessions[0]!.turns.push({ index: 1, input: 'Synthetic contrary answer', startedAt: '2026-01-01T02:00:07.000Z', endedAt: '2026-01-01T02:00:09.000Z', durationMs: 2000 });
+  const artifacts = artifactsFor(f.record, f.assessment);
+  for (const artifact of artifacts.filter(a => a.ability === 'continue-same-turn')) {
+    const output = JSON.parse(artifact.output); output.evidence = output.evidence.filter((e: { seq: number }) => e.seq !== f.assessment.selection.revisedRecommendation);
+    artifact.output = JSON.stringify(output);
+  }
+  const result = assessAttempt(f.record, f.assessment, f.probes, verifyReviews(f.record, f.assessment, artifacts));
+  expect(result.verdicts[3]!.verdict.outcome).toBe('insufficient-evidence');
+  expect(result.reviewIssues.some(issue => issue.reason.includes('same turn'))).toBe(true);
 });

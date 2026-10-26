@@ -3,7 +3,7 @@
 Every dialogue, identity, version and review here is invented. These files are not captures of Codex or Claude Code, and do not prove that either actual CLI exposes asynchronous questions.
 
 - `*-supported.jsonl`: native-shaped messages, completed preparation and a changed recommendation. The Claude file explicitly ends the first turn before the answer; it cannot prove asynchronous delivery, and its assessment leaves that capability unverified.
-- `claude-same-turn-unit.json`: an explicitly constructed B01 record for positive same-turn verdict unit tests only, not a native capture or evidence that the Claude adapter can establish mid-turn delivery.
+- `*-same-turn-unit.json`: explicitly constructed complete B01 records (including synthetic GivenRules and trace metadata) for positive verdict unit tests only, not native captures or evidence that the adapters collect those fields. They never fill gaps in imported native records; the Claude adapter still cannot establish mid-turn delivery from plain transcript rows.
 - `*-probe.jsonl`: a distinct earlier synthetic diagnostic for the confirmation/hash checks.
 - `*-faster-only.jsonl`: the question ended its turn; a short later turn cannot prove asynchronous asking or preparation. It can still contain adjustment/continuation evidence, which needs its own semantic review.
 - `*-delegation-only.jsonl`: a spawn/background launch with no completed useful research.

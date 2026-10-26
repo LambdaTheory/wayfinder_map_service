@@ -166,23 +166,27 @@ export function interactiveScenario(ability: Ability, assessment: Assessment, pr
 }
 
 export function assess(record: AttemptRecord, assessment: Assessment, verifiedProbes: Set<string>, reviews?: VerifiedReviews) {
+  // This importer has one validated review-artifact path. Generic saved annotations cannot smuggle human overrides.
+  const { modelReviews: _untrustedAnnotations, ...capturedEvidence } = record;
+  const readings = verifiedReadings(record, assessment, reviews);
   const verdicts = abilities.map(ability => {
     const scenario = interactiveScenario(ability, assessment, verifiedProbes);
-    const attempt = { ...record, subject: { kind: 'scenario' as const, id: scenario.id, version: assessment.verdictVersion } };
-    const verdict = judgeAttempt(scenario, attempt, { reviews: verifiedReadings(record, assessment, reviews), supports: { 'async-questions': false } });
+    const attempt = { ...capturedEvidence, subject: { kind: 'scenario' as const, id: scenario.id, version: assessment.verdictVersion } };
+    const verdict = judgeAttempt(scenario, attempt, { reviews: readings, supports: { 'async-questions': false } });
     const c = assessment.confirmations[ability];
     verdict.gaps = c?.status === 'unsupported' && verdict.outcome === 'not-applicable'
       ? [`${ability}: ${c.reason}; coverage absent on ${c.surface} ${c.clientVersion}; unsupported is an operator declaration, not a passed capability probe.`] : [];
     for (const group of verdict.expect) {
       if (group.status === 'not-applicable' && verdict.outcome === 'not-applicable') group.gap = `${ability}: ${c?.reason ?? 'support unconfirmed'}`;
       else delete group.gap;
-      for (const item of group.items) if (item.id.endsWith('.content')) item.evidence = selectedNames(ability).flatMap(name => {
+      for (const item of group.items) if (item.id.endsWith('.content')) item.evidence = [...new Set([...item.evidence, ...selectedNames(ability).flatMap(name => {
         const index = record.events.findIndex(e => e.seq === assessment.selection[name]); return index < 0 ? [] : [`events[${index}]`];
-      });
+      })])];
     }
     return { ability, attempt, verdict };
   });
   return { schema: 'wayfinder-interactive-result/1', scenario: assessment.scenario, verdicts,
+    reviewIssues: readings.flatMap(r => r.rejected ? [{ itemId: r.itemId, reason: r.rejected }] : []),
     observations: record.sessions.flatMap(s => s.turns.map(t => ({ session: s.label, turn: t.index, durationMs: t.durationMs }))),
     note: 'Durations are observations only. These capability verdicts do not replace the complete W1/W7 or human journey verdicts.' };
 }

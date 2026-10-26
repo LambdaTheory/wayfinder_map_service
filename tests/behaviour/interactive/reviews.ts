@@ -2,20 +2,20 @@
 import { createHash } from 'node:crypto';
 import type { AttemptRecord } from '../evidence.ts';
 import type { Review } from '../verdict.ts';
+import { reviewProblem } from '../review-verdict.ts';
 import { abilities, criteria, selectedNames } from './acceptance.ts';
 import type { Ability, Assessment } from './acceptance.ts';
 
 export const digest = (text: string) => createHash('sha256').update(text).digest('hex');
 /** One input bundle covers all four items, so two independent model invocations suffice per Attempt. */
 export function reviewInput(record: AttemptRecord, assessment: Assessment): string {
-  return JSON.stringify({ attemptId: record.attemptId, batchId: record.batchId, subject: record.subject,
-    combination: record.combination, client: record.client, run: record.run, verdictVersion: assessment.verdictVersion,
-    criteria, selection: assessment.selection, missing: record.missing, events: record.events }, null, 2);
+  const { modelReviews: _untrustedAnnotations, ...attempt } = record;
+  return JSON.stringify({ attempt, verdictVersion: assessment.verdictVersion, criteria, selection: assessment.selection }, null, 2);
 }
 export interface ReviewOutput {
   status: 'holds' | 'violated' | 'undecided';
   reason: string;
-  evidence: { seq: number; quote: string }[];
+  evidence: { seq: number; quote: string; explanation: string }[];
 }
 export interface ReviewArtifact {
   ability: Ability;
@@ -60,7 +60,8 @@ export function verifyReviews(record: AttemptRecord, assessment: Assessment, art
       for (const citation of output.evidence) {
         const event = record.events.find(e => e.seq === citation.seq);
         const content = event?.kind === 'message' ? event.text : event?.kind === 'tool-call' ? `${JSON.stringify(event.arguments)} ${event.result.known ? typeof event.result.value === 'string' ? event.result.value : JSON.stringify(event.result.value) : ''}` : '';
-        if (!required.includes(citation.seq) || !event || !citation.quote?.trim() || !content.includes(citation.quote)) throw new Error('review quote is unrelated to selected native evidence');
+        // All selected events remain required. Additional quoted events can supply B03's same-turn corroboration.
+        if (!event || event.actor === 'controller' || !citation.quote?.trim() || !citation.explanation?.trim() || !content.includes(citation.quote)) throw new Error('review quote lacks an explanation or is unrelated to native evidence');
       }
       const canonical = JSON.stringify({ status: output.status, reason: equivalentText(output.reason),
         evidence: [...output.evidence].map(e => ({ seq: e.seq, quote: equivalentText(e.quote) })).sort((a, b) => a.seq - b.seq) });
@@ -69,8 +70,14 @@ export function verifyReviews(record: AttemptRecord, assessment: Assessment, art
       if (artifact.role === 'arbitration' && (reviewOutputs.length !== 2 || JSON.stringify(artifact.basis) !== JSON.stringify(reviewOutputs))) throw new Error('arbitration needs both independent review outputs');
       if (artifact.role === 'arbitration' && reviewStatuses[0] !== 'undecided' && reviewStatuses[0] === reviewStatuses[1]) throw new Error('agreeing settled reviews cannot be arbitrated; only disagreement or undecided readings qualify');
       if (artifact.role === 'review') { reviewOutputs.push(artifact.output); reviewStatuses.push(output.status); }
-      readings.push({ itemId: `${ability}.content`, role: artifact.role, by: `${artifact.vendor}/${artifact.model}/${artifact.reviewer}/${artifact.sessionId}`,
-        status: output.status, reason: output.reason });
+      const support = output.evidence.map(citation => ({ location: `events[${record.events.findIndex(e => e.seq === citation.seq)}]`,
+        quote: citation.quote, explanation: citation.explanation }));
+      const reading: Review = { itemId: `${ability}.content`, role: artifact.role, by: `${artifact.vendor}/${artifact.model}/${artifact.reviewer}/${artifact.sessionId}`,
+        readingId: artifact.sessionId, roundId: binding(record, assessment), evidence: support.map(s => s.location), support,
+        ...(artifact.role === 'arbitration' ? { basedOn: group.filter(a => a.role === 'review').map(a => a.sessionId) } : {}),
+        status: output.status, reason: output.reason };
+      const problem = reviewProblem(reading, record);
+      readings.push(problem ? { ...reading, rejected: problem } : reading);
     }
   }
   const handle: VerifiedReviews = Object.freeze({ verified: true });

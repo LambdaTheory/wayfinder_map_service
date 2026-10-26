@@ -26,6 +26,7 @@ export function importAttempt(root: string, nativeFile: string, assessment: Asse
     || !Number.isInteger(assessment.verdictVersion) || assessment.verdictVersion < 1
     || !assessment.selection || !Array.isArray(assessment.reviews) || assessment.reviews.length !== 0 || !abilities.every(a => assessment.confirmations?.[a])) throw new Error('invalid interactive assessment');
   const capture = JSON.parse(readFileSync(localFile(root, 'capture.json'), 'utf8')) as AttemptRecord & { requestedEffort?: string };
+  if (capture.modelReviews?.length) throw new Error('capture review annotations are not accepted; use the separately verified interactive review manifest');
   if (capture.schema !== attemptSchema || !['codex', 'claude'].includes(capture.combination.harness) || capture.entry !== 'mcp-only'
     || !capture.batchId || capture.sessions.length !== 1) throw new Error('expected one isolated MCP-only Codex or Claude interactive capture');
   if (capture.subject.id !== assessment.scenario) throw new Error('capture and assessment Scenario differ');
