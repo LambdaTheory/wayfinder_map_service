@@ -18,6 +18,8 @@ export type CheckStatus = 'holds' | 'violated' | 'unknown';
 export interface CheckResult {
   status: CheckStatus;
   reason: string;
+  /** A negative result based only on an expected outcome not yet occurring; needs a complete, exercised run. */
+  absenceOnly?: true;
   /** Evidence locations, e.g. `events[12]`, `maps.feishu-access-20261022.history[3]`, `receipts[0]`. */
   evidence: string[];
   /** Who decides when a script cannot: the reviewer chain of R4, or the human directly. */

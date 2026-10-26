@@ -134,7 +134,13 @@ for (const client of ['codex', 'claude'] as const) describe(client, () => {
     writeFileSync(join(dir, 'capture.json'), read(`${client}-capture.json`));
     const assessment = JSON.parse(read(`${client}-assessment.json`)) as Assessment;
     const imported = importAttempt(dir, `${client}-supported.jsonl`, assessment);
-    expect(outcomes(imported)).toEqual(abilities.map(() => 'insufficient-evidence'));
+    // Claude's retained native trace already proves the turn ended before the answer. An unverified
+    // capability precondition must not erase that observed expectation violation.
+    expect(outcomes(imported)).toEqual(abilities.map(ability => client === 'claude' && ability === 'async-question' ? 'fail' : 'insufficient-evidence'));
+    if (client === 'claude') {
+      expect(imported.verdicts[0]!.verdict.required[0]!.status).toBe('unknown');
+      expect(imported.verdicts[0]!.verdict.expect[0]!.status).toBe('violated');
+    }
     main([dir, `${client}-supported.jsonl`, `${client}-assessment.json`, join(dir, 'judged')]);
     const record = JSON.parse(readFileSync(join(dir, 'judged/async-question.attempt.json'), 'utf8')) as AttemptRecord;
     expect(record.subject.id).toBe('B09Async'); expect(record.events).toHaveLength(6);

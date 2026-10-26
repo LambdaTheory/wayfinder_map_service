@@ -2,7 +2,7 @@
 // fails a Scenario on its own.
 import { inputErrorPath } from './evidence.ts';
 import type { AttemptRecord } from './evidence.ts';
-import { agentRevisions, at, holds, need, resultIs, unknown, violated, writeCalls } from './checks.ts';
+import { agentRevisions, at, holds, need, notObserved, resultIs, unknown, violated, writeCalls } from './checks.ts';
 import type { CommonCheck, Item, ScriptCheck } from './scenario.ts';
 
 /** Locators of Revisions where the agent wrote a question or the Notes, for the reviewer to read. */
@@ -29,7 +29,7 @@ function shapeCheck(what: string, path: RegExp): ScriptCheck {
     const rejected = writes.filter(e => path.test(JSON.stringify(inputErrorPath(e.result.known ? e.result.value : null) ?? '')));
     if (!rejected.length) return holds(`no input error on ${what}`);
     const unrecovered = rejected.filter(e => !writes.some(x => x.seq > e.seq && x.session === e.session && x.turn === e.turn && resultIs(x, 'committed')));
-    return unrecovered.length ? violated(`an input error on ${what} never led to a committed write`, unrecovered.map(e => at(a, e)))
+    return unrecovered.length ? notObserved(`an input error on ${what} never led to a committed write`, unrecovered.map(e => at(a, e)))
       : unknown(`input error on ${what}, then a commit; a reviewer checks the correction followed the contract`, rejected.map(e => at(a, e)), 'model');
   };
 }
@@ -48,16 +48,14 @@ export const common: Record<CommonCheck, Item & { quality?: boolean }> = {
     id: 'attributable-evidence', judge: 'script',
     text: 'Settles a Ticket without evidence a reader can attribute to its source.',
     check: a => {
-      const gap = need(a, 'Settlement evidence', 'maps');
-      if (gap) return gap;
       const settled = agentRevisions(a).flatMap(r => r.rev.changes.filter(c => c.command === 'ticket.settle')
         .map(c => ({ r, t: r.rev.state.tickets.find(t => t.id === c.subjectId) })));
-      if (!settled.length) return holds('no Settlement written');
+      if (!settled.length) return need(a, 'Settlement evidence', 'maps') ?? holds('no Settlement written');
       const bare = settled.filter(({ t }) => !t?.settlement?.evidence.length
         || (t.type === 'research' && !t.settlement.references.length && !t.settlement.provenance.sources.length
           && !t.settlement.evidence.some(e => e.references.length)));
       return bare.length ? violated('Settlement without attributable evidence', bare.map(x => x.r.locator))
-        : unknown('evidence present; a reviewer judges whether it is attributable', settled.map(x => x.r.locator), 'model');
+        : need(a, 'Settlement evidence', 'maps') ?? unknown('evidence present; a reviewer judges whether it is attributable', settled.map(x => x.r.locator), 'model');
     },
   },
   'no-partial-probe': {
@@ -86,16 +84,15 @@ export const common: Record<CommonCheck, Item & { quality?: boolean }> = {
     id: 'input-error-correction', judge: 'script',
     text: 'After an input error, resends the same arguments or keeps trying instead of correcting the named field once.',
     check: a => {
-      const gap = need(a, 'input-error corrections', 'events.tool-call');
-      if (gap) return gap;
       const writes = writeCalls(a);
       const errors = writes.filter(e => resultIs(e, 'input-error'));
-      if (!errors.length) return holds('no input error');
+      if (!errors.length) return need(a, 'input-error corrections', 'events.tool-call') ?? holds('no input error');
       for (const e of errors) {
         const next = writes.find(x => x.seq > e.seq && x.session === e.session && x.tool === e.tool);
         if (next && JSON.stringify(next.arguments) === JSON.stringify(e.arguments)) return violated('resent identical arguments after an input error', [at(a, e), at(a, next)]);
       }
-      return unknown('input errors occurred; a reviewer checks each correction followed the named field', errors.map(e => at(a, e)), 'model');
+      return need(a, 'input-error corrections', 'events.tool-call')
+        ?? unknown('input errors occurred; a reviewer checks each correction followed the named field', errors.map(e => at(a, e)), 'model');
     },
   },
   'status-narration': {

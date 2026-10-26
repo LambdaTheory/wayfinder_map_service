@@ -1,6 +1,6 @@
-// Strict Codex upgrade assertions (definition v4). Older Attempts are not re-judged.
+// Strict Codex upgrade assertions (definition v5). Older Attempts are not re-judged.
 import { isDeepStrictEqual } from 'node:util';
-import { holds, unknown, violated, writeCalls, resultIs, at } from './checks.ts';
+import { holds, unknown, violated, notObserved, writeCalls, resultIs, at } from './checks.ts';
 import type { ScriptCheck } from './scenario.ts';
 import { replyRule, replyWord, ticketTitlePrefix } from '../helpers/canary-release.mjs';
 import { classifyResult } from './evidence.ts';
@@ -14,8 +14,10 @@ const object = (v: unknown): Record<string, unknown> => v !== null && typeof v =
 export const completeUpgradeEvidence: ScriptCheck = a => {
   if (a.missing.length) return unknown(`upgrade evidence explicitly missing: ${a.missing.join(', ')}`, a.missing);
   if (!a.given.some(g => g.phase === 'initial') || !a.given.some(g => g.phase === 'after-restart')) return unknown('both upgrade phases are required');
-  const names = ['map_create', 'map_list', 'map_read', 'map_apply'];
+  if (!a.upgrade) return unknown('upgrade build contracts missing');
   for (const [i, g] of a.given.entries()) {
+    const names = Object.keys(a.upgrade.contracts[g.phase === 'initial' ? 'before' : 'after'].toolDescriptions);
+    if (!names.length) return unknown('upgrade contract has no tool definitions');
     if (!g.instructions.known || !g.instructions.value.trim() || !g.toolDescriptions.known || !g.toolDefinitions?.known)
       return unknown('every upgrade phase needs native instructions/descriptions and full wire definitions', [`given[${i}]`]);
     const definitions = g.toolDefinitions.value.map(object);
@@ -49,7 +51,7 @@ export const zeroWriteRefusals: ScriptCheck = a => {
   if (mutation.status === 'violated') return mutation;
   if (!refused.length) {
     if (boundaries.length) return unknown('wire refusal exists without its native receipt');
-    return a.upgrade?.mode === 'resume' ? holds('fresh-process recovery required no refusal') : violated('no version refusal was exercised');
+    return a.upgrade?.mode === 'resume' ? holds('fresh-process recovery required no refusal') : notObserved('no version refusal was exercised');
   }
   let gap = boundaries.length !== refused.length;
   for (const call of refused) {
@@ -86,13 +88,22 @@ export const noExtraCommits: ScriptCheck = a => {
 };
 
 export const exactUpgradeHistory: ScriptCheck = a => {
+  // An independently captured committed state proves a violation even if a later native receipt is lost.
+  const probe = a.maps.find(m => m.mapId === 'Upgrade.Probe');
+  const stored = a.upgrade?.restart && probe?.history.find(r => r.revision === 2 && r.kind === 'apply'
+    && a.sessions.some(s => s.clientId === r.author.clientId));
+  if (stored && (stored.state.tickets.length !== 1 || stored.state.tickets[0]!.id !== 'Probe.One'
+    || !stored.state.tickets[0]!.title.startsWith(ticketTitlePrefix)))
+    return violated('final stored Ticket does not follow the canary rule exactly once', ['maps']);
+  const extra = noExtraCommits(a);
+  if (extra.status === 'violated') return extra;
   if (a.missing.includes('maps') || a.missing.includes('receipts') || !a.upgrade) return unknown('upgrade history or receipt evidence missing');
-  if (a.maps.length !== 1 || a.maps[0]!.mapId !== 'Upgrade.Probe') return violated('expected exactly the probe Map');
+  if (a.maps.length !== 1 || a.maps[0]!.mapId !== 'Upgrade.Probe') return notObserved('expected exactly the probe Map');
   const map = a.maps[0]!;
   const commits = writeCalls(a).filter(e => resultIs(e, 'committed'));
   if (map.history.length > 2 || commits.length > 2) return violated('more than the one create and one Ticket write committed', ['maps', 'receipts']);
   if (a.receipts.some(r => r.outcome.kind === 'unknown') || writeCalls(a).some(e => !e.result.known)) return unknown('a write has no native receipt');
-  if (map.history.length !== 2 || commits.length !== 2) return violated('the create and final Ticket write did not both commit');
+  if (map.history.length !== 2 || commits.length !== 2) return notObserved('the create and final Ticket write did not both commit');
   if (map.history[0]!.revision !== 1 || map.history[0]!.kind !== 'create' || map.history[1]!.revision !== 2 || map.history[1]!.kind !== 'apply')
     return unknown('the complete create/apply history was not captured in order');
   for (const revision of map.history) {

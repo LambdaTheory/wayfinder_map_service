@@ -12,7 +12,7 @@ export const outcomes = ['pass', 'fail', 'flaky', 'incomplete', 'insufficient-ev
 export type Outcome = typeof outcomes[number];
 
 type Open = 'unknown' | 'pending-review' | 'paused';
-export interface ItemResult { id: string; judge: Item['judge']; status: CheckResult['status'] | Exclude<Open, 'unknown'>; reason: string; evidence: string[] }
+export interface ItemResult { id: string; judge: Item['judge']; status: CheckResult['status'] | Exclude<Open, 'unknown'>; reason: string; evidence: string[]; absenceOnly?: true }
 export interface GroupResult { id: string; status: ItemResult['status'] | 'not-applicable'; items: ItemResult[]; gap?: string }
 
 export interface AttemptVerdict {
@@ -37,7 +37,7 @@ function judgeItem(item: Item, record: AttemptRecord, reviews: Review[]): ItemRe
   const base = { id: item.id, judge: item.judge };
   if (item.paused) return { ...base, status: 'paused', reason: item.paused, evidence: [] };
   const script = item.judge === 'script' ? item.check(record) : null;
-  if (script && script.status !== 'unknown') return { ...base, status: script.status, reason: script.reason, evidence: script.evidence };
+  if (script && script.status !== 'unknown') return { ...base, ...script };
   // A script that could not decide escalates to the model chain only when it said so; missing evidence goes to the human.
   const modelMayDecide = item.judge === 'model' || script?.escalate === 'model';
   const d = decideReviews(item.id, reviews, record, modelMayDecide);
@@ -62,7 +62,7 @@ export interface JudgeOptions {
 }
 
 /**
- * One Attempt. A confirmed must-not fails it whatever else is missing; an unfinished run is incomplete; a required
+ * One Attempt. A confirmed must-not or expectation violation fails it whatever else is missing; an unfinished run is incomplete; a required
  * event that did not happen means the Scenario was not exercised; anything still open is insufficient evidence.
  */
 export function judgeAttempt(s: Scenario, record: AttemptRecord | null, opts: JudgeOptions = {}): AttemptVerdict {
@@ -86,16 +86,21 @@ export function judgeAttempt(s: Scenario, record: AttemptRecord | null, opts: Ju
   });
   const reasons: string[] = [];
   const listOpen = (xs: { id: string; status: GroupResult['status'] }[], what: string) => xs.filter(x => isOpen(x.status)).map(x => `${what} ${x.id} open`);
-  const violations = mustNot.filter(i => i.status === 'violated');
+  const violations = mustNot.filter(i => i.status === 'violated' && !i.absenceOnly);
+  const observedExpectations = expect.filter(g => g.status === 'violated' && g.items.every(i => !i.absenceOnly));
   let outcome: AttemptVerdict['outcome'];
-  if (violations.length) {
+  if (violations.length || observedExpectations.length) {
     outcome = 'fail';
     reasons.push(...violations.map(i => `must-not ${i.id}: ${i.reason}`));
+    reasons.push(...observedExpectations.map(g => `expectation ${g.id} not met`));
     if (record.run.completeness !== 'complete') reasons.push(`run ${record.run.completeness}`);
   } else if (record.run.completeness !== 'complete') { outcome = 'incomplete'; reasons.push(`run ${record.run.completeness}${record.run.detail ? `: ${record.run.detail}` : ''}`); }
   else if (required.some(i => i.status === 'violated')) { outcome = 'incomplete'; reasons.push(...required.filter(i => i.status === 'violated').map(i => `required event ${i.id} did not happen`)); }
   else if (required.some(i => isOpen(i.status))) { outcome = 'insufficient-evidence'; reasons.push(...listOpen(required, 'required event')); }
-  else if (expect.some(g => g.status === 'violated')) { outcome = 'fail'; reasons.push(...expect.filter(g => g.status === 'violated').map(g => `expectation ${g.id} not met`)); }
+  else if (mustNot.some(i => i.status === 'violated') || expect.some(g => g.status === 'violated')) {
+    outcome = 'fail'; reasons.push(...mustNot.filter(i => i.status === 'violated').map(i => `must-not ${i.id}: ${i.reason}`),
+      ...expect.filter(g => g.status === 'violated').map(g => `expectation ${g.id} not met`));
+  }
   else if ([...mustNot, ...expect].some(x => isOpen(x.status))) { outcome = 'insufficient-evidence'; reasons.push(...listOpen(mustNot, 'must-not'), ...listOpen(expect, 'expectation')); }
   else if (expect.every(g => g.status === 'not-applicable')) { outcome = 'not-applicable'; reasons.push('no expectation applies to this client'); }
   else outcome = 'pass';

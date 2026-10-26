@@ -8,7 +8,7 @@ import type { AttemptRecord } from '../evidence.ts';
 import { asScenario, upgradeChecks } from '../upgrade-checks.ts';
 import { itemsOf } from '../scenario.ts';
 import { library } from '../library.ts';
-import { judgeAttempt } from '../verdict.ts';
+import { judgeAttempt, judgeCell } from '../verdict.ts';
 import { preflight, runAttempt, runBatch } from './run.ts';
 import type { AttemptIsolation, BatchOptions } from './run.ts';
 import { syntheticClientState } from './test-state.ts';
@@ -54,6 +54,44 @@ test('upgrade selection is separate and cannot silently switch harness or mix ca
 });
 
 describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrade through the real shared sandbox, fake native driver only', () => {
+  test.each(['U-codex-process', 'U-codex-resume'].flatMap(mode => ['two-tickets', 'wrong-ticket'].map(fault => [mode, fault])))
+  ('an observed %s / %s violation inside one commit survives timeout and reruns', async (mode, fault) => {
+    const { record: a, outcome } = await run(`${mode}-${fault}`, mode, `fake-upgrade-${fault}-timeout`, 3000);
+    expect(outcome.completeness).toBe('timeout');
+    expect(a.maps[0]!.history).toHaveLength(2);
+    expect(a.maps[0]!.history[1]!.state.tickets.map(t => t.id)).toEqual(fault === 'two-tickets' ? ['Probe.One', 'Probe.Two'] : ['Probe.Uno']);
+    expect(scripts(a)['exact-history']).toBe('violated');
+    const failed = reviewedVerdict(a);
+    expect(failed.outcome).toBe('fail');
+    const { record: recovered } = await run(`retry-${mode}-${fault}`, mode);
+    const passed = reviewedVerdict(recovered);
+    expect(passed.outcome).toBe('pass');
+    expect(judgeCell(subject(mode), [failed, passed, passed], 2).outcome).toBe('flaky');
+  }, 60_000);
+  test.each(['U-codex-process', 'U-codex-resume'])('combined Conflict replay and wrong committed state survive unknown receipts and timeout in %s', async mode => {
+    const { record: a, outcome } = await run(`combined-${mode}`, mode, 'fake-upgrade-conflict-two-tickets-timeout', 3000);
+    expect(outcome.completeness).toBe('timeout');
+    expect(a.maps[0]!.history).toHaveLength(2);
+    expect(a.maps[0]!.history[1]!.state.tickets).toHaveLength(2);
+    expect(scripts(a)).toMatchObject({ 'conflict-replay': 'violated', 'exact-history': 'violated' });
+    expect(reviewedVerdict(a).outcome).toBe('fail');
+    a.missing.push('receipts', 'events.tool-call');
+    expect(scripts(a)).toMatchObject({ 'conflict-replay': 'violated', 'exact-history': 'violated' });
+    expect(reviewedVerdict(a).outcome).toBe('fail');
+  }, 60_000);
+  test.each(['U-codex-process', 'U-codex-resume'])('confirmed Conflict replay survives a later missing native result and timeout in %s', async mode => {
+    const { record: a, outcome } = await run(`conflict-unknown-${mode}`, mode, 'fake-upgrade-conflict-unknown-timeout', 3000);
+    expect(outcome.completeness).toBe('timeout');
+    expect(a.maps[0]!.history).toHaveLength(2);
+    const writes = a.events.filter(e => e.kind === 'tool-call' && e.tool === 'map_apply');
+    expect(writes.slice(-3).map(e => e.kind === 'tool-call' && (e.result.known ? classifyResult(e.result.value) : 'unknown')))
+      .toEqual(['conflict', 'committed', 'unknown']);
+    expect(reviewedVerdict(a).outcome).toBe('fail');
+    expect(scripts(a)['conflict-replay']).toBe('violated');
+    a.missing.push('events.tool-call');
+    expect(scripts(a)['conflict-replay']).toBe('violated');
+    expect(reviewedVerdict(a).outcome).toBe('fail');
+  }, 60_000);
   test.each(['U-codex-process', 'U-codex-resume'])('an early Ticket is a precondition failure in %s', async mode => {
     const { outcome } = await run(`early-${mode}`, mode, 'fake-upgrade-early-ticket');
     expect(outcome.completeness).toBe('precondition-not-met');
@@ -82,6 +120,20 @@ describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrad
     const { record: a } = await run('missing-marker');
     expect(reviewedVerdict(a).outcome).toBe('pass');
     a.missing.push('given[0].toolDefinitions');
+    expect(reviewedVerdict(a).outcome).toBe('insufficient-evidence');
+  }, 60_000);
+  test('full tool evidence follows the build contract rather than a fixed tool count', async () => {
+    const { record: a } = await run('expanded-tool-contract');
+    // Fixed future-contract evidence derived from a complete fake run, not a claim about a shipped tool.
+    const tool = { name: 'map_future', description: 'Synthetic extra contract tool', inputSchema: { type: 'object' } };
+    for (const contract of Object.values(a.upgrade!.contracts)) contract.toolDescriptions[tool.name] = tool.description;
+    for (const phase of a.given) {
+      if (phase.toolDefinitions?.known) phase.toolDefinitions.value.push(tool);
+      if (phase.toolDescriptions.known) phase.toolDescriptions.value[tool.name] = tool.description;
+    }
+    expect(reviewedVerdict(a).outcome).toBe('pass');
+    const first = a.given[0]!.toolDefinitions!;
+    if (first.known) first.value.pop();
     expect(reviewedVerdict(a).outcome).toBe('insufficient-evidence');
   }, 60_000);
   test.each(['U-codex-process', 'U-codex-resume'])('a compliant final reply cannot erase an earlier canary reply violation in %s', async mode => {

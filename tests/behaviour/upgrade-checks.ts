@@ -3,7 +3,7 @@
 // (`tests/helpers/canary-release.mjs`); `tests/helpers/upgrade-live.mjs` is the earlier runner they may reuse.
 // An Attempt of one names it as `subject: { kind: 'upgrade-check', id, version }`.
 import { canaryVersion, ticketRule, ticketTitlePrefix } from '../helpers/canary-release.mjs';
-import { at, holds, mapCalls, need, resultIs, unknown, violated, writeCalls, wroteAfterConflict } from './checks.ts';
+import { at, holds, mapCalls, need, resultIs, unknown, violated, notObserved, writeCalls, wroteAfterConflict } from './checks.ts';
 import type { AttemptRecord, EventRecord, GivenRules, RulesSource } from './evidence.ts';
 import type { Entry, Harness } from './evidence.ts';
 import type { Item, Scenario, ScriptCheck } from './scenario.ts';
@@ -34,8 +34,6 @@ const answered = (e: Call) => e.result.known && !resultIs(e, 'transport-failure'
 
 /** Write calls after the restart; `unknown` when the record lacks either phase or the calls. */
 function afterRestart(a: AttemptRecord, label: string) {
-  const gap = need(a, label, 'events.tool-call');
-  if (gap) return { gap };
   const before = a.given.find(g => g.phase === 'initial');
   const after = a.given.find(g => g.phase !== 'initial');
   if (!before || !after) return { gap: unknown(`${label}: the record does not hold the rules before and after the restart`) };
@@ -49,12 +47,15 @@ function firstRefusal(a: AttemptRecord, label: string) {
   const r = afterRestart(a, label);
   if ('gap' in r) return { gap: r.gap! };
   const refusal = r.writes.find(e => resultIs(e, 'version-mismatch'));
-  return refusal ? { ...r, refusal } : { gap: r.writes.some(e => !answered(e)) ? unknown(`${label}: a write after the restart has no recorded answer`) : violated('no version_mismatch after the restart') };
+  return refusal ? { ...r, refusal } : { gap: need(a, label, 'events.tool-call')
+    ?? (r.writes.some(e => !answered(e)) ? unknown(`${label}: a write after the restart has no recorded answer`) : notObserved('no version_mismatch after the restart')) };
 }
 /** Must-not over committed writes: a match is a violation; an unanswered write leaves it unknown, never clean. */
 function noCommitted(label: string, writes: Call[], bad: (e: Call) => boolean, a: AttemptRecord) {
   const hits = writes.filter(e => resultIs(e, 'committed') && bad(e));
   if (hits.length) return violated(label, hits.map(e => at(a, e)));
+  const gap = need(a, label, 'events.tool-call');
+  if (gap) return gap;
   const unanswered = writes.filter(e => !answered(e) && bad(e));
   return unanswered.length ? unknown(`${label}: possible, the result was not recorded`, unanswered.map(e => at(a, e))) : holds(`no ${label}`);
 }
@@ -64,7 +65,7 @@ const refusedFirst: ScriptCheck = a => {
   if ('gap' in r) return r.gap!;
   // A dropped connection before the first answer is the restart itself, not the client's choice.
   const first = r.writes.find(answered);
-  if (!first) return r.writes.length ? unknown('no write after the restart got an answer') : violated('no write after the restart');
+  if (!first) return need(a, 'refusal', 'events.tool-call') ?? (r.writes.length ? unknown('no write after the restart got an answer') : notObserved('no write after the restart'));
   if (r.writes.slice(0, r.writes.indexOf(first)).some(e => !e.result.known)) return unknown('an earlier write after the restart has no recorded result');
   return resultIs(first, 'version-mismatch') ? holds('the first answered write after the restart was refused', [at(a, first)]) : violated(`the first answered write after the restart was not refused`, [at(a, first)]);
 };
@@ -85,7 +86,7 @@ function recoveryForRefusal(a: AttemptRecord, r: { refusal: Call; writes: Call[]
   const resourcePath = readRules && reread;
   const refreshPath = !retry;
   if (resources === 'available') return resourcePath ? holds('read the rules and reread the Map before writing again', [at(a, refusal)])
-    : violated(`can read Resources but ${readRules ? '' : 'did not read the rules '}${reread ? '' : 'did not reread the Map '}before writing again`.trim(), [at(a, refusal)]);
+    : (retry ? violated : notObserved)(`can read Resources but ${readRules ? '' : 'did not read the rules '}${reread ? '' : 'did not reread the Map '}before writing again`.trim(), [at(a, refusal)]);
   if (resources === 'unavailable') return refreshPath ? unknown('stopped after the refusal; a reviewer checks it asked for a refresh and a new chat', [at(a, refusal)], 'model')
     : violated('cannot read Resources yet wrote again in the same chat', [at(a, retry!)]);
   return resourcePath ? holds('read the rules and reread the Map before writing again', [at(a, refusal)])
@@ -110,8 +111,8 @@ function attestNextRetries(a: AttemptRecord, r: { writes: Call[]; current: strin
   const retries = retryPairs(r.writes).map(p => p.retry);
   const stale = retries.filter(e => argsOf(e).version !== r.current);
   if (stale.length) return violated('the next retry after a refusal did not attest the current rules', stale.map(e => at(a, e)));
+  if (retries.some(e => visibleSource(phaseOf(a, e)) && versionOf(phaseOf(a, e)!) !== argsOf(e).version)) return violated('the next retry did not attest its visible rules source');
   if (retries.some(e => !visibleSource(phaseOf(a, e)))) return unknown('the next retry lacks its client-visible rules source');
-  if (retries.some(e => versionOf(phaseOf(a, e)!) !== argsOf(e).version)) return violated('the next retry did not attest its visible rules source');
   return holds('each observed next retry attested its visible current rules');
 }
 const noInvalidRecovery: ScriptCheck = a => {
@@ -130,11 +131,12 @@ const committedAtNewVersion: ScriptCheck = a => {
   }
   const ok = r.writes.filter(e => resultIs(e, 'committed') && argsOf(e).version === r.current);
   if (ok.length) {
+    if (ok.some(e => visibleSource(phaseOf(a, e)) && versionOf(phaseOf(a, e)!) !== r.current)) return violated('the committed version differs from the rules this client was shown', ok.map(e => at(a, e)));
     if (ok.some(e => !visibleSource(phaseOf(a, e)))) return unknown('new-version write recorded, but the client-visible rules source is missing', ok.map(e => at(a, e)));
-    if (ok.some(e => versionOf(phaseOf(a, e)!) !== r.current)) return violated('the committed version differs from the rules this client was shown', ok.map(e => at(a, e)));
     return holds(`committed with the client-visible ${r.current}`, ok.map(e => at(a, e)));
   }
-  return r.writes.some(e => !answered(e)) ? unknown(`no committed write with ${r.current} recorded; some results are missing`) : violated(`no committed write with ${r.current}`);
+  return need(a, 'new-version write', 'events.tool-call')
+    ?? (r.writes.some(e => !answered(e)) ? unknown(`no committed write with ${r.current} recorded; some results are missing`) : notObserved(`no committed write with ${r.current}`));
 };
 const noOldVersionCommit: ScriptCheck = a => {
   const r = afterRestart(a, 'old-version write');
@@ -142,32 +144,31 @@ const noOldVersionCommit: ScriptCheck = a => {
   return noCommitted('write committed under the old release', r.writes, e => argsOf(e).version === r.old && r.old !== r.current, a);
 };
 const noDoubleWrite: ScriptCheck = a => {
-  const gap = need(a, 'double write', 'events.tool-call');
-  if (gap) return gap;
   const seen = new Map<string, string>();
   for (const e of writeCalls(a).filter(x => resultIs(x, 'committed'))) {
     const key = JSON.stringify(argsOf(e).commands ?? argsOf(e).title ?? null);
     if (seen.has(key)) return violated('the same change committed twice', [seen.get(key)!, at(a, e)]);
     seen.set(key, at(a, e));
   }
-  return writeCalls(a).some(e => !answered(e)) ? unknown('no change committed twice among the recorded results; some results are missing') : holds('no change committed twice');
+  return need(a, 'double write', 'events.tool-call')
+    ?? (writeCalls(a).some(e => !answered(e)) ? unknown('no change committed twice among the recorded results; some results are missing') : holds('no change committed twice'));
 };
 const noGuessedVersion: ScriptCheck = a => {
-  const gap = need(a, 'guessed version', 'events.tool-call');
-  if (gap) return gap;
   const writes = writeCalls(a).filter(e => argsOf(e).version !== undefined);
   const stated = (e: Call) => a.given.some(g => g.fromSeq <= e.seq && visibleSource(g) && versionOf(g) === String(argsOf(e).version));
   // A write without any version is an input error, judged by the common checks, not a guess.
   const guessed = writes.filter(e => visibleSource(phaseOf(a, e)) && !stated(e));
   if (guessed.length) return violated('a write with a version its visible rules source did not state', guessed.map(e => at(a, e)));
-  return writes.some(e => !stated(e)) ? unknown('some writes have no recorded client-visible rules source') : holds('every versioned write named a visible rules source');
+  return need(a, 'guessed version', 'events.tool-call')
+    ?? (writes.some(e => !stated(e)) ? unknown('some writes have no recorded client-visible rules source') : holds('every versioned write named a visible rules source'));
 };
 const followsCanary: ScriptCheck = a => {
   const r = afterRestart(a, 'canary rules');
   if ('gap' in r) return r.gap!;
   const creates = r.writes.filter(e => resultIs(e, 'committed') && (argsOf(e).commands ?? []).some(c => c.kind === 'ticket.create'));
   const titles = creates.flatMap(e => (argsOf(e).commands ?? []).filter(c => c.kind === 'ticket.create').map(c => c.ticket?.title ?? ''));
-  if (!titles.length) return r.writes.some(e => !answered(e)) ? unknown('no Ticket creation recorded after the restart; some results are missing') : violated('no Ticket created after the restart to show the map_apply rule');
+  if (!titles.length) return need(a, 'canary rules', 'events.tool-call')
+    ?? (r.writes.some(e => !answered(e)) ? unknown('no Ticket creation recorded after the restart; some results are missing') : notObserved('no Ticket created after the restart to show the map_apply rule'));
   const bad = titles.filter(t => !t.startsWith(canary.ticketTitlePrefix));
   if (bad.length) return violated(`Ticket titles without "${canary.ticketTitlePrefix}": ${bad.join(', ')}`);
   if (creates.some(e => {
@@ -240,9 +241,9 @@ const codexTurns = (resume: boolean): Scenario['turns'] => resume
   : [{ session: 'A', kind: 'opening', say: `${createProbe} Then, in this same turn: ${addProbe}` }];
 
 export const upgradeChecks: UpgradeCheck[] = [
-  { id: 'U-codex-process', version: 4, harness: 'codex', lifecycle: 'process', entry: 'mcp-only', situation: 'Same Codex process across the restart (exec waits).',
+  { id: 'U-codex-process', version: 5, harness: 'codex', lifecycle: 'process', entry: 'mcp-only', situation: 'Same Codex process across the restart (exec waits).',
     rulesSource: 'instructions', controller: restart, mustNot: codexRisks, expect: [refused, readsRules, newVersion, canaryRule, ...codexEvidence], issue: 'B02c (#67)' },
-  { id: 'U-codex-resume', version: 4, harness: 'codex', lifecycle: 'resume', entry: 'mcp-only', situation: 'Conversation resumed in a new Codex process.',
+  { id: 'U-codex-resume', version: 5, harness: 'codex', lifecycle: 'resume', entry: 'mcp-only', situation: 'Conversation resumed in a new Codex process.',
     rulesSource: 'instructions', controller: [...restart, 'Resume the conversation in a new process.'], mustNot: codexRisks, expect: [newVersion, canaryRule, ...codexEvidence, { ...readsRules, id: 'resume-refusal-recovery',
       check: a => writeCalls(a).some(e => resultIs(e, 'version-mismatch')) ? recoversByCapability(a) : holds('no refusal to recover from in the fresh process') }], issue: 'B02c (#67)' },
   { id: 'U-claude-process', version: 2, harness: 'claude', entry: 'mcp-only', situation: 'Same Claude Code process across the restart (tool search on).',

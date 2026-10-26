@@ -13,6 +13,7 @@ import type { SeedMap } from './scenario.ts';
 import { asScenario, upgradeChecks } from './upgrade-checks.ts';
 import { judgeAttempt, judgeCell } from './verdict.ts';
 import type { Review } from './verdict.ts';
+import { all, createdExactlyOnce, gotResult, holds, never, unknown } from './checks.ts';
 
 const byId = (id: string) => library.find(s => s.id === id)!;
 const unknownField = { known: false as const, reason: 'sample' };
@@ -127,6 +128,37 @@ describe('Attempt verdicts on fixed evidence', () => {
     expect(v.outcome).toBe('fail');
   });
 
+  test('confirmed expectation violations precede missing prerequisites; absence and equivalent ways remain distinct', () => {
+    const absent = { id: 'later-result', text: 'Later result', judge: 'script' as const, check: gotResult('later Conflict', 'conflict') };
+    const observed = { id: 'wrong-write', text: 'Wrong write', judge: 'script' as const, check: never('created a Map', { command: 'map.create' }) };
+    const s = { ...byId('S12'), common: [], mustNot: [], requiredEvents: [{ id: 'missing', text: 'Missing prerequisite', judge: 'script' as const, check: () => unknown('lost prerequisite') }],
+      expect: [{ id: 'result', text: 'Result', anyOf: [observed] }] };
+    const a = sample('S12', [createdMap], { run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
+    expect(judgeAttempt(s, a).outcome).toBe('fail');
+    expect(judgeAttempt({ ...s, expect: [{ ...s.expect[0]!, anyOf: [observed, absent] }] }, a).outcome).toBe('incomplete');
+    expect(judgeAttempt({ ...s, expect: [{ ...s.expect[0]!, anyOf: [observed, { ...absent, check: () => holds('equivalent success') }] }] }, a).outcome).toBe('incomplete');
+    expect(judgeAttempt({ ...s, expect: [{ ...s.expect[0]!, onlyWith: 'sub-agents' }] }, a, { supports: { 'sub-agents': false } }).outcome).toBe('incomplete');
+    expect(judgeAttempt({ ...s, expect: [{ ...s.expect[0]!, anyOf: [{ ...observed, check: all('both', absent.check, observed.check) }] }] }, a).outcome).toBe('fail');
+    expect(judgeAttempt({ ...s, expect: [{ ...s.expect[0]!, anyOf: [{ ...absent, check: createdExactlyOnce }] }] }, { ...a, maps: [] }).outcome).toBe('incomplete');
+  });
+
+  test('common checks retain known malformed Settlements and identical retries despite later evidence gaps', () => {
+    const a = sample('S9', [{ turn: 1, changes: [{ commandIndex: 0, command: 'ticket.settle', subjectId: 'task-carrier' }], edit: s => ({ ...s,
+      tickets: s.tickets.map(t => t.id !== 'task-carrier' ? t : { ...t, status: 'settled', settlement: {
+        outcome: { kind: 'decision', statement: 'Answer', rationale: 'Reason' }, evidence: [], references: [], provenance: { method: 'm', sources: [] } } }) }) }],
+      { events: [call(1, 'map_apply', { kind: 'rejected', error: { path: ['commands', 0] } }, { args: { commands: [] } }),
+        call(2, 'map_apply', undefined, { args: { commands: [] } })], missing: ['maps', 'events.tool-call'], run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
+    const s = { ...byId('S9'), common: ['attributable-evidence', 'input-error-correction'] as const };
+    const verdict = judgeAttempt({ ...s, common: [...s.common] }, a);
+    for (const id of s.common) expect(verdict.mustNot.find(i => i.id === id)?.status, id).toBe('violated');
+  });
+
+  test('two attributable Settlements stay forbidden when another Settlement lacks its receipt', () => {
+    const write: AgentWrite = { turn: 1, changes: ['task-carrier', 'task-entry'].map((subjectId, commandIndex) => ({ commandIndex, command: 'ticket.settle', subjectId })) };
+    const a = sample('W2', [write, { ...write, receipt: false }], { run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
+    expect(judgeAttempt(byId('W2'), a).mustNot.find(i => i.id === 'settled-both')?.status).toBe('violated');
+  });
+
   test('an expectation group for a capability the client lacks is not applicable, not passed', () => {
     const v = judgeAttempt(byId('W3'), sample('W3'), { supports: { 'sub-agents': 'unverified' } });
     expect(v.expect.find(g => g.id === 'parallel')!.status).toBe('not-applicable');
@@ -180,6 +212,22 @@ describe('upgrade checks judge the recovery path', () => {
   });
   test('without the rules of both phases the checks stay unknown', () => {
     expect(u.expect.find(i => i.id === 'refused-unwritten')!.check!(sample('S12', [], { events: recovered })).status).toBe('unknown');
+  });
+  test.each([
+    ['old commit', [call(11, 'map_apply', { kind: 'committed', mapId: 'U', revision: 2 }, { args: { version: '2.0.2', ...ticket('x') } })]],
+    ['duplicate commit', [...recovered, call(15, 'map_apply', { kind: 'committed', mapId: 'U', revision: 3 }, { args: { version: '9.9.9', ...ticket('v2: probe') } })]],
+    ['guessed version', [...recovered, call(15, 'map_apply', { kind: 'rejected', code: 'version_mismatch' }, { args: { version: '4.4.4', ...ticket('v2: extra') } })]],
+    ['stale retry', [...recovered.slice(0, 3), call(14, 'map_apply', { kind: 'rejected', code: 'version_mismatch' }, { args: { version: '2.0.2', ...ticket('x') } }),
+      call(15, 'map_apply', { kind: 'committed', mapId: 'U', revision: 2 }, { args: { version: '9.9.9', ...ticket('v2: probe') } })]],
+  ] as [string, EventRecord[]][])('upgrade audit: %s stays violated when unrelated evidence is lost', (_name, events) => {
+    const a = sample('S12', [], { subject: { kind: 'upgrade-check', id: u.id, version: u.version }, given: phases, events });
+    const proven = [...u.mustNot, ...u.expect].filter(i => { const r = i.check?.(a); return r?.status === 'violated' && !r.absenceOnly; });
+    expect(proven.length).toBeGreaterThan(0);
+    a.events = [...events, call(20, 'map_apply', undefined)];
+    a.missing.push('events.tool-call', 'receipts');
+    a.run.completeness = 'timeout';
+    for (const item of proven) expect(item.check!(a).status, item.id).toBe('violated');
+    expect(judgeAttempt(asScenario(u), a).outcome).toBe('fail');
   });
 });
 
