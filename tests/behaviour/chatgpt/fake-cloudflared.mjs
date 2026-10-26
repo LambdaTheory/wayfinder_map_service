@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Verification only. Does not read credentials, connect to Cloudflare or forward traffic.
-import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 const argv = process.argv.slice(2);
 const text = readFileSync(argv[argv.indexOf('--config') + 1], 'utf8');
@@ -12,6 +12,8 @@ const config = text.startsWith('{') ? JSON.parse(text) : { ...fields, ingress: [
 const statePath = join(dirname(config['credentials-file']), 'fake-connector.json');
 const info = () => ({ id: config.tunnel, name: 'opencode', conns: existsSync(statePath) ? JSON.parse(readFileSync(statePath, 'utf8')) : [] });
 if (argv.includes('info')) {
+  // Count inspections without retaining arguments or configuration contents.
+  appendFileSync(join(dirname(statePath), 'fake-info-calls'), 'info\n');
   console.log(JSON.stringify(info()));
 } else if (argv.includes('run')) {
   if (existsSync(join(dirname(statePath), 'fail-start'))) process.exit(2);

@@ -34,15 +34,32 @@ const childEnv = () => ({ PATH: process.env.PATH ?? '', HOME: homedir() });
 
 type LocalTunnelTarget = TunnelConfig & { configPath: string };
 
+function isConnectorCommand(command: string): boolean {
+  const executable = /^(?:\S*\/)?cloudflared(?:\s|$)/.exec(command);
+  if (!executable) return false;
+  const args = command.slice(executable[0].length);
+  if (/(?:^|\s)(?:--help|-h|--version)(?=\s|$)/.test(args)) return false;
+  const value = String.raw`(?:"[^"]*"|'[^']*'|\S+)`;
+  const tunnel = /(?:^|\s)tunnel(?:\s|$)/.exec(args);
+  if (tunnel) {
+    // Only options may precede "run"; never skip a diagnostic action to find a later "run" argument.
+    const option = String.raw`--[\w-]+(?:=${value}|\s+${value})?`;
+    return new RegExp(String.raw`^(?:${option}\s+)*run(?:\s|$)`).test(args.slice(tunnel.index + tunnel[0].length));
+  }
+  // Legacy config-only launch: known options, no positional subcommand such as "service".
+  const option = String.raw`(?:--(?:no-autoupdate|hello-world)|--(?:config|credentials-file|token|token-file)(?:=|\s+)${value})`;
+  return new RegExp(String.raw`^${option}(?:\s+${option})*$`).test(args);
+}
+
 export function hasLocalConnector(stdout: string, target: LocalTunnelTarget, ownPid?: number): boolean {
-  const identifiers = [target.id, target.credentialsFile, target.configPath, 'opencode'].map(value =>
-    new RegExp(`(?:^|[\\s="'])${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s"'])`));
+  const identifiers = [target.id, target.credentialsFile, target.configPath, 'opencode'].map((value, index) =>
+    new RegExp(`(?:^|[\\s="'])${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s"'])`, index === 0 ? 'i' : ''));
   return stdout.split('\n').some(line => {
     const match = /^\s*(\d+)\s+(.*)$/.exec(line);
     if (!match || Number(match[1]) === ownPid) return false;
     const command = match[2]!;
     // Token-only connectors have no visible tunnel identity; the remote inventory decides ownership.
-    return (/^(?:\S*\/)?cloudflared(?:\s|$)/.test(command) && identifiers.some(id => id.test(command)))
+    return (isConnectorCommand(command) && identifiers.some(id => id.test(command)))
       || /(?:^|\s|\/)node(?:\s+[^\n]*?)?\s+(?:[^\s]*\/)?scripts\/local-chatgpt-test\.mjs(?:\s|$)/.test(command);
   });
 }
@@ -153,8 +170,8 @@ export async function acquireTunnel(options: { root: string; dir: string; config
     await localCheck();
     if ((await remote()).length) throw new Error('opencode already has a registered connector; inspect cloudflared tunnel info and the lease owner before restarting any route, stop only a confirmed orphan or ask the active operator to stop, then retry');
   } catch (error) { await stop(); throw error; }
-  // A turn and the monitor can overlap. Share the inspection so our own target-specific
-  // `cloudflared tunnel info` subprocess cannot be mistaken for a second local connector.
+  // A turn and the monitor can overlap. Share one in-flight inspection and its outcome.
+  // Diagnostic subprocesses are excluded by their action, independently of this sharing.
   let checking: Promise<void> | undefined;
   const check = () => checking ??= (async () => {
     if (stopped || !child?.pid || child.exitCode !== null || child.signalCode !== null) throw new Error('Tunnel is not running');
