@@ -9,7 +9,6 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { createHttpTestClient } from './helpers/mcp-http-client.mjs';
 import { versioned } from './helpers/write-version.js';
-// @ts-expect-error the canary helper is plain ESM outside the TypeScript source graph
 import { canaryVersion, replyRule, ticketRule, writeCanaryCheckout } from './helpers/canary-release.mjs';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Ajv } from 'ajv';
