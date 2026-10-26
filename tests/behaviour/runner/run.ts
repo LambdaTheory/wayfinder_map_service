@@ -1,6 +1,6 @@
 // node tests/behaviour/runner/run.ts --batch <id> --scenarios S0b,F11 --count 2 --ceiling 4 [--model gpt-6-astra] [--effort xhigh]
 // Runs an approved Batch: every Attempt on a fresh service and database with its own port, credentials and output
-// directory, on Codex through the MCP-only Entry (B02a). Spends model quota: run only what Kun approved.
+// directory, on Codex through MCP-only or the Dedicated Entry (B02a/B02d). Spends model quota: run only what Kun approved.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -14,6 +14,8 @@ import { fixturesRoot, readiness, validateScenario } from '../scenario.ts';
 import type { Scenario } from '../scenario.ts';
 import { clientSkills, findRollout, loginSecrets, looksRateLimited, prepareSession, prepareWorkdir, runTurn, writeProfile } from './codex.ts';
 import type { CodexOptions, CodexSession } from './codex.ts';
+import { captureDedicatedArtifacts, dedicatedContext, dedicatedLaunch, dedicatedServiceDirectory, prepareDedicated, runDedicatedTurn } from './dedicated.ts';
+import type { DedicatedSetup } from './dedicated.ts';
 import { connectController } from './controller.ts';
 import { initialRules, normalizeTurn, parseLines, readRollout, receiptsFrom } from './normalize.ts';
 import type { RolloutFacts } from './normalize.ts';
@@ -22,6 +24,7 @@ import type { Credential } from './service.ts';
 
 export interface BatchOptions {
   batchId: string;
+  entry?: 'mcp-only' | 'dedicated';
   scenarios: string[];
   count: number;
   ceiling: number;
@@ -35,8 +38,10 @@ export interface PlannedAttempt { attemptId: string; scenario: Scenario }
 export interface AttemptOutcome { attemptId: string; scenario: string; completeness: Completeness | 'not-run'; detail?: string; record?: string }
 
 /** Refusals reported before anything runs: the runner never switches model or Entry or drops a Scenario silently (R2). */
-export function preflight(o: Pick<BatchOptions, 'scenarios' | 'count' | 'ceiling' | 'batchId'>): { plan: PlannedAttempt[]; refusals: string[] } {
+export function preflight(o: Pick<BatchOptions, 'scenarios' | 'count' | 'ceiling' | 'batchId' | 'entry'>): { plan: PlannedAttempt[]; refusals: string[] } {
   const refusals: string[] = [];
+  const entry = o.entry ?? 'mcp-only';
+  if (!['mcp-only', 'dedicated'].includes(entry)) refusals.push(`unsupported Entry: ${entry}`);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(o.batchId)) refusals.push('batch id must be a short identifier');
   if (!Number.isInteger(o.count) || o.count < 1) refusals.push('count must be a positive integer');
   if (!Number.isInteger(o.ceiling) || o.ceiling < 1) refusals.push('ceiling must be a positive integer');
@@ -45,7 +50,7 @@ export function preflight(o: Pick<BatchOptions, 'scenarios' | 'count' | 'ceiling
     const s = library.find(x => x.id === id);
     if (!s) { refusals.push(`${id}: no such Scenario`); continue; }
     refusals.push(...validateScenario(s), ...readiness(s).map(r => `${id}: not ready: ${r}`));
-    if (!s.applies.entries.includes('mcp-only')) refusals.push(`${id}: does not apply to the MCP-only Entry`);
+    if (!s.applies.entries.includes(entry)) refusals.push(`${id}: does not apply to the ${entry} Entry`);
     if (s.controller.length) refusals.push(`${id}: Controller actions (${s.controller.map(a => a.action).join(', ')}) are not supported by this runner yet (B02b)`);
     if (s.turns.some(t => t.concurrent || t.freshProcess)) refusals.push(`${id}: concurrent or fresh-process sessions are not supported by this runner yet (B02b)`);
     if (new Set(s.turns.map(t => t.session)).size > 1) refusals.push(`${id}: several sessions are not supported by this runner yet (B02b)`);
@@ -95,13 +100,14 @@ function attribution(record: AttemptRecord) {
 
 export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: () => boolean, register: (kill: () => void) => void): Promise<AttemptOutcome> {
   const s = p.scenario;
+  const entry = o.entry ?? 'mcp-only';
   const dir = join(o.out, p.attemptId);
   mkdirSync(join(dir, 'raw'), { recursive: true, mode: 0o700 });
   const scratch = mkdtempSync(join(o.scratchRoot, `wf-behave-${p.attemptId}-`));
   const controller: Credential = { clientId: 'Behaviour-Controller', token: newToken() };
   const sessions: Session[] = [...new Set(s.turns.map(t => t.session))].map(label => {
     const credential = { clientId: `Behaviour.${o.batchId}.${p.attemptId}.${label}`, token: newToken() };
-    return { label, credential, codex: prepareSession(scratch, label, credential.token), rollout: null,
+    return { label, credential, codex: prepareSession(scratch, label, credential.token, o.codex.authFile), rollout: null,
       record: { label, nativeId: { known: false, reason: 'no thread started' }, clientId: credential.clientId,
         mcpSessionIds: { known: false, reason: 'Codex does not report MCP session IDs; service metadata (B07) will' }, turns: [] } };
   });
@@ -120,13 +126,19 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   const seedHeads: Record<string, number> = {};
   const opened = new Set<string>();
   let skills: string[] = [];
+  let dedicated: DedicatedSetup | undefined;
+  let dedicatedDir: string | undefined;
+  let entryContext: ReturnType<typeof dedicatedContext> = [];
+  const launches: Omit<NonNullable<ReturnType<typeof dedicatedLaunch>>, 'token'>[] = [];
   try {
-    service = await startService(join(dir, 'service'), controller, sessions.map(x => x.credential));
+    if (entry === 'dedicated') dedicatedDir = dedicatedServiceDirectory();
+    service = await startService(dedicatedDir ?? join(dir, 'service'), controller, entry === 'dedicated' ? [] : sessions.map(x => x.credential));
     openDatabases(service.pid).forEach(d => opened.add(d));
     ctl = await connectController(service.port, controller.token);
     for (const map of s.seed.maps) seedHeads[map.mapId] = await ctl.seed(map);
     const workdir = prepareWorkdir(scratch, s.seed.fixtures, fixturesRoot);
     const profile = writeProfile(scratch, o.codex.bin);
+    if (entry === 'dedicated') dedicated = prepareDedicated(scratch, sessions[0]!.codex, service, controller, o.codex, profile);
     let seq = 0;
     for (const [index, turn] of s.turns.entries()) {
       if (cancelled()) { completeness = 'cancelled'; break; }
@@ -137,7 +149,17 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
           completeness = 'precondition-not-met'; detail = `turn ${index}: the proposal "${turn.answers!.proposal}" did not appear`; break;
         }
       }
-      const r = await runTurn({ options: o.codex, session: session.codex, port: service.port, workdir, prompt: turn.say, profile, onChild: register });
+      const request = { options: o.codex, session: session.codex, port: service.port, workdir, prompt: turn.say, profile, onChild: register };
+      const r = dedicated ? await runDedicatedTurn(request, dedicated) : await runTurn(request);
+      if (dedicated) {
+        const launch = dedicatedLaunch(dedicated);
+        if (launch) {
+          const { token, ...evidence } = launch;
+          secrets[`launcher-token-${index}`] = token;
+          session.record.clientId = launch.clientId;
+          launches.push(evidence);
+        }
+      }
       writeRaw(`turn-${index}-${turn.session}.stdout.jsonl`, r.stdout);
       if (r.stderr.trim()) writeRaw(`turn-${index}-${turn.session}.stderr.txt`, r.stderr);
       const n = normalizeTurn(parseLines(r.stdout), turn.session, index, turn.say, r.startedAt, seq, workdir);
@@ -160,8 +182,17 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       if (path) { session.rollout = readRollout(path); writeRaw(`rollout-${session.label}.jsonl`, session.rollout.text); }
     }
     skills = [...new Set(sessions.flatMap(x => clientSkills(x.codex)))];
-    cpSync(workdir, join(dir, 'raw', 'work'), { recursive: true, filter: src => !src.includes('/node_modules') });
+    if (dedicated) captureDedicatedArtifacts(workdir, join(dir, 'raw', 'work'), secrets);
+    else cpSync(workdir, join(dir, 'raw', 'work'), { recursive: true, filter: src => !src.includes('/node_modules') });
     rawFiles.push('work/');
+    if (dedicated) {
+      entryContext = dedicatedContext(dedicated, sessions[0]?.rollout?.text);
+      writeRaw('entry-context.json', JSON.stringify({ launcher: 'scripts/wayfinder-agent/wayfinder', context: entryContext, launches }, null, 1));
+      if (existsSync(dedicated.outputs)) {
+        captureDedicatedArtifacts(dedicated.outputs, join(dir, 'raw', 'outputs'), secrets);
+        rawFiles.push('outputs/');
+      }
+    }
   } catch (error) {
     if (completeness === 'complete') completeness = service ? 'driver-failed' : 'service-failed';
     detail = `${detail ?? ''} ${String(error instanceof Error ? error.message : error)}`.trim().slice(0, 300);
@@ -174,6 +205,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   await ctl?.close().catch(() => undefined);
   const stopped = await service?.stop();
   if (service) { writeRaw('protocol.jsonl', existsSync(service.protocolReport) ? readFileSync(service.protocolReport, 'utf8') : ''); writeRaw('service.log', service.logs()); }
+  if (dedicatedDir) rmSync(dedicatedDir, { recursive: true, force: true });
   rmSync(scratch, { recursive: true, force: true });
   const first = sessions[0]!.rollout;
   const visibleModel: Field<string> = first?.visibleModel ? { known: true, value: first.visibleModel } : { known: false, reason: 'not in the session log' };
@@ -181,10 +213,11 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   const version = codexVersion(o.codex.bin);
   const clientVersion: Field<string> = first?.cliVersion ? { known: true, value: first.cliVersion } : version ? { known: true, value: version } : { known: false, reason: 'codex --version failed' };
   const given = initialRules(ctl?.version ?? 'unknown', ctl?.instructions ?? '', ctl?.toolDescriptions ?? {}, first);
+  given.extraContext = entryContext.map(c => `${c.source}: installed=${c.installed}; shownToModel=${c.shownToModel ?? 'unknown'}; raw/entry-context.json`);
   const record: AttemptRecord = {
     schema: attemptSchema, attemptId: `${o.batchId}/${p.attemptId}`, batchId: o.batchId, subject: { kind: 'scenario', id: s.id, version: s.version },
-    entry: 'mcp-only', combination: { harness: 'codex', requestedModel: o.codex.model, visibleModel, effort },
-    client: { version: clientVersion, surface: { known: true, value: 'codex exec' } },
+    entry, combination: { harness: 'codex', requestedModel: o.codex.model, visibleModel, effort },
+    client: { version: clientVersion, surface: { known: true, value: entry === 'dedicated' ? 'wayfinder --harness codex --method mcp -- exec' : 'codex exec' } },
     service: { commit: serviceCommit(), series: 'release', version: ctl?.version ?? 'unknown' },
     given: [given],
     run: { startedAt, endedAt: new Date().toISOString(), completeness, ...(detail ? { detail } : {}) },
@@ -200,6 +233,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
     ...record.sessions.map((x, i): [string, Field<unknown>] => [`sessions[${i}].nativeId`, x.nativeId])];
   record.missing = [...new Set([...missing, ...unknownFields.filter(([, f]) => !f.known).map(([path]) => path)])];
   const isolation = { sandbox: o.codex.sandbox, serviceStopped: stopped ?? null, servedOwnDatabase: service ? opened.has(service.databasePath) : false,
+    ...(dedicatedDir ? { dedicatedServiceRemoved: !existsSync(dedicatedDir), launcherInvocations: launches.length } : {}),
     touchedEverydayDatabase: touchedEverydayDatabase([...opened]), scratchRemoved: !existsSync(scratch), clientSkills: skills, attribution: attribution(record) };
   const text = tilde(redact(JSON.stringify({ ...record, isolation }, null, 1), secrets));
   if (leaks(text, secrets).length) return { attemptId: p.attemptId, scenario: s.id, completeness: 'driver-failed', detail: 'a credential survived redaction; record withheld' };
@@ -209,6 +243,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
 
 export async function runBatch(o: BatchOptions): Promise<{ outcomes: AttemptOutcome[]; refusals: string[] }> {
   const { plan, refusals } = preflight(o);
+  if (o.entry === 'dedicated' && !o.codex.sandbox) refusals.push('Dedicated Entry requires the allowlist sandbox');
   if (refusals.length) return { outcomes: [], refusals };
   if (existsSync(o.out)) return { outcomes: [], refusals: [`${tilde(o.out)} already exists; a Batch never reuses an output directory`] };
   if (o.scratchRoot.startsWith(homedir())) return { outcomes: [], refusals: ['scratch must live outside the home directory, which the sandbox hides'] };
@@ -236,7 +271,7 @@ export async function runBatch(o: BatchOptions): Promise<{ outcomes: AttemptOutc
   // Other clients may edit personal configuration during a Batch; what matters is that none of it names this run.
   const mentionsRun = Object.keys(after.files).filter(f => { const path = f.replace(/^~/, homedir());
     return existsSync(path) && /wf-behave-|behaviour-runs|Behaviour[.-]/.test(readFileSync(path, 'utf8')); });
-  writeFileSync(join(o.out, 'batch.json'), JSON.stringify({ batchId: o.batchId, combination: `codex:${o.codex.model}:${o.codex.effort}`, entry: 'mcp-only',
+  writeFileSync(join(o.out, 'batch.json'), JSON.stringify({ batchId: o.batchId, combination: `codex:${o.codex.model}:${o.codex.effort}`, entry: o.entry ?? 'mcp-only',
     sandbox: o.codex.sandbox, plan: plan.map(p => p.attemptId), ceiling: o.ceiling, outcomes,
     isolation: { before, after, unchanged: JSON.stringify(before) === JSON.stringify(after), personalConfigNamingThisRun: mentionsRun } }, null, 1), { mode: 0o600 });
   return { outcomes, refusals: [] };
@@ -244,13 +279,14 @@ export async function runBatch(o: BatchOptions): Promise<{ outcomes: AttemptOutc
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const { values } = parseArgs({ options: { batch: { type: 'string' }, scenarios: { type: 'string' }, count: { type: 'string', default: '1' },
-    ceiling: { type: 'string' }, model: { type: 'string', default: 'gpt-6-astra' }, effort: { type: 'string', default: 'xhigh' },
+    entry: { type: 'string', default: 'mcp-only' }, ceiling: { type: 'string' }, model: { type: 'string', default: 'gpt-6-astra' }, effort: { type: 'string', default: 'xhigh' },
     out: { type: 'string' }, codex: { type: 'string', default: 'codex' }, 'timeout-min': { type: 'string', default: '30' }, 'no-sandbox': { type: 'boolean', default: false } } });
   if (!values.batch || !values.scenarios || !values.ceiling) {
-    console.error('usage: run.ts --batch <id> --scenarios S0b,F11 --count 2 --ceiling 4 [--model gpt-6-astra] [--effort xhigh]');
+    console.error('usage: run.ts --batch <id> --scenarios S0b,F11 --count 2 --ceiling 4 [--entry mcp-only|dedicated] [--model gpt-6-astra] [--effort xhigh]');
     process.exit(2);
   }
-  const result = await runBatch({ batchId: values.batch, scenarios: values.scenarios.split(','), count: Number(values.count), ceiling: Number(values.ceiling),
+  if (values.entry !== 'mcp-only' && values.entry !== 'dedicated') { console.error(`refused: unsupported Entry: ${values.entry}`); process.exit(2); }
+  const result = await runBatch({ entry: values.entry, batchId: values.batch, scenarios: values.scenarios.split(','), count: Number(values.count), ceiling: Number(values.ceiling),
     out: values.out ?? join(homedir(), 'Library/Application Support/Wayfinder/behaviour-runs', values.batch), scratchRoot: '/private/tmp',
     codex: { model: values.model, effort: values.effort, bin: values.codex, sandbox: !values['no-sandbox'], timeoutMs: Number(values['timeout-min']) * 60_000 } });
   for (const r of result.refusals) console.error(`refused: ${r}`);

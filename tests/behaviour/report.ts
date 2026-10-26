@@ -54,6 +54,7 @@ export function buildReport(batchDirs: string[], reviews: Record<string, Review[
     for (const o of batch.outcomes) {
       const s = all.find(x => x.id === o.scenario);
       const record = records.get(o.attemptId) ?? null;
+      if (record && record.entry !== batch.entry) throw new Error(`${batch.batchId}/${o.attemptId}: Attempt Entry ${record.entry} differs from Batch Entry ${batch.entry}`);
       const scenario: Scenario = s ?? { ...all[0]!, id: o.scenario, version: record?.subject.version ?? 0, common: [], requiredEvents: [], mustNot: [], expect: [] };
       const key: CellKey = { scenario: o.scenario, scenarioVersion: record?.subject.version ?? scenario.version, entry: batch.entry, combination: batch.combination,
         series: record?.service.series ?? service?.series ?? 'release', release: record?.service.version ?? service?.version ?? 'unknown' };
@@ -120,7 +121,7 @@ function tableRow(c: ReportCell): string {
 
 /** Each anomalous cell points at its Attempts, the items that decided or still block them, their evidence and the raw files. */
 function cellDetail(c: ReportCell): string {
-  const head = `- **${c.key.scenario}** · ${c.key.combination} · ${c.key.series}:${c.key.release}: ${c.verdict.outcome}${c.verdict.reasons.length ? ` (${c.verdict.reasons.join('; ')})` : ''}${c.retryDue ? `; ${c.retryDue}` : ''}`;
+  const head = `- **${c.key.scenario}** · ${c.key.entry} · ${c.key.combination} · ${c.key.series}:${c.key.release}: ${c.verdict.outcome}${c.verdict.reasons.length ? ` (${c.verdict.reasons.join('; ')})` : ''}${c.retryDue ? `; ${c.retryDue}` : ''}`;
   const attempts = c.verdict.attempts.map(a => {
     const items = [...a.required, ...a.mustNot, ...a.expect.flatMap(g => g.items)].filter(i => i.status !== 'holds' && i.evidence.length)
       .map(i => `${i.id} (${i.status}) at ${i.evidence.slice(0, 3).join(', ')}`);
@@ -138,8 +139,10 @@ export function renderMarkdown(r: Report): string {
   const section = (title: string, cells: ReportCell[]) => [`## ${title}`, '', cells.length ? cells.map(cellDetail).join('\n') : 'None.', ''];
   return ['# Behaviour report', '', `Batches: ${r.batches.join(', ')}. Counts are pass/fail/incomplete/insufficient evidence; a pass over a finite number of Attempts says only that those samples passed.`, '',
     ...section('New regressions', regressions), ...section('Flaky', flaky), ...section('Uncovered, undecided or retry due', uncovered), ...section('Failing', failing),
-    '## All cells', '', '| Scenario | Entry | Combination | Release | Outcome | Attempts | Not run | Against baseline |', '| --- | --- | --- | --- | --- | --- | --- | --- |',
-    ...[...r.cells].sort((a, b) => cellId(a.key).localeCompare(cellId(b.key))).map(tableRow), ''].join('\n');
+    '## All cells', '', ...[...new Set(r.cells.map(c => c.key.entry))].sort().flatMap(entry => [
+      `### ${entry}`, '', '| Scenario | Entry | Combination | Release | Outcome | Attempts | Not run | Against baseline |', '| --- | --- | --- | --- | --- | --- | --- | --- |',
+      ...r.cells.filter(c => c.key.entry === entry).sort((a, b) => cellId(a.key).localeCompare(cellId(b.key))).map(tableRow), '',
+    ])].join('\n');
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

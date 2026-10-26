@@ -16,7 +16,7 @@ Nothing here starts a service or a model. Runs that spend model quota happen onl
 | `upgrade-checks.ts` | Upgrade compatibility checks, listed apart from the 26 |
 | `seeds/` | Seed Maps; `f11.json` is the redacted capture of a real Map |
 | `fixtures/` | Working-directory fixtures copied into the agent's directory |
-| `runner/` | The runner: isolated service, Controller, Codex Driver, normalizer (B02a) |
+| `runner/` | The runner: isolated service, Controller, Codex MCP-only and Dedicated Drivers, normalizer (B02a/B02d) |
 | `verdict.ts`, `report.ts` | Verdicts of Attempts and cells, and the comparison report (B03a) |
 
 ```sh
@@ -60,6 +60,46 @@ Codex runs with a private `HOME` and `CODEX_HOME` under `/private/tmp`, `--ignor
 Before anything runs, the runner refuses what it cannot do (Controller actions, several or concurrent sessions, history seeds: B02b and B04) and an existing output directory. A plan larger than `--ceiling` runs up to it and lists the rest as not run; Ctrl-C stops the client and service and marks what is left cancelled. Each Attempt writes `attempt.json` (the evidence record plus isolation facts: whether the sandbox was on, whether the service opened only its own database and never the everyday one, scratch removed, built-in client skills, and whether every committed receipt matches a Revision its session's credential authored) and `raw/` (Codex JSON per turn, the session log, the service log and initialize report, the final working directory), with credentials replaced by placeholders. `batch.json` lists every planned Attempt's outcome and compares personal configuration and the everyday service before and after.
 
 `runner/runner.test.ts` covers the runner without a model: refusals, every library seed against the real service, the sandbox profile, and one S0b Attempt played by `runner/fake-codex.mjs`, which makes real MCP calls.
+
+## Codex Dedicated Entry
+
+Select `--entry dedicated` to drive the repository's `scripts/wayfinder-agent/wayfinder` through its documented noninteractive passthrough. The default stays `--entry mcp-only`. Both Entries use the same Scenario inputs, Controller, native-output normalizer, receipts and allowlist sandbox. Dedicated Batches refuse `--no-sandbox`. Dedicated support remains **unverified** in `clients.ts` until its five onboarding checks have evidence from a Batch Kun approved; synthetic tests do not onboard it.
+
+| Context | MCP-only | Dedicated |
+| --- | --- | --- |
+| Client invocation | `codex exec`, `--ignore-user-config` | Actual `wayfinder --harness codex --method mcp -- …`, including `--no-daemon` |
+| Launcher instructions | None | Launcher installs its unchanged instruction template as the private `CODEX_HOME/AGENTS.md`, substituting the run's output path |
+| Wayfinder Skill | None | Launcher installs the repository's MCP Skill, copied unchanged into the run's projected checkout |
+| Configuration | Runner's command-line MCP configuration | Launcher's real `config.toml` template and command-line model, effort and MCP URL overrides |
+| Personal context | Denied by the allowlist | Also denied; the launcher's reference to project control planes does not make personal files readable |
+
+The Controller creates and owns the service before invoking the launcher. All launcher overrides are supplied: `WAYFINDER_AGENT_STATE_ROOT`, `WAYFINDER_AGENT_SERVICE_DIR`, `WAYFINDER_AGENT_OUTPUTS`, `WAYFINDER_AGENT_PORT`, `WAYFINDER_AGENT_DATABASE` and `WAYFINDER_AGENT_CHECKOUT`; `WAYFINDER_AGENT_USAGE=test` identifies future launcher metadata. `HOME` also points to the run's private home, so authentication linking and refresh synchronization remain confined to the copied login. No daily installation ID is imported. No new launcher overrides are needed.
+
+The database and credentials live in a new directory under `~/Library/Caches/wayfinder-behaviour-tests/`; the private client homes, outputs, fixtures and projected checkout live in the Attempt's scratch. The projection contains only the unchanged MCP Skill, with no service build: if the owned service disappears, the launcher fails instead of starting an untracked daemon. The actual launcher still comes from this repository. A private `codex` shim records its launch credential for redaction, strips bootstrap variables, and puts the client inside the existing allowlist sandbox. The client cannot read the service directory, repository source or verdicts; ports 18765 and 18766 remain denied. The Controller closes its connection, stops only its own service, captures evidence, then removes the service directory, credentials and scratch.
+
+Each Attempt records `entry=dedicated`, the launcher surface, the additional context in `given[].extraContext`, and `raw/entry-context.json`: source names (including Skill activation metadata), installed text, hashes, whether that text appears in the native rollout, and redacted launch arguments and overrides. Installed context does not by itself prove the model read it. Raw outputs are saved under `raw/outputs/`. Dedicated artifact capture redacts literal credentials, preserves other binary bytes and omits symlinks and `node_modules`. The launcher's Client ID remains its real `Codex:<model>:<effort>` identity; single-session write receipts establish attribution. Unsupported multiple-session and Controller-action Scenarios are refused before launch.
+
+The report keys and compares cells by Entry, labels anomalous cells with their Entry and renders separate Entry tables. A Batch/Attempt Entry mismatch is refused, including when other records in that Batch are missing.
+
+### Proposed onboarding Batch (not authorized or run)
+
+After Kun approves **Codex · gpt-6-astra · xhigh · Dedicated**, run S0b and F11 twice each, ceiling four Attempts, no model reviews or arbitration in this Batch. S0b proves same-session resume and native capture; F11 adds seeded Map/receipt evidence. The model-free sandbox test supplies fixture permissions and denied-personal-context evidence, as in B02a. A behavioural failure remains a failure and does not prevent proving that the Driver records it correctly.
+
+```sh
+npm run build
+node tests/behaviour/runner/run.ts --batch B02d-onboarding --entry dedicated --scenarios S0b,F11 --count 2 --ceiling 4 --model gpt-6-astra --effort xhigh
+node tests/behaviour/report.ts "$HOME/Library/Application Support/Wayfinder/behaviour-runs/B02d-onboarding"
+```
+
+Use a fresh approved Batch ID and never reuse its output directory. Check all five R2 onboarding items against the native records, `batch.json` isolation hashes/path checks, `attempt.json` database/cleanup/attribution evidence and `raw/entry-context.json`. Record any missing native fields explicitly. This small Batch does not claim a full-library baseline or release acceptance. Any model reviews need their own approved counts and ceiling.
+
+Model-free checks, with Node 26.3.0 and a built service:
+
+```sh
+npm exec vitest run tests/behaviour/runner/dedicated.test.ts tests/behaviour/verdict.test.ts
+```
+
+These invoke the actual launcher with a synthetic login and fake Codex, exercise two turns and Map writes, timeout cleanup, output-directory refusal, a stopped service, and separate report cells. They spend no model quota.
 
 ## Verdicts and the report
 

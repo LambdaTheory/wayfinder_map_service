@@ -15,6 +15,8 @@ export interface CodexOptions {
   /** Wrap the client in `sandbox-exec` with `sandboxProfile`. Recorded on every Attempt. */
   sandbox: boolean;
   timeoutMs: number;
+  /** A copied/synthetic login for model-free tests; omitted for the existing daily-login copy. */
+  authFile?: string;
 }
 
 export interface CodexSession { home: string; codexHome: string; token: string; thread: string | null }
@@ -53,12 +55,12 @@ export function sandboxProfile(scratch: string, blockedPorts: number[] = reserve
 }
 
 /** A private HOME and CODEX_HOME for one session, with a copy of the daily login (deleted with the scratch). */
-export function prepareSession(scratch: string, label: string, token: string): CodexSession {
+export function prepareSession(scratch: string, label: string, token: string, authFile = join(homedir(), '.codex/auth.json')): CodexSession {
   const home = join(scratch, `home-${label}`);
   const codexHome = join(home, '.codex');
   mkdirSync(join(home, 'tmp'), { recursive: true, mode: 0o700 });
   mkdirSync(codexHome, { recursive: true, mode: 0o700 });
-  const auth = join(homedir(), '.codex/auth.json');
+  const auth = authFile;
   if (existsSync(auth)) { copyFileSync(auth, join(codexHome, 'auth.json')); chmodSync(join(codexHome, 'auth.json'), 0o600); }
   return { home, codexHome, token, thread: null };
 }
@@ -113,6 +115,12 @@ export function runTurn({ options: o, session: s, port, workdir, prompt, profile
   const [cmd, argv] = o.sandbox ? ['sandbox-exec', ['-f', profile, o.bin, ...args]] : [o.bin, args];
   const env = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: s.home, CODEX_HOME: s.codexHome, TMPDIR: join(s.home, 'tmp'),
     LANG: 'en_US.UTF-8', WAYFINDER_TOKEN: s.token };
+  return executeTurn({ options: o, session: s, workdir, prompt, ...(onChild ? { onChild } : {}) }, cmd as string, argv as string[], env);
+}
+
+/** Shared native process capture; the Entry chooses the command, configuration and environment. */
+export function executeTurn({ options: o, session: s, workdir, prompt, onChild }: Omit<TurnRequest, 'port' | 'profile'>,
+  cmd: string, argv: string[], env: NodeJS.ProcessEnv): Promise<TurnResult> {
   const started = Date.now();
   return new Promise(resolve => {
     const child = spawn(cmd as string, argv as string[], { cwd: workdir, env, stdio: ['pipe', 'pipe', 'pipe'] });

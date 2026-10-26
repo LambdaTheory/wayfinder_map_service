@@ -12,7 +12,7 @@ import { join } from 'node:path';
 const args = process.argv.slice(2);
 if (args[0] === '--version') { console.log('codex-cli 0.0.0-fake'); process.exit(0); }
 const url = /mcp_servers\.wayfinder\.url="([^"]+)"/.exec(args.join(' '))[1];
-const resume = args[1] === 'resume' ? args.at(-2) : null;
+const resume = args[args.indexOf('exec') + 1] === 'resume' ? args.at(-2) : null;
 const thread = resume ?? randomUUID();
 const prompt = await new Promise(resolve => { let text = ''; process.stdin.on('data', d => { text += d; }); process.stdin.on('end', () => resolve(text)); });
 const emit = event => console.log(JSON.stringify(event));
@@ -39,6 +39,15 @@ record({ type: 'event_msg', payload: { type: 'thread_settings_applied', thread_s
 const tools = await rpc('tools/list', {});
 record({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: init.instructions }] } });
 record({ type: 'response_item', payload: { type: 'additional_tools', tools: tools.tools.map(t => ({ name: t.name, description: t.description })) } });
+// Exercise the launcher's actual context installation, without claiming a real model read it.
+if (process.env.CODEX_HOME.endsWith('/.codex-wayfinder')) {
+  const instructions = readFileSync(join(process.env.CODEX_HOME, 'AGENTS.md'), 'utf8');
+  const skill = readFileSync(join(process.env.HOME, '.agents/skills/wayfinder/SKILL.md'), 'utf8');
+  record({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: instructions }] } });
+  record({ type: 'response_item', payload: { type: 'message', role: 'tool', content: [{ type: 'input_text', text: skill }] } });
+  writeFileSync('entry-probe.json', JSON.stringify({ privateHome: process.env.HOME, codexHome: process.env.CODEX_HOME,
+    bootstrapKeys: Object.keys(process.env).filter(k => k.startsWith('WAYFINDER_AGENT_')), args, resumed: Boolean(resume) }));
+}
 emit({ type: 'thread.started', thread_id: thread });
 emit({ type: 'turn.started' });
 let item = 0;
