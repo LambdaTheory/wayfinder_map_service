@@ -235,3 +235,26 @@ test('a live proxy grant prevents a later harness endpoint from adopting its por
     expect(proxy.count()).toBe(0);
   } finally { await proxy.close(); }
 });
+
+attack('every local port granted to a client stays unavailable to later harness allocation after cleanup', async () => {
+  const { portUnavailable } = await import('./network-ports.ts');
+  const endpoints = await Promise.all([listener(), listener(), listener()]); // relay, Dedicated service, scenario bait
+  const ports = endpoints.map(endpoint => endpoint.port);
+  const scratch = mkdtempSync(join(root, 'retired-grants-'));
+  const session = prepareSession(scratch, 'A', 'synthetic', null);
+  const work = join(scratch, 'work'); mkdirSync(work);
+  const { controlDir } = prepareSandbox(scratch); controls.push(controlDir);
+  try {
+    const profile = writeProfile(controlDir, session, work, '/bin/sh', {localPorts:ports});
+    const code = `const net=require('node:net'); Promise.all(${JSON.stringify(ports)}.map(port=>new Promise((resolve,reject)=>{
+      const socket=net.connect(port,'127.0.0.1');socket.on('data',()=>{});socket.on('end',resolve);socket.on('error',reject);
+    }))).catch(()=>process.exitCode=1);`;
+    const exit = await new Promise<number|null>(resolve => {
+      const child=spawn('/usr/bin/sandbox-exec',['-f',profile.path,process.execPath,'-e',code],{cwd:work,env:{},stdio:'ignore'});
+      child.once('close',resolve);
+    });
+    expect(exit).toBe(0);expect(endpoints.map(endpoint=>endpoint.count())).toEqual([1,1,1]);
+  } finally { await Promise.all(endpoints.map(endpoint=>endpoint.close())); rmSync(controlDir,{recursive:true,force:true}); }
+  expect(ports.map(portUnavailable)).toEqual([true,true,true]);
+  for (const port of ports) expect(()=>proxyRouting({HTTPS_PROXY:`http://127.0.0.1:${port}`})).toThrow('protected harness endpoint');
+});

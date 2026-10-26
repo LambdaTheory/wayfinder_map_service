@@ -2,14 +2,16 @@
 import { existsSync } from 'node:fs';
 
 export const reservedPorts = [18765, 18766];
-const retiredProxyPorts = new Set<number>();
+const retiredClientPorts = new Set<number>();
 const protectedPorts = new Map<number, number>();
 const proxyGrants = new Map<string, Set<number>>();
-export const isProtectedPort = (port: number) => reservedPorts.includes(port) || protectedPorts.has(port) || retiredProxyPorts.has(port);
+export const isProtectedPort = (port: number) => reservedPorts.includes(port) || protectedPorts.has(port) || retiredClientPorts.has(port);
 function proxyPorts(): Set<number> {
   for (const owner of proxyGrants.keys()) if (!existsSync(owner)) proxyGrants.delete(owner);
   return new Set([...proxyGrants.values()].flatMap(ports => [...ports]));
 }
+/** A client keeps its socket grants after process escape, so never recycle them in this controller. */
+export const retireClientPorts = (ports: readonly number[]) => { ports.forEach(port => retiredClientPorts.add(port)); };
 export const portUnavailable = (port: number) => isProtectedPort(port) || proxyPorts().has(port);
 
 /** Reserve proxy capabilities for as long as the runner-owned control directory survives. */
@@ -40,5 +42,5 @@ export const permitsProxyPort = (permit: ProxyPermit | undefined, port: number) 
 export function protectProxyPorts(ports: number[]): { permit: ProxyPermit; release(): void } {
   const release = protectPorts(ports); const permit = Object.freeze({}) as ProxyPermit;
   permits.set(permit, new Set(ports));
-  return { permit, release: () => { ports.forEach(port => retiredProxyPorts.add(port)); release(); } };
+  return { permit, release: () => { retireClientPorts(ports); release(); } };
 }

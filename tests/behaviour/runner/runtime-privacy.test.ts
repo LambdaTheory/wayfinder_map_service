@@ -14,7 +14,7 @@ const here = fileURLToPath(new URL('.', import.meta.url));
 const safeEnv = () => Object.fromEntries(Object.entries(process.env).filter(([key]) =>
   !/^(?:https?_proxy|all_proxy|no_proxy|node_options|node_use_env_proxy)$/i.test(key)));
 
-async function fixture(entry: 'mcp-only' | 'dedicated', mode: string, appendix = '', watchdogMs = 0) {
+async function fixture(entry: 'mcp-only' | 'dedicated', mode: string, appendix = '', watchdogMs = 0, history = false) {
   const root = realpathSync(mkdtempSync('/private/tmp/wf-runtime-privacy-'));
   const echoedTokens: string[] = []; const descendants = new Set<number>(); let descendantRequests = 0;
   const watcher = watch(root, {recursive:true}, (_event, path) => {
@@ -79,8 +79,18 @@ async function fixture(entry: 'mcp-only' | 'dedicated', mode: string, appendix =
   const childScript = join(root, 'batch.mjs');
   writeFileSync(childScript, `
 import { runBatch } from ${JSON.stringify(pathToFileURL(join(here, 'run.ts')).href)};
+import { library } from ${JSON.stringify(pathToFileURL(join(here, '../library.ts')).href)};
+import { setGlobalProxyFromEnv } from 'node:http';
 import { syntheticClientState } from ${JSON.stringify(pathToFileURL(join(here, 'test-state.ts')).href)};
+if (${JSON.stringify(mode)} === 'global-dispatcher') {
+  await (await fetch('http://127.0.0.1:${target}/initialize-dispatcher')).text();
+  setGlobalProxyFromEnv({HTTP_PROXY:'http://127.0.0.1:${port}',NO_PROXY:'localhost'});
+}
 await fetch('http://127.0.0.1:${target}/positive-control');
+if (${history}) library.find(s => s.id === 'S0b').seed = {restores:'history',fixtures:[],maps:[{
+  mapId:'Proxy.History',title:'Before',destination:'Synthetic seed',notes:'',tickets:[],
+  history:[{author:'Proxy.Historical',commands:[{kind:'map.update',patch:{title:'After'}}]}]
+}]};
 const result = await runBatch({entry:${JSON.stringify(entry)},batchId:'RuntimePrivacy',scenarios:['S0b'],count:1,ceiling:1,
   out:${JSON.stringify(join(root, 'records'))},scratchRoot:${JSON.stringify(root)},...syntheticClientState(${JSON.stringify(root)}),
   proxyEnv:{HTTPS_PROXY:${JSON.stringify(proxyUrl)},NO_PROXY:'localhost'},
@@ -107,14 +117,14 @@ process.send(result);
       new Promise<void>(resolve => proxy.close(() => resolve())), new Promise<void>(resolve => positive.close(() => resolve()))]); rmSync(root, { recursive: true, force: true }); } };
 }
 
-const proxyModes = ['explicit-config', 'default-config', 'off', 'env',
+const proxyModes = ['explicit-config', 'default-config', 'off', 'env', 'global-dispatcher',
   ...['--use-env-proxy', '--use_env_proxy', '--use-env_proxy', '--use_env-proxy'].flatMap(flag => ['argv:' + flag, 'options:' + flag])];
 attack.each((['mcp-only', 'dedicated'] as const).flatMap(entry => proxyModes.map(mode => ({entry,mode}))))('$entry keeps credentials direct with Node proxy mode $mode while client traffic uses the Attempt channel', async ({entry,mode}) => {
   const f = await fixture(entry, mode, `
 const modelProxy = new URL(process.env.HTTPS_PROXY);
 await new Promise((resolve,reject)=>import('node:http').then(({request})=>{
  const req=request({host:'127.0.0.1',port:modelProxy.port,headers:{'x-native-probe':'yes'}},res=>{res.resume();res.on('end',resolve);});req.on('error',reject);req.end();}));
-`);
+`, 0, true);
   try {
     expect(f.code).toBe(0);
     expect(f.positiveControl > 0).toBe(mode !== 'off');
@@ -122,6 +132,8 @@ await new Promise((resolve,reject)=>import('node:http').then(({request})=>{
     expect(f.result?.refusals).toEqual([]);
     expect(f.result?.outcomes[0]?.completeness).toBe('complete');
     expect(f.nativeProxyCalls).toBe(2);
+    const record = JSON.parse(readFileSync(join(f.root, 'records/S0b-1/attempt.json'), 'utf8'));
+    expect(record.maps.find((map: {mapId:string}) => map.mapId === 'Proxy.History').history[1].author.clientId).toBe('Proxy.Historical');
     const channel = JSON.parse(readFileSync(join(f.root, 'records/S0b-1/raw/proxy-channel.json'), 'utf8'));
     expect(channel).toEqual({enabled:true,connections:2,blockedConnections:0,closed:true});
   } finally { await f.close(); }
@@ -199,8 +211,14 @@ writeFileSync('owned-fixture-pids.json',JSON.stringify([late.pid]));process.exit
 attack.each(['mcp-only', 'dedicated'] as const)('%s exposes only its forwarding endpoint, with no direct IPv4/alias/IPv6/UDP proxy bypass', async entry => {
   const f = await fixture(entry, 'off', `
 const assert = (await import('node:assert/strict')).default;
-const {connect: connectProbe} = await import('node:net');
+const {connect: connectProbe,createServer: unixListener} = await import('node:net');
 const {createSocket: udpProbe} = await import('node:dgram');
+const unixPath = join(process.cwd(),'owned.sock');
+const unix = unixListener(); await new Promise(resolve=>unix.listen(unixPath,resolve));
+try {
+ const result=await new Promise(resolve=>{const socket=connectProbe({path:unixPath});socket.on('connect',()=>{socket.destroy();resolve('connected');});socket.on('error',error=>resolve(error.code));});
+ assert.equal(result,'EPERM');
+} finally {await new Promise(resolve=>unix.close(resolve));}
 const gateway = new URL(process.env.HTTPS_PROXY);
 assert.notEqual(Number(gateway.port),__UPSTREAM_PORT__);
 await new Promise((resolve,reject)=>import('node:http').then(({request})=>{

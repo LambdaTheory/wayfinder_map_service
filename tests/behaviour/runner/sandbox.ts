@@ -7,7 +7,7 @@ import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { proxyRouting } from '../proxy.ts';
 import { localNetworkDenials } from './network-policy.ts';
-import { reserveProxyPorts, reservedPorts } from './network-ports.ts';
+import { reserveProxyPorts, reservedPorts, retireClientPorts } from './network-ports.ts';
 
 import type { ProxyPermit } from './network-ports.ts';
 
@@ -245,7 +245,9 @@ export function writeProfile(controlDir: string, session: { home: string }, work
     writeFileSync(path, sandboxProfile({ home, workdir, readRoots, readFiles: [executable, ...mutable], denyRoots,
       denyEntries, controlDirectories: controls, localPorts: access.localPorts ?? [], proxyRules: proxies.rules, proxyOnly: !!access.proxyPermit && proxies.ports.length > 0 }), { flag: 'wx', mode: 0o600 });
     const profile = { path, readOnlyRoots, mutableReadOnlyFiles: mutable, pinnedRoots, identities: expectedIdentities, proxyEnvironment: Object.freeze(proxies.environment) };
-    return { ...profile, hashes: Object.freeze({ ...immutableHashes, [path]: fileHash(path) }) };
+    const result = { ...profile, hashes: Object.freeze({ ...immutableHashes, [path]: fileHash(path) }) };
+    retireClientPorts(access.localPorts ?? []);
+    return result;
   } catch (error) { if (error instanceof IsolationError) throw error; throw new IsolationError(`cannot prepare sandbox: ${String(error)}`); }
 }
 
