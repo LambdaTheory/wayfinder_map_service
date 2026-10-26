@@ -104,6 +104,46 @@ describe('sandbox', () => {
 });
 
 describe('normalizer', () => {
+  const resourcePayload = { server: 'wayfinder', uri: 'wayfinder://workflow/exploration',
+    contents: [{ uri: 'wayfinder://workflow/exploration', text: 'version: 9.9.9\nSynthetic rules' }] };
+  const resourceResult = { content: [{ type: 'text', text: JSON.stringify(resourcePayload) }], structured_content: null };
+  test('a completed text-only Resource result retains its native payload', () => {
+    const { events } = normalizeTurn([{ type: 'item.completed', item: { id: 'resource', type: 'mcp_tool_call', server: 'wayfinder',
+      tool: 'read_mcp_resource', arguments: { uri: resourcePayload.uri }, status: 'completed', result: resourceResult } }], 'A', 0, 'go', '', 0, '/w');
+    expect(events.find(e => e.kind === 'tool-call')).toMatchObject({ result: { known: true, value: resourcePayload }, failed: false });
+    expect(events.find(e => e.kind === 'resource-read')).toMatchObject({ ok: true, uri: resourcePayload.uri });
+  });
+  test('a text Resource result stays present when it is not JSON', () => {
+    const content = [{ type: 'text', text: 'version: 9.9.9\nSynthetic text or truncated payload' }];
+    const { events } = normalizeTurn([{ type: 'item.completed', item: { id: 'resource', type: 'mcp_tool_call', server: 'wayfinder',
+      tool: 'read_mcp_resource', status: 'completed', result: { content, structured_content: null } } }], 'A', 0, 'go', '', 0, '/w');
+    expect(events.find(e => e.kind === 'tool-call')).toMatchObject({ result: { known: true, value: { content } } });
+  });
+  test.each([
+    { name: 'failed status', status: 'failed', result: resourceResult },
+    { name: 'native error', status: 'completed', result: resourceResult, error: { message: 'Synthetic failure' } },
+    { name: 'MCP error flag', status: 'completed', result: { ...resourceResult, is_error: true } },
+    { name: 'protocol camelCase error flag', status: 'completed', result: { ...resourceResult, isError: true } },
+    { name: 'absent result', status: 'completed', result: null },
+    { name: 'empty result', status: 'completed', result: { content: [], structured_content: null } },
+  ])('an unsuccessful or absent Resource result stays unknown: $name', row => {
+    const { events } = normalizeTurn([{ type: 'item.completed', item: { id: 'resource', type: 'mcp_tool_call', server: 'wayfinder',
+      tool: 'read_mcp_resource', arguments: { uri: resourcePayload.uri }, ...row } }], 'A', 0, 'go', '', 0, '/w');
+    expect(events.find(e => e.kind === 'tool-call')).toMatchObject({ result: { known: false } });
+    expect(events.find(e => e.kind === 'resource-read')).toMatchObject({ ok: false });
+  });
+  test('Resource text fallback never manufactures a Map write receipt', () => {
+    const { events } = normalizeTurn([{ type: 'item.completed', item: { id: 'write', type: 'mcp_tool_call', server: 'wayfinder',
+      tool: 'map_apply', arguments: { mapId: 'M' }, status: 'completed', result: { content: [{ type: 'text', text: JSON.stringify({ kind: 'committed', mapId: 'M', revision: 1 }) }] } } }], 'A', 0, 'go', '', 0, '/w');
+    expect(receiptsFrom(events)[0]!.outcome.kind).toBe('unknown');
+  });
+  test('the repository synthetic McpToolCall result keeps its protocol field names', () => {
+    // B08 format fixture only, never a real session log; adapt its envelope to exec's item.completed.
+    const rows = readFileSync(fileURLToPath(new URL('../fixtures/scan/codex-mcp-0.164.jsonl', import.meta.url)), 'utf8').trim().split('\n').map(s => JSON.parse(s));
+    const item = rows.find(r => r.payload?.item?.id === 'read').payload.item;
+    const { events } = normalizeTurn([{ type: 'item.completed', item: { ...item, type: 'mcp_tool_call' } }], 'A', 0, 'go', '', 0, '/w');
+    expect(events.find(e => e.kind === 'tool-call')).toMatchObject({ result: { known: true, value: item.result.structuredContent } });
+  });
   test('paths are workdir-relative; reads come from common read commands', () => {
     expect(relativePath('/private/tmp/w/work/src/a.js', '/private/tmp/w/work')).toBe('src/a.js');
     expect(relativePath('/Users/someone/secret/x', '/private/tmp/w/work')).toBe('<outside>/secret/x');

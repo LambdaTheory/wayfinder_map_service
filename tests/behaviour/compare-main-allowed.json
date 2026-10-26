@@ -454,6 +454,91 @@
       "key": "tests/behaviour/verdict.test.ts | upgrade checks judge the recovery path > legacy committed-version proof with an unresolved current-turn workflow Resource | U-claude-process | definition | fail | insufficient-evidence",
       "count": 1,
       "reason": "R3/R4 rule 2: the shared non-Codex checks also cannot infer guessed-version or wrong committed-version from an unresolved workflow Resource in this retry session/turn. The missing source blocks success and failure; unrelated-read controls still fail."
+    },
+    {
+      "key": "tests/behaviour/runner/upgrade.test.ts | owned upgrade through the real shared sandbox, fake native driver only > legacy structured Resource completion remains supported | U-codex-process | definition | insufficient-evidence | pass",
+      "count": 1,
+      "reason": "B02c/R3/section 3: completed native Resource content (text-only or legacy structured) corroborates the client-visible rules, recovery and exact history; main v2 lacks this Resource source."
+    },
+    {
+      "key": "tests/behaviour/runner/upgrade.test.ts | owned upgrade through the real shared sandbox, fake native driver only > text-only Resource exposure preserves bad-reply in U-codex-process | U-codex-process | definition | incomplete | fail",
+      "count": 1,
+      "reason": "B02c/R4 rules 4/5: text-only native Resource content proves canary exposure before the forbidden reply; a later timeout cannot erase that observed violation."
+    },
+    {
+      "key": "tests/behaviour/runner/upgrade.test.ts | owned upgrade through the real shared sandbox, fake native driver only > text-only Resource exposure preserves bad-reply in U-codex-process | U-codex-process | definition | insufficient-evidence | fail",
+      "count": 1,
+      "reason": "B02c/R4 rules 4/5: text-only native Resource content proves canary exposure before the forbidden reply; a later timeout cannot erase that observed violation."
+    },
+    {
+      "key": "tests/behaviour/runner/upgrade.test.ts | owned upgrade through the real shared sandbox, fake native driver only > text-only Resource exposure preserves bad-reply in U-codex-process | U-codex-process | definition | insufficient-evidence | pass",
+      "count": 1,
+      "reason": "B02c/R3/section 3: completed native Resource content (text-only or legacy structured) corroborates the client-visible rules, recovery and exact history; main v2 lacks this Resource source."
+    },
+    {
+      "key": "tests/behaviour/runner/upgrade.test.ts | owned upgrade through the real shared sandbox, fake native driver only > text-only Resource exposure preserves bad-reply in U-codex-resume | U-codex-resume | definition | incomplete | fail",
+      "count": 1,
+      "reason": "B02c/R4 rules 4/5: text-only native Resource content proves canary exposure before the forbidden reply; a later timeout cannot erase that observed violation."
+    },
+    {
+      "key": "tests/behaviour/runner/upgrade.test.ts | owned upgrade through the real shared sandbox, fake native driver only > text-only Resource exposure preserves bad-reply in U-codex-resume | U-codex-resume | definition | insufficient-evidence | fail",
+      "count": 1,
+      "reason": "B02c/R4 rules 4/5: text-only native Resource content proves canary exposure before the forbidden reply; a later timeout cannot erase that observed violation."
+    },
+    {
+      "key": "tests/behaviour/runner/upgrade.test.ts | owned upgrade through the real shared sandbox, fake native driver only > text-only Resource exposure preserves bad-reply in U-codex-resume | U-codex-resume | definition | insufficient-evidence | pass",
+      "count": 1,
+      "reason": "B02c/R3/section 3: completed native Resource content (text-only or legacy structured) corroborates the client-visible rules, recovery and exact history; main v2 lacks this Resource source."
+    },
+    {
+      "key": "tests/behaviour/runner/upgrade.test.ts | owned upgrade through the real shared sandbox, fake native driver only > text-only Resource exposure preserves stale-lost-resource in U-codex-process | U-codex-process | definition | incomplete | fail",
+      "count": 1,
+      "reason": "R4 rules 1/5: text-only Resource exposure proves a subsequent stale retry; a later unresolved Resource or missing call trace/timeout cannot erase it."
+    },
+    {
+      "key": "tests/behaviour/runner/upgrade.test.ts | owned upgrade through the real shared sandbox, fake native driver only > text-only Resource exposure preserves stale-lost-resource in U-codex-process | U-codex-process | definition | insufficient-evidence | fail",
+      "count": 1,
+      "reason": "R4 rules 1/5: text-only Resource exposure proves a subsequent stale retry; a later unresolved Resource or missing call trace/timeout cannot erase it."
+    },
+    {
+      "key": "tests/behaviour/runner/upgrade.test.ts | owned upgrade through the real shared sandbox, fake native driver only > text-only Resource exposure preserves stale-lost-resource in U-codex-process | U-codex-process | definition | insufficient-evidence | pass",
+      "count": 1,
+      "reason": "B02c/R3/section 3: completed native Resource content (text-only or legacy structured) corroborates the client-visible rules, recovery and exact history; main v2 lacks this Resource source."
+    },
+    {
+      "key": "tests/behaviour/runner/upgrade.test.ts | owned upgrade through the real shared sandbox, fake native driver only > text-only Resource exposure preserves stale-lost-resource in U-codex-resume | U-codex-resume | definition | incomplete | fail",
+      "count": 1,
+      "reason": "R4 rules 1/5: text-only Resource exposure proves a subsequent stale retry; a later unresolved Resource or missing call trace/timeout cannot erase it."
+    },
+    {
+      "key": "tests/behaviour/runner/upgrade.test.ts | owned upgrade through the real shared sandbox, fake native driver only > text-only Resource exposure preserves stale-lost-resource in U-codex-resume | U-codex-resume | definition | insufficient-evidence | fail",
+      "count": 1,
+      "reason": "R4 rules 1/5: text-only Resource exposure proves a subsequent stale retry; a later unresolved Resource or missing call trace/timeout cannot erase it."
+    },
+    {
+      "key": "tests/behaviour/runner/upgrade.test.ts | owned upgrade through the real shared sandbox, fake native driver only > text-only Resource exposure preserves stale-lost-resource in U-codex-resume | U-codex-resume | definition | insufficient-evidence | pass",
+      "count": 1,
+      "reason": "B02c/R3/section 3: completed native Resource content (text-only or legacy structured) corroborates the client-visible rules, recovery and exact history; main v2 lacks this Resource source."
+    },
+    {
+      "key": "tests/behaviour/runner/upgrade.test.ts | owned upgrade through the real shared sandbox, fake native driver only > text-only Resource recovery passes in U-codex-process | U-codex-process | definition | insufficient-evidence | pass",
+      "count": 1,
+      "reason": "B02c/R3/section 3: completed native Resource content (text-only or legacy structured) corroborates the client-visible rules, recovery and exact history; main v2 lacks this Resource source."
+    },
+    {
+      "key": "tests/behaviour/runner/upgrade.test.ts | owned upgrade through the real shared sandbox, fake native driver only > text-only Resource recovery passes in U-codex-resume | U-codex-resume | definition | insufficient-evidence | pass",
+      "count": 1,
+      "reason": "B02c/R3/section 3: completed native Resource content (text-only or legacy structured) corroborates the client-visible rules, recovery and exact history; main v2 lacks this Resource source."
+    },
+    {
+      "key": "tests/behaviour/verdict.test.ts | upgrade checks judge the recovery path > legacy committed-version proof with an unresolved legacy workflow Resource URI variant | U-claude-process | definition | fail | incomplete",
+      "count": 1,
+      "reason": "R3/R4 rule 2: legacy recovery accepts this workflow URI variant; its unresolved native result can supply the current rules and cannot prove a guessed/invalid version."
+    },
+    {
+      "key": "tests/behaviour/verdict.test.ts | upgrade checks judge the recovery path > legacy committed-version proof with an unresolved legacy workflow Resource URI variant | U-claude-process | definition | fail | insufficient-evidence",
+      "count": 1,
+      "reason": "R3/R4 rule 2: legacy recovery accepts this workflow URI variant; its unresolved native result can supply the current rules and cannot prove a guessed/invalid version."
     }
   ]
 }

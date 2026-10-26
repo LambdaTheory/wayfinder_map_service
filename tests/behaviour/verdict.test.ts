@@ -363,8 +363,24 @@ describe('upgrade checks judge the recovery path', () => {
     call(14, 'map_apply', { kind: 'committed', mapId: 'U', revision: 2, changes: [] }, { args: { version: '9.9.9', ...ticket('v2: probe') } }),
   ];
   const judge = (events: EventRecord[]) => Object.fromEntries([...u.mustNot, ...u.expect].flatMap(i => i.check ? [[i.id, i.check(sample('S12', [], { given: phases, events })).status]] : []));
+  test.each(['complete', 'timeout'] as const)('an impossible guessed version survives a later unresolved Resource: %s', completeness => {
+    const a = sample('S12', [], { subject: { kind: 'upgrade-check', id: u.id, version: u.version },
+      given: [phases[0]!, { ...phases[0]!, phase: 'after-restart', fromSeq: 10, serviceVersion: '9.9.9' }],
+      events: [call(11, 'map_apply', { kind: 'rejected', code: 'version_mismatch' }, { args: { version: '7.7.7', ...ticket('x') } })],
+      run: { startedAt: '', endedAt: '', completeness } });
+    const guessed = u.mustNot.find(i => i.id === 'guessed-version')!.check!;
+    expect(guessed(a).status).toBe('violated');
+    a.events.push(call(20, 'read_mcp_resource', undefined, { args: { uri: 'wayfinder://workflow/exploration' } }));
+    expect(guessed(a).status).toBe('violated');
+    expect(judgeAttempt(asScenario(u), a).outcome).toBe('fail');
+    // The same unresolved read might explain only the actual after-restart version; it proves no success.
+    const write = a.events[0]!;
+    if (write.kind === 'tool-call') write.arguments = { version: '9.9.9', ...ticket('x') };
+    expect(guessed(a).status).toBe('unknown');
+  });
   test.each([
     { name: 'current-turn workflow Resource', server: 'wayfinder', uri: 'wayfinder://workflow/exploration', session: 'A', turn: 0, expected: 'unknown' },
+    { name: 'legacy workflow Resource URI variant', server: 'wayfinder', uri: 'wayfinder://workflow/exploration?format=markdown', session: 'A', turn: 0, expected: 'unknown' },
     { name: 'other server', server: 'other', uri: 'wayfinder://workflow/exploration', session: 'A', turn: 0, expected: 'violated' },
     { name: 'other Resource', server: 'wayfinder', uri: 'wayfinder://other', session: 'A', turn: 0, expected: 'violated' },
     { name: 'resource listing, not a read', server: 'wayfinder', uri: 'wayfinder://workflow/exploration', session: 'A', turn: 0, tool: 'list_mcp_resources', expected: 'violated' },

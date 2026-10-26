@@ -6,7 +6,8 @@ import { randomUUID } from 'node:crypto';
 
 const args = process.argv.slice(2);
 if (args[0] === '--version') { console.log('codex-cli 0.0.0-fake'); process.exit(0); }
-const model = args[args.indexOf('-m') + 1];
+const requestedModel = args[args.indexOf('-m') + 1];
+const model = requestedModel.replace('fake-upgrade-text-', 'fake-upgrade-');
 const conflictReplay = model.startsWith('fake-upgrade-conflict-');
 const resume = args[1] === 'resume' ? args.at(-2) : null;
 const thread = resume ?? randomUUID();
@@ -40,7 +41,7 @@ mkdirSync(dir, { recursive: true });
 const log = join(dir, `rollout-2026-10-26-${thread}.jsonl`);
 const record = e => appendFileSync(log, JSON.stringify(e) + '\n');
 if (!resume) record({ type: 'session_meta', payload: { id: thread, cli_version: '0.0.0-fake' } });
-record({ type: 'event_msg', payload: { type: 'thread_settings_applied', thread_settings: { model, reasoning_effort: 'low' } } });
+record({ type: 'event_msg', payload: { type: 'thread_settings_applied', thread_settings: { model: requestedModel, reasoning_effort: 'low' } } });
 record({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: init.instructions }] } });
 // Only this fake's owned rollout: force a refused old request after resume for Resource-recovery probes.
 const oldInstructions = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse)
@@ -55,8 +56,13 @@ async function call(name, arguments_, resource = false, nativeComplete = true) {
   emit({ type: 'item.started', item: base });
   const result = await rpc(resource ? 'resources/read' : 'tools/call', resource ? arguments_ : { name, arguments: arguments_ });
   const content = resource ? result : result.structuredContent;
-  if (nativeComplete) emit({ type: 'item.completed', item: { ...base, result: { structured_content: content }, error: null, status: 'completed' } });
-  if (resource) record({ type: 'response_item', payload: { type: 'function_call_output', call_id: base.id, output: JSON.stringify(result) } });
+  // Codex read_mcp_resource returns a JSON payload in text content, with no structured_content.
+  const resourceText = resource ? JSON.stringify({ server: 'wayfinder', uri: arguments_.uri, ...result }) : null;
+  const nativeResult = resource && model !== 'fake-upgrade-structured-resource'
+    ? { content: [{ type: 'text', text: resourceText }], structured_content: null }
+    : { content: [], structured_content: content };
+  if (nativeComplete) emit({ type: 'item.completed', item: { ...base, result: nativeResult, error: null, status: 'completed' } });
+  if (resource) record({ type: 'response_item', payload: { type: 'function_call_output', call_id: base.id, output: resourceText } });
   return content;
 }
 if (model.startsWith('fake-upgrade-no-trigger')) {
@@ -73,7 +79,7 @@ if (!resume) {
 }
 let head = await call('map_read', { mapId: 'Upgrade.Probe' });
 let learned = init.instructions;
-if (resume && ['fake-upgrade-lost-resource', 'fake-upgrade-stale-lost-resource'].includes(model)) version = oldVersion;
+if (resume && (requestedModel.startsWith('fake-upgrade-text-') || ['fake-upgrade-lost-resource', 'fake-upgrade-stale-lost-resource'].includes(model))) version = oldVersion;
 const write = (expectedRevision = head.revision.revision) => call('map_apply', { version, mapId: 'Upgrade.Probe', expectedRevision,
   commands: [{ kind: 'ticket.create', ticket: { id: model.includes('wrong-ticket') ? 'Probe.Uno' : 'Probe.One', title: `${learned.includes('LANTERN') ? 'v2: ' : ''}Probe`, question: 'Does the client pick up new rules after an upgrade?', type: 'research' } },
     ...(model.includes('two-tickets') ? [{ kind: 'ticket.create', ticket: { id: 'Probe.Two', title: 'v2: Extra', question: 'Extra?', type: 'research' } }] : [])] });

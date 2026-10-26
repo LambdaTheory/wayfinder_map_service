@@ -26,8 +26,9 @@ const argsOf = (e: Call) => (e.arguments ?? {}) as { version?: unknown; commands
 const versionOf = (g: GivenRules) => g.rulesSource.kind === 'instructions' || g.rulesSource.kind === 'resource' ? g.rulesSource.versionLine.replace(/^version:\s*/, '')
   : g.rulesSource.kind === 'tool-parameter' ? /\b\d+\.\d+\.\d+\b/.exec(g.rulesSource.description)?.[0] ?? '' : '';
 const phaseOf = (a: AttemptRecord, e: Call) => a.given.findLast(g => g.fromSeq <= e.seq);
+const strictRecovery = (a: AttemptRecord) => codexLifecycle(a.subject.id) !== undefined && a.subject.version >= 3;
 // An unfinished call is flushed at turn end. Its seq cannot show whether it preceded a retry in that same turn.
-const unresolvedRules = (a: AttemptRecord, e: Call) => workflowResourceCalls(a).filter(r => r.session === e.session && r.turn === e.turn && callResultMissing(a, r));
+const unresolvedRules = (a: AttemptRecord, e: Call) => workflowResourceCalls(a, !strictRecovery(a)).filter(r => r.session === e.session && r.turn === e.turn && callResultMissing(a, r));
 /** Positive claims about rules need the actual client source, not just a matching write or a Controller version. */
 const visibleSource = (a: AttemptRecord, g: GivenRules | undefined) => g !== undefined && !!versionOf(g)
   && (g.rulesSource.kind === 'resource' ? g.resourceText?.known === true && !resourceResultMissing(a, g.fromSeq)
@@ -83,7 +84,7 @@ function recoveryForRefusal(a: AttemptRecord, r: { refusal: Call; writes: Call[]
   const retry = writes.find(e => e.seq > refusal.seq && e.session === refusal.session);
   const until = retry?.seq ?? Infinity;
   // B02c's stricter native ordering applies only to the newly versioned Codex definitions.
-  const strict = codexLifecycle(a.subject.id) !== undefined && a.subject.version >= 3;
+  const strict = strictRecovery(a);
   const readRules = a.events.find(e => e.kind === 'resource-read' && e.actor === 'agent' && (!strict || e.ok) && e.session === refusal.session
     && !resourceResultMissing(a, e.seq)
     && e.seq > refusal.seq && e.seq < until && (strict ? e.uri === 'wayfinder://workflow/exploration' : e.uri.startsWith('wayfinder://workflow/exploration')));
@@ -182,8 +183,12 @@ const noGuessedVersion: ScriptCheck = a => {
   if (gap) return gap;
   const writes = writeCalls(a).filter(e => argsOf(e).version !== undefined);
   const stated = (e: Call) => a.given.some(g => g.fromSeq <= e.seq && visibleSource(a, g) && versionOf(g) === String(argsOf(e).version));
+  const release = afterRestart(a, 'possible Resource version');
+  // A lost read can explain the service's current version, not an arbitrary value such as 7.7.7.
+  // Without the service-version evidence the possible read still cannot prove a guess.
+  const possiblyRead = (e: Call) => unresolvedRules(a, e).length > 0 && ('gap' in release || argsOf(e).version === release.current);
   // A write without any version is an input error, judged by the common checks, not a guess.
-  const guessed = writes.filter(e => visibleSource(a, phaseOf(a, e)) && !stated(e) && !unresolvedRules(a, e).length);
+  const guessed = writes.filter(e => visibleSource(a, phaseOf(a, e)) && !stated(e) && !possiblyRead(e));
   if (guessed.length) return violated('a write with a version its visible rules source did not state', guessed.map(e => at(a, e)));
   return need(a, 'guessed version', 'events.tool-call')
     ?? (writes.some(e => !stated(e)) ? unknown('some writes have no recorded client-visible rules source') : holds('every versioned write named a visible rules source'));

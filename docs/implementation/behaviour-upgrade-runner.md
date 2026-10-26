@@ -257,8 +257,45 @@ The comparison manifest retains the previous 71 entries / 85 outcomes and adds o
 
 The damaged Resource-derived phase/reply cases already agree with main's overall outcomes, so they need no comparison exception. The regression tests still expose their false must-nots in the pre-fix v7 code. Unrelated-read controls and all earlier fixed evidence retain their outcomes.
 
-The [updated saved comparison](behaviour-upgrade-main-comparison.json) judges code commit `af32b7c` against main `e4d54cc`: **1154 outcomes, 1053 unchanged, 101 changed outcomes in 84 exact entries**, with **zero unlisted changes, stale entries or count mismatches**. All previous 71 entries / 85 outcomes retain their reasons and counts. All 32 stock definitions and existing interactive fixed evidence are covered; **23 files / 813 tests** passed in 98.48 seconds. Only this report and verification text were added after the compared code commit.
+The [sixth-round comparison](https://github.com/kun-g/wayfinder_map_service/blob/092ba9b/docs/implementation/behaviour-upgrade-main-comparison.json) judges code commit `af32b7c` against main `e4d54cc`: **1154 outcomes, 1053 unchanged, 101 changed outcomes in 84 exact entries**, with **zero unlisted changes, stale entries or count mismatches**. All previous 71 entries / 85 outcomes retain their reasons and counts. All 32 stock definitions and existing interactive fixed evidence are covered; **23 files / 813 tests** passed in 98.48 seconds. Only this report and verification text were added after the compared code commit.
 
 Sixth-round verification on Node 26.3.0 after `npm ci`: `npm run build`, full `npm test` (**39 files / 2033 tests**, including all fourteen new cases; 99.14 seconds), `npm run typecheck` and `git diff --check` pass. Only fake drivers and fixed evidence were used.
+
+
+### Seventh-review native Resource shape and bounded guessing
+
+The [sixth Claude re-review](https://github.com/kun-g/wayfinder_map_service/pull/107#issuecomment-6425963879) found two remaining Resource-evidence errors; the [sixth Codex re-review](https://github.com/kun-g/wayfinder_map_service/pull/107#issuecomment-6425852473) passed. Latest main was fetched and merged before changes; `e4d54cc` was already included, so the comparison pin is unchanged.
+
+Codex's public [Resource helper implementation](https://github.com/openai/codex/blob/abf4bb91ec49fbf443ccec0069f9cab5dd1462d8/codex-rs/core/src/tools/handlers/mcp_resource.rs) wraps the Resource payload in text content and leaves structured content absent. Its [exec event definition](https://github.com/openai/codex/blob/abf4bb91ec49fbf443ccec0069f9cab5dd1462d8/codex-rs/exec/src/exec_events.rs) supplies the native completion envelope. The normalizer now recognizes completed, successful text-only Resource results, decodes their JSON payload and preserves non-JSON text without claiming that it contains the full rules. Native error flags, failed calls and empty/absent results remain unknown. The text fallback is restricted to Resource reads, so text cannot substitute for a Map write receipt.
+
+The fake upgrade driver now defaults to this public text-only shape, including the same Resource payload in its owned synthetic function output. An explicit structured variant retains compatibility coverage. A unit test also reads the repository's [B08 synthetic McpToolCall sample](../../tests/behaviour/fixtures/scan/codex-mcp-0.164.jsonl), adapting only its event envelope and preserving its protocol result fields. No real session log was read. Both lifecycle probes force an actual refusal before recovering; they check native presence, full exposure, recovery, current-version attestation and the final verdict.
+
+The guessed-version guard now limits the possible information from an unresolved read to the recorded current service version. With old rules at `2.0.2` and a current service at `9.9.9`, a write naming `7.7.7` remains a proved guess even if a later Resource completion is lost. The same missing read leaves a `9.9.9` write unknown because it could have supplied that version. Without service-version evidence, the read cannot prove a guess. Claude's URI consistency suggestion is also addressed: legacy checks use their existing Resource URI prefix match for both completed and unresolved reads; strict Codex checks keep their exact URI requirement.
+
+| Evidence | Complete | Timeout / rerun |
+| --- | --- | --- |
+| Successful text-only Resource recovery, either lifecycle | `pass` | No interruption in the success fixture |
+| Text-only new-rule exposure, then forbidden reply | `fail` | `fail`; two passing reruns produce `flaky` |
+| Text-only new-rule exposure, then stale retry and later lost read/trace | `fail` | `fail`; two passing reruns produce `flaky` |
+| Truly missing Resource result, correct recovery | `insufficient-evidence` | `incomplete` (previous round's controls retained) |
+| Unstated `7.7.7` while the recorded current version is `9.9.9`, then unresolved Resource | `fail` | `fail` |
+| Only current `9.9.9` could have come from the unresolved read | `guessed-version: unknown` | Missing evidence never proves success |
+| Legacy workflow URI variant with a missing result | `insufficient-evidence` | `incomplete` |
+
+Before the fix, the new lifecycle/guess/URI regression selection had **9 failures and 1 passing structured-result control**. The ten normalizer cases, run separately against the pre-fix normalizer, had **7 failures and 3 passing controls**. After the fix, the combined targeted selection passed **25 tests** (the twenty new cases plus five existing Resource-loss controls), followed by typecheck. The audit confirms that recovery, canary reply applicability and attestation share the normalized result-presence path; the new text-only negative probes exercise those consumers without changing the common verdict order. Present contradictions still survive later gaps, while missing or failed results cannot supply proof.
+
+
+The main comparison retains all prior **84 entries / 101 changed outcomes** with identical counts and reasons. Only these seventeen new exact entries are added:
+
+| New comparison | Entries / outcomes | Main → branch | Reason |
+| --- | --- | --- | --- |
+| Text-only recovery and positive controls in both lifecycles, plus the structured compatibility control | 7 / 7 | `insufficient-evidence` → `pass` | B02c/R3: native Resource content establishes the visible rules source absent from main v2's definition |
+| Text-only exposure followed by a forbidden reply, complete and timeout | 4 / 4 | `insufficient-evidence` or `incomplete` → `fail` | R4 rules 4/5: the applicable rule and violation are present |
+| Text-only exposure followed by stale retry, later lost result/trace, complete and timeout | 4 / 4 | `insufficient-evidence` or `incomplete` → `fail` | R4 rules 1/5: later gaps cannot erase the observed contradiction |
+| Legacy unresolved workflow Resource URI variant, complete and timeout | 2 / 2 | `fail` → `insufficient-evidence` or `incomplete` | R3/R4 rule 2: missing native source cannot prove a guess; matching follows the legacy recovery contract |
+
+The impossible `7.7.7` guess remains `fail` on both main and this branch, including timeout; no main exception is needed. It fixes a regression introduced within this PR. All existing fixed inputs keep their earlier main-comparison outcomes despite switching the fake's Resource responses to text-only content. No common verdict ordering or baseline expectation was relaxed.
+
+Seventh-round verification on Node 26.3.0 after `npm ci`: `npm run build`, full `npm test` (**39 files / 2053 tests**, including twenty new cases; 111.61 seconds), `npm run typecheck` and `git diff --check` pass. Only synthetic records and fake drivers were used; no product code, sandbox permissions or real-model acceptance changed.
 
 Standards: no new package dependency, product code or sandbox permission; service ownership and cleanup remain explicit; raw evidence is redacted and kept outside the repository. Spec: R2 lifecycle and isolation, R3 actual client exposure and independent persistence evidence, R4 no false green or W5 conflation, separate upgrade accounting. Only tests and documentation change, so the Release Version stays 2.1.0 under mcp-sqlite §14.3; this changes no shipped mandatory rule or client tool contract and requires no pre-merge ChatGPT run. The outstanding gate is Kun's approval for real Codex quota, followed by the approved verdict reviews.

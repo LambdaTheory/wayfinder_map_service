@@ -5,10 +5,26 @@ import type { AttemptRecord, EventRecord, GivenRules, Receipt } from '../evidenc
 
 interface CodexItem {
   id: string; type: string; text?: string; command?: string; exit_code?: number | null; server?: string; tool?: string;
-  arguments?: unknown; result?: { structured_content?: unknown } | null; error?: unknown; status?: string;
+  arguments?: unknown; result?: { structured_content?: unknown; structuredContent?: unknown; content?: unknown[]; is_error?: boolean; isError?: boolean } | null;
+  error?: unknown; status?: string;
   changes?: { path: string; kind: string }[];
 }
 export type Line = { type: string; item?: CodexItem; usage?: Record<string, number>; message?: string; thread_id?: string };
+
+/** Codex Resource helpers serialize their payload into text content, without structured_content. */
+function resourceContent(item: CodexItem): unknown {
+  if (item.status !== 'completed' || !Array.isArray(item.result?.content)) return undefined;
+  const text = item.result.content.flatMap(c => {
+    const block = c as { type?: string; text?: string } | null;
+    return block?.type === 'text' && typeof block.text === 'string' && block.text.trim() ? [block.text] : [];
+  }).join('\n');
+  if (!text) return undefined;
+  try {
+    const payload: unknown = JSON.parse(text);
+    if (payload !== null && typeof payload === 'object') return payload;
+  } catch { /* Plain or truncated text is still a present result, not evidence that full rules were shown. */ }
+  return { content: item.result.content };
+}
 
 export const parseLines = (stdout: string): Line[] => stdout.split('\n').flatMap(line => {
   if (!line.trim()) return [];
@@ -73,11 +89,15 @@ export function streamTurn(session: string, turn: number, input: string, at: str
         for (const path of readsIn(item.command ?? '', workdir)) emit({ ...base('agent'), kind: 'file-read', path });
         break;
       case 'mcp_tool_call': {
-        const structured = item.result?.structured_content;
+        const resourceRead = ['read_mcp_resource', 'read_resource', 'resources/read'].includes(item.tool ?? '');
+        const failed = item.status === 'failed' || item.error != null || item.result?.is_error === true || item.result?.isError === true;
+        const value = resourceRead && failed ? undefined
+          : item.result?.structured_content ?? item.result?.structuredContent ?? (resourceRead ? resourceContent(item) : undefined);
+        const known = value !== undefined && value !== null;
         emit({ ...base('agent'), kind: 'tool-call', callId: callId(item.id), server: item.server ?? '', tool: item.tool ?? '', arguments: item.arguments ?? null,
-          result: structured === undefined || structured === null ? { known: false, reason: item.error ? 'the call failed' : 'no structured result' } : { known: true, value: structured },
-          failed: item.status === 'failed' || (item.error !== null && item.error !== undefined), requestId: { known: false, reason: 'Codex does not report JSON-RPC request IDs' } });
-        if (/resource/i.test(item.tool ?? '')) emit({ ...base('agent'), kind: 'resource-read', uri: String((item.arguments as { uri?: string } | null)?.uri ?? ''), ok: item.status !== 'failed' && item.error == null });
+          result: known ? { known: true, value } : { known: false, reason: failed ? 'the call failed' : resourceRead ? 'no native Resource result' : 'no structured result' },
+          failed, requestId: { known: false, reason: 'Codex does not report JSON-RPC request IDs' } });
+        if (resourceRead) emit({ ...base('agent'), kind: 'resource-read', uri: String((item.arguments as { uri?: string } | null)?.uri ?? ''), ok: !failed && known });
         break;
       }
       case 'file_change':

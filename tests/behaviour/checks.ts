@@ -157,10 +157,13 @@ export const mapCalls = (a: AttemptRecord, tool?: string) => evs(a, 'tool-call')
 /** A declared missing result cannot be used even if a stale value still occupies the field. */
 export const callResultMissing = (a: AttemptRecord, e: Ev<'tool-call'>) => !e.result.known || a.missing.includes(`${at(a, e)}.result`);
 /** Workflow reads only: listing Resources or reading another URI cannot supply these rules. */
-export const workflowResourceCalls = (a: AttemptRecord) => mapCalls(a).filter(e => ['read_mcp_resource', 'read_resource', 'resources/read'].includes(e.tool)
-  && (e.arguments as { uri?: string } | null)?.uri === 'wayfinder://workflow/exploration');
+export const workflowResourceCalls = (a: AttemptRecord, legacyUri = false) => mapCalls(a).filter(e => {
+  const uri = (e.arguments as { uri?: string } | null)?.uri;
+  return ['read_mcp_resource', 'read_resource', 'resources/read'].includes(e.tool) && typeof uri === 'string'
+    && (legacyUri ? uri.startsWith('wayfinder://workflow/exploration') : uri === 'wayfinder://workflow/exploration');
+});
 /** Native completion emits tool-call then resource-read synchronously; a derived event/phase cannot restore its missing result. */
-export const resourceResultMissing = (a: AttemptRecord, seq: number) => workflowResourceCalls(a).some(e => e.seq + 1 === seq && callResultMissing(a, e));
+export const resourceResultMissing = (a: AttemptRecord, seq: number) => workflowResourceCalls(a, true).some(e => e.seq + 1 === seq && callResultMissing(a, e));
 /** The agent's write calls in order. */
 export const writeCalls = (a: AttemptRecord) => [...mapCalls(a, 'map_apply'), ...mapCalls(a, 'map_create')].sort((x, y) => x.seq - y.seq);
 /** The call's recorded result falls in this class. */

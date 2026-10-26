@@ -62,6 +62,33 @@ test('upgrade selection is separate and cannot silently switch harness or mix ca
 });
 
 describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrade through the real shared sandbox, fake native driver only', () => {
+  test.each(['U-codex-process', 'U-codex-resume'])('text-only Resource recovery passes in %s', async mode => {
+    const { record: a } = await run(`text-recovery-${mode}`, mode, 'fake-upgrade-text-resource');
+    expect(a.run.completeness).toBe('complete');
+    expect(a.missing).toEqual([]);
+    const read = a.events.find(e => e.kind === 'tool-call' && e.tool === 'read_mcp_resource');
+    expect(read).toMatchObject({ result: { known: true, value: { server: 'wayfinder', uri: 'wayfinder://workflow/exploration', contents: expect.any(Array) } } });
+    expect(scripts(a)).toMatchObject({ 'guessed-version': 'holds', 'invalid-recovery': 'holds', 'writes-new-version': 'holds',
+      [mode === 'U-codex-process' ? 'reads-new-rules' : 'resume-refusal-recovery']: 'holds' });
+    expect(reviewedVerdict(a).outcome).toBe('pass');
+  }, 60_000);
+  test.each(['U-codex-process', 'U-codex-resume'].flatMap(mode => ['bad-reply', 'stale-lost-resource'].map(fault => ({ mode, fault }))))(
+    'text-only Resource exposure preserves $fault in $mode', async ({ mode, fault }) => {
+      const { record: a } = await run(`text-${fault}-${mode}`, mode, `fake-upgrade-text-${fault}`);
+      const item = fault === 'bad-reply' ? 'canary-reply-violation' : 'invalid-recovery';
+      expect(scripts(a)[item]).toBe('violated');
+      if (fault === 'stale-lost-resource') a.missing.push('events.tool-call');
+      expect(reviewedVerdict(a).outcome).toBe('fail');
+      a.run.completeness = 'timeout';
+      const failed = reviewedVerdict(a);
+      expect(failed.outcome).toBe('fail');
+      const passed = reviewedVerdict((await run(`text-control-${fault}-${mode}`, mode, 'fake-upgrade-text-resource')).record);
+      expect(passed.outcome).toBe('pass');
+      expect(judgeCell(subject(mode), [failed, passed, passed], 2).outcome).toBe('flaky');
+    }, 60_000);
+  test('legacy structured Resource completion remains supported', async () => {
+    expect(reviewedVerdict((await run('structured-resource', 'U-codex-process', 'fake-upgrade-structured-resource')).record).outcome).toBe('pass');
+  }, 60_000);
   test.each(['U-codex-process', 'U-codex-resume'])('a lost native Resource result leaves recovery unknown in %s', async mode => {
     const { record: a, outcome } = await run(`lost-resource-${mode}`, mode, 'fake-upgrade-lost-resource');
     expect(outcome.completeness).toBe('complete');
