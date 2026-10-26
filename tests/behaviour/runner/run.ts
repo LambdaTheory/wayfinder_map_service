@@ -21,10 +21,14 @@ import { checkoutRoot, cleanupServiceDirectory, everydayPort, newToken, startSer
 import type { Credential } from './service.ts';
 import { startRoute, structuredReply } from './relay.ts';
 import type { RelayObservation, Route } from './relay.ts';
+import { asScenario, upgradeChecks } from '../upgrade-checks.ts';
+import { captureWrite, databaseState, isWrite, upgradeEvidence, upgradeRules } from './upgrade.ts';
 
 export interface BatchOptions {
   batchId: string;
   scenarios: string[];
+  /** Upgrade checks have separate Batch accounting, outside the 26 candidates. */
+  upgradeChecks?: string[];
   count: number;
   ceiling: number;
   out: string;
@@ -41,16 +45,21 @@ export interface PlannedAttempt { attemptId: string; scenario: Scenario }
 export interface AttemptOutcome { attemptId: string; scenario: string; completeness: Completeness | 'not-run'; detail?: string; record?: string }
 
 /** Refusals reported before anything runs: the runner never switches model or Entry or drops a Scenario silently (R2). */
-export function preflight(o: Pick<BatchOptions, 'scenarios' | 'count' | 'ceiling' | 'batchId'>): { plan: PlannedAttempt[]; refusals: string[] } {
+export function preflight(o: Pick<BatchOptions, 'scenarios' | 'upgradeChecks' | 'count' | 'ceiling' | 'batchId'>): { plan: PlannedAttempt[]; refusals: string[] } {
   const refusals: string[] = [];
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(o.batchId)) refusals.push('batch id must be a short identifier');
   if (!Number.isInteger(o.count) || o.count < 1) refusals.push('count must be a positive integer');
   if (!Number.isInteger(o.ceiling) || o.ceiling < 1) refusals.push('ceiling must be a positive integer');
   const plan: PlannedAttempt[] = [];
-  for (const id of o.scenarios) {
-    const s = library.find(x => x.id === id);
+  const upgrades = o.upgradeChecks ?? [];
+  if (upgrades.length && o.scenarios.length) refusals.push('upgrade checks need a separate Batch from candidate Scenarios');
+  if (!upgrades.length && !o.scenarios.length) refusals.push('select at least one Scenario or upgrade check');
+  if (new Set([...o.scenarios, ...upgrades]).size !== o.scenarios.length + upgrades.length) refusals.push('duplicate subject IDs');
+  for (const id of [...o.scenarios, ...upgrades]) {
+    const u = upgrades.includes(id) ? upgradeChecks.find(x => x.id === id && x.harness === 'codex') : undefined;
+    const s = upgrades.includes(id) ? u && asScenario(u) : library.find(x => x.id === id);
     if (!s) { refusals.push(`${id}: no such Scenario`); continue; }
-    refusals.push(...validateScenario(s), ...readiness(s).map(r => `${id}: not ready: ${r}`));
+    refusals.push(...validateScenario(s, u ? 'upgrade-check' : 'scenario'), ...readiness(s).map(r => `${id}: not ready: ${r}`));
     if (!s.applies.entries.includes('mcp-only')) refusals.push(`${id}: does not apply to the MCP-only Entry`);
     refusals.push(...unsupported(s).map(reason => `${id}: ${reason}`));
     for (let k = 1; k <= o.count; k++) plan.push({ attemptId: `${id}-${k}`, scenario: s });
@@ -58,9 +67,9 @@ export function preflight(o: Pick<BatchOptions, 'scenarios' | 'count' | 'ceiling
   return { plan, refusals };
 }
 
-/** Lifecycle/upgrade actions belong to B02c; supported actions keep the B01 Scenario format unchanged. */
+/** Unsupported lifecycle operations remain explicit refusals. */
 function unsupported(s: Scenario): string[] {
-  const reasons = s.controller.filter(a => !['conflicting-write', 'cut-agent-route'].includes(a.action))
+  const reasons = s.controller.filter(a => !['conflicting-write', 'cut-agent-route', ...(/^U-codex-(process|resume)$/.test(s.id) ? ['restart-onto-canary'] : [])].includes(a.action))
     .map(a => `Controller action ${a.action} needs the lifecycle/upgrade driver (B02c)`);
   if (s.controller.some(a => a.action === 'conflicting-write' && !('during' in a.when))) reasons.push('conflicting-write needs a during-turn read/write boundary');
   let group = new Set<string>();
@@ -150,6 +159,8 @@ export interface AttemptIsolation {
 
 export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: () => boolean, register: (kill: () => void) => void): Promise<AttemptOutcome> {
   const s = p.scenario;
+  const upgradeMode = s.id === 'U-codex-process' ? 'process' : s.id === 'U-codex-resume' ? 'resume' : null;
+  if (upgradeMode && !o.codex.sandbox) return { attemptId: p.attemptId, scenario: s.id, completeness: 'not-run', detail: 'upgrade checks require the shared sandbox' };
   const outputError = outputRefusal(o.out);
   if (outputError) return { attemptId: p.attemptId, scenario: s.id, completeness: 'not-run', detail: outputError };
   const unsupportedReasons = unsupported(s);
@@ -201,7 +212,10 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   const opened = new Set<string>();
   let skills: string[] = [];
   let seedingComplete = false;
+  let upgrade: AttemptRecord['upgrade'];
+  const actionRuns = new Map<ControllerAction, Promise<void>>();
   try {
+    if (upgradeMode) upgrade = await upgradeEvidence(upgradeMode);
     const historical = historyCredentials(s.seed.maps, [controller.clientId, ...sessions.map(x => x.credential.clientId)]);
     for (const [label, credential] of Object.entries(historical)) secrets[`history-token-${label}`] = credential.token;
     service = await startService(serviceDir, controller, [...sessions.map(x => x.credential), ...Object.values(historical), ...(bait ? [bait] : [])]);
@@ -224,12 +238,14 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       const log: (RelayObservation & { turn: number | null })[] = []; relayLogs.set(session.label, log);
       session.route = await startRoute(service.port, session.credential.token, entry => {
         log.push({ turn: session.turn ?? null, ...entry });
+        if (upgrade && entry.phase === 'hook-error') {
+          completeness = 'driver-failed'; detail = `Upgrade observation failed: ${entry.error}`; killAll();
+        }
         if (entry.phase === 'cut') controllerEvent('relay-cut', { method: entry.rpc.method,
           tool: entry.rpc.method === 'tools/call' ? entry.rpc.params?.name : undefined,
           requestId: entry.rpc.id, scope: entry.scope, trigger: entry.trigger }, session.turn ?? null, session.label);
-      });
+      }, !!upgrade);
     }
-    const actionRuns = new Map<ControllerAction, Promise<void>>();
     const executeControllerAction = async (a: ControllerAction, session: Session, index: number, mapId?: string) => {
       controllerEvent(a.action, { status: 'started', detail: a.detail }, index);
       try {
@@ -241,6 +257,17 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
           controllerEvent('route-fault-mode', { session: session.label, method: 'tools/call', status: 503,
             forwarded: false, forwardedMethods: ['initialize', 'tools/list', 'resources/*', 'prompts/*'],
             forwardedWhen: 'envelope contains no tools/call', scope: 'whole-envelope', mode: 'tool-call-envelopes' }, index);
+        } else if (a.action === 'restart-onto-canary') {
+          if (!upgrade || !service) throw new Error('Upgrade needs an owned service');
+          const catalog = await ctl!.exportCatalog();
+          if (catalog.length !== 1 || catalog[0]!.mapId !== 'Upgrade.Probe' || catalog[0]!.history.length !== 1)
+            throw new Error('Upgrade requires exactly the agent-created Map, before adding its Ticket');
+          await ctl!.close();
+          const pids = await service.restartCanary();
+          upgrade.restart = { seq: events.length, ...pids, port: service.port };
+          controllerEvent('owned-service-restarted', upgrade.restart, index);
+          ctl = await connectController(service.port, controller.token, {}, emit);
+          openDatabases(service.pid).forEach(d => opened.add(d));
         }
         controllerEvent(a.action, { status: 'completed', ...(mapId ? { mapId } : {}) }, index);
       } catch (error) {
@@ -269,7 +296,12 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       }
       const during = s.controller.filter(a => 'during' in a.when && a.when.during === index);
       const readMaps = new Set<string>();
+      const boundaries = new Map<string, unknown>();
       session.route!.after = async (rpc, body) => {
+        if (upgrade && isWrite(rpc)) {
+          captureWrite(upgrade, rpc, body, boundaries.get(String(rpc.id)), databaseState(service!.databasePath), session.label, index);
+          boundaries.delete(String(rpc.id));
+        }
         const result = structuredReply(body);
         if (rpc.method !== 'tools/call' || rpc.params?.name !== 'map_read' || result?.kind !== 'found') return;
         const mapId = rpc.params.arguments?.mapId;
@@ -278,6 +310,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
         for (const a of during.filter(a => a.action !== 'conflicting-write')) await runControllerAction(a, session, index, mapId);
       };
       session.route!.before = async rpc => {
+        if (upgrade && isWrite(rpc)) boundaries.set(String(rpc.id), databaseState(service!.databasePath));
         const mapId = rpc.params?.arguments?.mapId;
         if (rpc.method !== 'tools/call' || rpc.params?.name !== 'map_apply' || typeof mapId !== 'string' || !readMaps.has(mapId)) return;
         for (const a of during.filter(a => a.action === 'conflicting-write')) await runControllerAction(a, session, index, mapId);
@@ -288,9 +321,11 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
         profiles.set(session.codex.home, profile);
       }
       const fromSeq = events.length;
+      const previousRollout = session.rollout?.text ?? '';
       let n: ReturnType<typeof streamTurn> | undefined;
       const r = await runTurn({ options: nativeOptions, session: session.codex, port: session.route!.port, workdir,
         prompt: turn.say, profile, onChild,
+        onSpawn: pid => controllerEvent('client-process-started', { pid, resume: session.codex.thread !== null }, index, session.label),
         onLaunch: () => {
           controllerEvent('isolation-check', { session: session.label, paths: Object.keys(profile.hashes), ok: true }, index);
           n = streamTurn(turn.session, index, turn.say, new Date().toISOString(), workdir, emit);
@@ -321,7 +356,10 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       exposures.push(session.rollout);
       controllerEvent('native-session', { session: session.label, nativeId, visibleModel: session.rollout?.visibleModel ?? null,
         effort: session.rollout?.effort ?? null, clientVersion: session.rollout?.cliVersion ?? null }, index);
-      given.push({ ...initialRules(ctl!.version, ctl!.instructions, ctl!.toolDescriptions, session.rollout), session: session.label, turn: index, fromSeq });
+      if (upgrade) {
+        const freshRollout = session.rollout && { ...session.rollout, text: session.rollout.text.startsWith(previousRollout) ? session.rollout.text.slice(previousRollout.length) : session.rollout.text };
+        given.push(...upgradeRules(upgrade, freshRollout, events, relayLogs.get(session.label) ?? [], session.label, index, fromSeq));
+      } else given.push({ ...initialRules(ctl!.version, ctl!.instructions, ctl!.toolDescriptions, session.rollout), session: session.label, turn: index, fromSeq });
       const responses = relayLogs.get(session.label) ?? [];
       controllerEvent('relay-observations', { session: session.label,
         initializeResponses: responses.filter(e => e.turn === index && e.phase === 'response' && e.method === 'initialize' && e.status === 200).length,
@@ -377,6 +415,9 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
     if (completeness === 'complete') completeness = service ? 'driver-failed' : 'service-failed';
     detail = `${detail ?? ''} ${String(error instanceof Error ? error.message : error)}`.trim().slice(0, 300);
   }
+  // A cancellation can end the native process while its relay hook is still restarting the owned service.
+  // Drain those bounded operations before exporting or stopping anything, so no replacement child escapes cleanup.
+  await Promise.allSettled(actionRuns.values());
   skills = [...new Set(nativeSessions.flatMap(clientSkills))];
   let maps: AttemptRecord['maps'] = [];
   try {
@@ -404,10 +445,11 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   given.sort((a, b) => a.fromSeq - b.fromSeq);
   if (!given.length) given.push(initialRules(ctl?.version ?? 'unknown', ctl?.instructions ?? '', ctl?.toolDescriptions ?? {}, null));
   const record: AttemptRecord = {
-    schema: attemptSchema, attemptId: `${o.batchId}/${p.attemptId}`, batchId: o.batchId, subject: { kind: 'scenario', id: s.id, version: s.version },
+    schema: attemptSchema, attemptId: `${o.batchId}/${p.attemptId}`, batchId: o.batchId, subject: { kind: upgradeMode ? 'upgrade-check' : 'scenario', id: s.id, version: s.version },
     entry: 'mcp-only', combination: { harness: 'codex', requestedModel: o.codex.model, visibleModel, effort },
     client: { version: clientVersion, surface: { known: true, value: 'codex exec' } },
-    service: { commit: serviceCommit(), series: 'release', version: ctl?.version ?? 'unknown' },
+    service: { commit: serviceCommit(), series: 'release', version: upgrade?.contracts.before.version ?? ctl?.version ?? 'unknown' },
+    ...(upgrade ? { upgrade } : {}),
     given,
     run: { startedAt, endedAt: new Date().toISOString(), completeness, ...(detail ? { detail } : {}) },
     controller: { clientId: controller.clientId }, baitClientIds: bait ? [bait.clientId] : [],
@@ -418,7 +460,9 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   };
   // Every field recorded as unknown is also listed, so a gap is visible without walking the record.
   const unknownFields: [string, Field<unknown>][] = [['combination.visibleModel', visibleModel], ['combination.effort', effort], ['client.version', clientVersion],
-    ...given.flatMap((g, i): [string, Field<unknown>][] => [[`given[${i}].instructions`, g.instructions], [`given[${i}].toolDescriptions`, g.toolDescriptions]]), ['usage', record.usage],
+    ...given.flatMap((g, i): [string, Field<unknown>][] => [[`given[${i}].instructions`, g.instructions], [`given[${i}].toolDescriptions`, g.toolDescriptions],
+      ...(g.toolDefinitions ? [[`given[${i}].toolDefinitions`, g.toolDefinitions] as [string, Field<unknown>]] : []),
+      ...(g.resourceText ? [[`given[${i}].resourceText`, g.resourceText] as [string, Field<unknown>]] : [])]), ['usage', record.usage],
     ...record.sessions.flatMap((x, i): [string, Field<unknown>][] => [[`sessions[${i}].nativeId`, x.nativeId], [`sessions[${i}].mcpSessionIds`, x.mcpSessionIds],
       ...x.turns.map((t, k): [string, Field<unknown>] => [`sessions[${i}].turns[${k}].nativeId`, t.nativeId!])])];
   record.missing = [...new Set([...missing, ...record.receipts.flatMap((r, i) => r.outcome.kind === 'unknown' ? [`receipts[${i}].outcome`] : []), ...unknownFields.filter(([, f]) => !f.known).map(([path]) => path)])];
@@ -435,6 +479,7 @@ export const personalConfigNamesRun = (text: string) => /wf-behave-|behaviour-ru
 export async function runBatch(o: BatchOptions): Promise<{ outcomes: AttemptOutcome[]; refusals: string[] }> {
   const { plan, refusals } = preflight(o);
   if (refusals.length) return { outcomes: [], refusals };
+  if (o.upgradeChecks?.length && !o.codex.sandbox) return { outcomes: [], refusals: ['upgrade checks require the shared sandbox'] };
   const outputError = outputRefusal(o.out);
   if (outputError) return { outcomes: [], refusals: [outputError] };
   if (existsSync(o.out)) return { outcomes: [], refusals: [`${tilde(o.out)} already exists; a Batch never reuses an output directory`] };
@@ -465,19 +510,26 @@ export async function runBatch(o: BatchOptions): Promise<{ outcomes: AttemptOutc
     return existsSync(path) && personalConfigNamesRun(readFileSync(path, 'utf8')); });
   writeFileSync(join(o.out, 'batch.json'), JSON.stringify({ batchId: o.batchId, combination: `codex:${o.codex.model}:${o.codex.effort}`, entry: 'mcp-only',
     sandbox: o.codex.sandbox, plan: plan.map(p => p.attemptId), ceiling: o.ceiling, outcomes,
+    ...(o.upgradeChecks?.length ? { kind: 'upgrade-checks', checks: o.upgradeChecks, count: o.count, plannedAttempts: plan.length,
+      quota: { attemptCeiling: o.ceiling, nativeTurnCeiling: plan.slice(0, o.ceiling).reduce((n, p) => n + p.scenario.turns.length, 0), timeoutMsPerTurn: o.codex.timeoutMs, automaticRetries: 0, modelReviews: 0 } } : {}),
     isolation: { before, after, unchanged: JSON.stringify(before) === JSON.stringify(after), personalConfigNamingThisRun: mentionsRun } }, null, 1), { mode: 0o600 });
   return { outcomes, refusals: [] };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const { values } = parseArgs({ options: { batch: { type: 'string' }, scenarios: { type: 'string' }, count: { type: 'string', default: '1' },
+  const { values } = parseArgs({ options: { batch: { type: 'string' }, scenarios: { type: 'string' }, 'upgrade-checks': { type: 'string' }, count: { type: 'string', default: '1' },
     ceiling: { type: 'string' }, model: { type: 'string', default: 'gpt-6-astra' }, effort: { type: 'string', default: 'xhigh' },
     out: { type: 'string' }, codex: { type: 'string', default: 'codex' }, 'timeout-min': { type: 'string', default: '30' }, 'no-sandbox': { type: 'boolean', default: false } } });
-  if (!values.batch || !values.scenarios || !values.ceiling) {
-    console.error('usage: run.ts --batch <id> --scenarios S0b,F11 --count 2 --ceiling 4 [--model gpt-6-astra] [--effort xhigh]');
+  if (!values.batch || (!values.scenarios && !values['upgrade-checks']) || !values.ceiling) {
+    console.error('usage: run.ts --batch <id> (--scenarios S0b,F11 | --upgrade-checks U-codex-process,U-codex-resume) --count 2 --ceiling 4 [--model gpt-6-astra] [--effort xhigh]');
     process.exit(2);
   }
-  const result = await runBatch({ batchId: values.batch, scenarios: values.scenarios.split(','), count: Number(values.count), ceiling: Number(values.ceiling),
+  const selection = { batchId: values.batch, scenarios: values.scenarios?.split(',') ?? [], upgradeChecks: values['upgrade-checks']?.split(',') ?? [], count: Number(values.count), ceiling: Number(values.ceiling) };
+  const early = preflight(selection);
+  if (early.refusals.length || (selection.upgradeChecks.length && values['no-sandbox'])) {
+    console.error(early.refusals.join('\n') || 'upgrade checks require the shared sandbox'); process.exit(1);
+  }
+  const result = await runBatch({ ...selection,
     out: values.out ?? join(homedir(), 'Library/Application Support/Wayfinder/behaviour-runs', values.batch), scratchRoot: '/private/tmp',
     loginSource: { contents: readFileSync(join(homedir(), '.codex/auth.json'), 'utf8') }, personalConfigRoot: homedir(),
     codex: { model: values.model, effort: values.effort, bin: values.codex, sandbox: !values['no-sandbox'], timeoutMs: Number(values['timeout-min']) * 60_000 } });

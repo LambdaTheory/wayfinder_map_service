@@ -169,10 +169,10 @@ export const precondition = (id: string, text: string, question: string): Item =
   criterion: `Before the scripted reply was sent, ${question} If not, the precondition was not met.` });
 
 /** Structural errors. Every library Scenario must have none, ready or not. */
-export function validateScenario(s: Scenario): string[] {
+export function validateScenario(s: Scenario, kind: 'scenario' | 'upgrade-check' = 'scenario'): string[] {
   const errors: string[] = [];
   const err = (message: string) => errors.push(`${s.id || '<no id>'}: ${message}`);
-  if (!/^[A-Z][A-Za-z0-9]*$/.test(s.id ?? '')) err('id must be a stable identifier like S0b');
+  if (!(kind === 'upgrade-check' ? /^U-[a-z]+-[a-z-]+$/ : /^[A-Z][A-Za-z0-9]*$/).test(s.id ?? '')) err('id must be a stable Scenario or upgrade check identifier');
   if (!Number.isInteger(s.version) || s.version < 1) err('version must be a positive integer');
   if (!s.title?.trim()) err('title is required');
   if (!s.target?.trim()) err('target behaviour is required');

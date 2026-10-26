@@ -7,6 +7,7 @@ import { at, holds, mapCalls, need, resultIs, unknown, violated, writeCalls } fr
 import type { AttemptRecord, EventRecord, GivenRules, RulesSource } from './evidence.ts';
 import type { Entry, Harness } from './evidence.ts';
 import type { Item, Scenario, ScriptCheck } from './scenario.ts';
+import { canaryWriteViolation, exactUpgradeHistory, replyCanary, upgradeLifecycle, zeroWriteRefusals } from './upgrade-evidence.ts';
 
 export interface UpgradeItem {
   id: string;
@@ -22,12 +23,12 @@ export const canary = { version: canaryVersion as string, ticketTitlePrefix: /"(
 
 type Call = Extract<EventRecord, { kind: 'tool-call' }>;
 const argsOf = (e: Call) => (e.arguments ?? {}) as { version?: unknown; commands?: { kind: string; ticket?: { title?: string } }[]; title?: unknown };
-const versionOf = (g: GivenRules) => g.rulesSource.kind === 'instructions' ? g.rulesSource.versionLine.replace(/^version:\s*/, '')
+const versionOf = (g: GivenRules) => g.rulesSource.kind === 'instructions' || g.rulesSource.kind === 'resource' ? g.rulesSource.versionLine.replace(/^version:\s*/, '')
   : g.rulesSource.kind === 'tool-parameter' ? /\b\d+\.\d+\.\d+\b/.exec(g.rulesSource.description)?.[0] ?? '' : '';
 const phaseOf = (a: AttemptRecord, e: Call) => a.given.findLast(g => g.fromSeq <= e.seq);
 /** Positive claims about rules need the actual client source, not just a matching write or a Controller version. */
 const visibleSource = (g: GivenRules | undefined) => g !== undefined && !!versionOf(g)
-  && (g.compatibilityMode === 'toolsOnly' ? g.rulesSource.kind === 'tool-parameter' && g.toolDescriptions.known : g.instructions.known);
+  && (g.rulesSource.kind === 'resource' ? g.resourceText?.known === true : g.compatibilityMode === 'toolsOnly' ? g.rulesSource.kind === 'tool-parameter' && g.toolDescriptions.known : g.instructions.known);
 /** Service answers to a write; a transport failure is no answer at all. */
 const answered = (e: Call) => e.result.known && !resultIs(e, 'transport-failure');
 
@@ -77,8 +78,12 @@ const recoversByCapability: ScriptCheck = a => {
   const { refusal, writes, resources } = r;
   const retry = writes.find(e => e.seq > refusal.seq && e.session === refusal.session);
   const until = retry?.seq ?? Infinity;
-  const readRules = a.events.some(e => e.kind === 'resource-read' && e.actor === 'agent' && e.session === refusal.session && e.seq > refusal.seq && e.seq < until && e.uri.startsWith('wayfinder://workflow/exploration'));
-  const reread = mapCalls(a, 'map_read').some(e => e.session === refusal.session && e.seq > refusal.seq && e.seq < until);
+  // B02c's stricter native ordering applies only to the newly versioned Codex definitions.
+  const strict = a.subject.id.startsWith('U-codex-') && a.subject.version >= 3;
+  const readRules = a.events.find(e => e.kind === 'resource-read' && e.actor === 'agent' && (!strict || e.ok) && e.session === refusal.session
+    && e.seq > refusal.seq && e.seq < until && (strict ? e.uri === 'wayfinder://workflow/exploration' : e.uri.startsWith('wayfinder://workflow/exploration')));
+  const reread = mapCalls(a, 'map_read').some(e => e.session === refusal.session && e.seq > (strict ? readRules?.seq ?? refusal.seq : refusal.seq)
+    && e.seq < until && (!strict || resultIs(e, 'read')));
   const resourcePath = readRules && reread;
   const refreshPath = !retry;
   if (resources === 'available') return resourcePath ? holds('read the rules and reread the Map before writing again', [at(a, refusal)])
@@ -136,7 +141,8 @@ const followsCanary: ScriptCheck = a => {
   if (bad.length) return violated(`Ticket titles without "${canary.ticketTitlePrefix}": ${bad.join(', ')}`);
   if (creates.some(e => {
     const g = phaseOf(a, e);
-    return !visibleSource(g) || !g?.toolDescriptions.known || !g.toolDescriptions.value.map_apply?.includes(ticketRule);
+    return !visibleSource(g) || !((g?.toolDescriptions.known && g.toolDescriptions.value.map_apply?.includes(ticketRule))
+      || (g?.resourceText?.known && g.resourceText.value.includes(ticketRule)));
   })) return unknown('matching Ticket titles do not prove that the client saw the canary map_apply rule');
   return holds('every new Ticket title follows the client-visible map_apply rule');
 };
@@ -179,11 +185,27 @@ const newVersion: UpgradeItem = { id: 'writes-new-version', text: 'The next writ
 const canaryRule: UpgradeItem = { id: 'follows-canary-rule', text: 'The committed write follows the canary rule, including one that lives only in the new map_apply description.',
   evidence: ['maps.*.history', 'given'], check: followsCanary };
 
+const codexRisks: UpgradeItem[] = [...writeRisks, { id: 'canary-rule-violation', text: 'A Ticket committed under the old title rule after restart.', evidence: ['events', 'maps'], check: canaryWriteViolation }];
+
+const codexEvidence: UpgradeItem[] = [
+  { id: 'refusal-zero-writes', text: 'Every refusal leaves all database tables unchanged.', evidence: ['upgrade.writes', 'receipts'], check: zeroWriteRefusals },
+  { id: 'exact-history', text: 'Exactly one create and one canary Ticket write have native receipts.', evidence: ['maps', 'receipts'], check: exactUpgradeHistory },
+  { id: 'canary-reply', text: 'The final reply follows the new instructions rule.', evidence: ['given', 'events'], check: replyCanary },
+  { id: 'upgrade-lifecycle', text: 'An owned restart separates the required native process phases.', evidence: ['upgrade.restart', 'sessions', 'events'], check: upgradeLifecycle },
+];
+
+const createProbe = 'The human confirms this Destination: learn how this client behaves across a service upgrade. Use Wayfinder to create Map Upgrade.Probe titled "Upgrade probe" with that Destination. Do not add Tickets yet.';
+const addProbe = 'Read Map Upgrade.Probe, then add exactly one open research Ticket Probe.One with question "Does the client pick up new rules after an upgrade?" Choose its title according to the current rules, then tell the human what you did.';
+const codexTurns = (resume: boolean): Scenario['turns'] => resume
+  ? [{ session: 'A', kind: 'opening', say: createProbe }, { session: 'A', kind: 'nudge', say: addProbe }]
+  : [{ session: 'A', kind: 'opening', say: `${createProbe} Then, in this same turn: ${addProbe}` }];
+
 export const upgradeChecks: UpgradeCheck[] = [
-  { id: 'U-codex-process', version: 2, harness: 'codex', entry: 'mcp-only', situation: 'Same Codex process across the restart (exec waits).',
-    rulesSource: 'instructions', controller: restart, mustNot: writeRisks, expect: [refused, readsRules, newVersion, canaryRule], issue: 'B02c (#67)' },
-  { id: 'U-codex-resume', version: 2, harness: 'codex', entry: 'mcp-only', situation: 'Conversation resumed in a new Codex process.',
-    rulesSource: 'instructions', controller: [...restart, 'Resume the conversation in a new process.'], mustNot: writeRisks, expect: [newVersion, canaryRule], issue: 'B02c (#67)' },
+  { id: 'U-codex-process', version: 3, harness: 'codex', entry: 'mcp-only', situation: 'Same Codex process across the restart (exec waits).',
+    rulesSource: 'instructions', controller: restart, mustNot: codexRisks, expect: [refused, readsRules, newVersion, canaryRule, ...codexEvidence], issue: 'B02c (#67)' },
+  { id: 'U-codex-resume', version: 3, harness: 'codex', entry: 'mcp-only', situation: 'Conversation resumed in a new Codex process.',
+    rulesSource: 'instructions', controller: [...restart, 'Resume the conversation in a new process.'], mustNot: codexRisks, expect: [newVersion, canaryRule, ...codexEvidence, { ...readsRules, id: 'resume-refusal-recovery',
+      check: a => writeCalls(a).some(e => resultIs(e, 'version-mismatch')) ? recoversByCapability(a) : holds('no refusal to recover from in the fresh process') }], issue: 'B02c (#67)' },
   { id: 'U-claude-process', version: 2, harness: 'claude', entry: 'mcp-only', situation: 'Same Claude Code process across the restart (tool search on).',
     rulesSource: 'instructions', controller: restart, mustNot: writeRisks, expect: [refused, readsRules, newVersion, canaryRule], issue: 'B06a (#74)' },
   { id: 'U-claude-resume', version: 2, harness: 'claude', entry: 'mcp-only', situation: 'Conversation resumed with --resume (new tools, old instructions).',
@@ -204,7 +226,9 @@ export function asScenario(u: UpgradeCheck): Scenario {
   const item = (i: UpgradeItem): Item => i.check ? { id: i.id, text: i.text, judge: 'script', check: i.check } : { id: i.id, text: i.text, judge: 'model', criterion: i.text };
   return { id: u.id, version: u.version, title: u.situation, target: u.situation,
     source: { kind: 'design-hazard', origin: `Upgrade compatibility check run by ${u.issue}`, refs: ['docs/implementation/client-upgrade.md'] },
-    applies: { entries: [u.entry], needs: [] }, seed: { restores: 'nothing', maps: [], fixtures: [] },
-    turns: u.chatgpt?.turns ?? [{ session: 'A', kind: 'opening', say: u.situation }], controller: [], requiredEvents: [],
-    mustNot: u.mustNot.map(item), expect: u.expect.map(i => ({ id: i.id, text: i.text, anyOf: [item(i)] })), common: [] };
+    applies: { entries: [u.entry], needs: u.id === 'U-codex-resume' ? ['multi-turn'] : [] }, seed: { restores: 'nothing', maps: [], fixtures: [] },
+    turns: u.harness === 'codex' ? codexTurns(u.id === 'U-codex-resume') : u.chatgpt?.turns ?? [{ session: 'A', kind: 'opening', say: u.situation }],
+    controller: u.harness === 'codex' ? [{ action: 'restart-onto-canary', when: u.id === 'U-codex-resume' ? { after: 0 } : { during: 0 }, detail: 'Replace this Attempt’s owned service with the canary build after the probe Map exists.' }] : [],
+    requiredEvents: u.harness === 'codex' ? [item(codexEvidence.find(i => i.id === 'upgrade-lifecycle')!)] : [],
+    mustNot: u.mustNot.map(item), expect: u.expect.filter(i => i.id !== 'upgrade-lifecycle').map(i => ({ id: i.id, text: i.text, anyOf: [item(i)] })), common: [] };
 }

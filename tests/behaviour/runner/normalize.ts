@@ -77,7 +77,7 @@ export function streamTurn(session: string, turn: number, input: string, at: str
         emit({ ...base('agent'), kind: 'tool-call', callId: callId(item.id), server: item.server ?? '', tool: item.tool ?? '', arguments: item.arguments ?? null,
           result: structured === undefined || structured === null ? { known: false, reason: item.error ? 'the call failed' : 'no structured result' } : { known: true, value: structured },
           failed: item.status === 'failed' || (item.error !== null && item.error !== undefined), requestId: { known: false, reason: 'Codex does not report JSON-RPC request IDs' } });
-        if (/resource/i.test(item.tool ?? '')) emit({ ...base('agent'), kind: 'resource-read', uri: String((item.arguments as { uri?: string } | null)?.uri ?? ''), ok: item.status !== 'failed' });
+        if (/resource/i.test(item.tool ?? '')) emit({ ...base('agent'), kind: 'resource-read', uri: String((item.arguments as { uri?: string } | null)?.uri ?? ''), ok: item.status !== 'failed' && item.error == null });
         break;
       }
       case 'file_change':

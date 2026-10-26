@@ -98,10 +98,10 @@ export function codexArgs(o: CodexOptions, port: number, workdir: string, thread
   return threadId ? ['exec', 'resume', ...config, threadId, '-'] : ['exec', ...config, '-C', workdir, '-'];
 }
 
-export interface TurnRequest { options: CodexOptions; session: CodexSession; port: number; workdir: string; prompt: string; profile: ControlProfile; onLaunch?: () => void; onChild?: (kill: () => void) => (() => void); onLine?: (line: Line) => void }
+export interface TurnRequest { options: CodexOptions; session: CodexSession; port: number; workdir: string; prompt: string; profile: ControlProfile; onLaunch?: () => void; onSpawn?: (pid: number) => void; onChild?: (kill: () => void) => (() => void); onLine?: (line: Line) => void }
 
 /** Run one turn and keep the session's thread. The child gets only the environment it needs, never the runner's. */
-export function runTurn({ options: o, session: s, port, workdir, prompt, profile, onLaunch, onChild, onLine }: TurnRequest): Promise<TurnResult> {
+export function runTurn({ options: o, session: s, port, workdir, prompt, profile, onLaunch, onSpawn, onChild, onLine }: TurnRequest): Promise<TurnResult> {
   const failure = verifyProfile(profile);
   if (failure) {
     const at = new Date().toISOString();
@@ -116,6 +116,7 @@ export function runTurn({ options: o, session: s, port, workdir, prompt, profile
   const started = Date.now();
   return new Promise(resolve => {
     const child = spawn(cmd as string, argv as string[], { cwd: workdir, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
+    if (child.pid) onSpawn?.(child.pid);
     let stdout = ''; let stderr = ''; let timedOut = false;
     let force: ReturnType<typeof setTimeout> | undefined;
     const signal = (name: NodeJS.Signals) => { if (child.pid) try { process.kill(-child.pid, name); } catch { /* already exited */ } };

@@ -168,7 +168,8 @@ describe('upgrade checks judge the recovery path', () => {
   const judge = (events: EventRecord[]) => Object.fromEntries([...u.mustNot, ...u.expect].flatMap(i => i.check ? [[i.id, i.check(sample('S12', [], { given: phases, events })).status]] : []));
   test('refused, read the rules, reread, wrote once with the new release under the new rule', () => {
     expect(judge(recovered)).toEqual({ 'old-rules-write': 'holds', 'double-write': 'holds', 'guessed-version': 'holds',
-      'refused-unwritten': 'holds', 'reads-new-rules': 'holds', 'writes-new-version': 'holds', 'follows-canary-rule': 'holds' });
+      'refused-unwritten': 'holds', 'reads-new-rules': 'holds', 'writes-new-version': 'holds', 'follows-canary-rule': 'holds',
+      'canary-rule-violation': 'unknown', 'refusal-zero-writes': 'unknown', 'exact-history': 'unknown', 'canary-reply': 'unknown', 'upgrade-lifecycle': 'unknown' });
   });
   test('a retry that skips the Resource, or commits under the old release, is caught', () => {
     const skipped = recovered.filter(e => e.kind !== 'resource-read');
@@ -306,6 +307,7 @@ describe('upgrade checks keep refusals, outages and missing results apart', () =
   test('an upgrade Attempt is judged through the Scenario adapter, model items left to review', () => {
     const v = judgeAttempt(asScenario(u), sample('S12', [], { subject: { kind: 'upgrade-check', id: u.id, version: u.version }, given: given('available'), events: [mismatch(11)] }));
     expect(v.mustNot.find(i => i.id === 'mismatch-as-outage')!.status).toBe('pending-review');
-    expect(v.outcome).toBe('fail');
+    expect(v.required.find(i => i.id === 'upgrade-lifecycle')!.status).toBe('unknown');
+    expect(v.outcome).toBe('insufficient-evidence'); // A refusal alone does not prove the owned restart was exercised.
   });
 });

@@ -28,7 +28,7 @@ describe('library', () => {
   });
 
   test('every Scenario is structurally valid', () => {
-    expect(library.flatMap(validateScenario)).toEqual([]);
+    expect(library.flatMap(s => validateScenario(s))).toEqual([]);
   });
 
   test('every Scenario has a source, a positive expectation and its fixtures', () => {
