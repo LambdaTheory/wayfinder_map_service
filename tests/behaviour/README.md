@@ -191,6 +191,8 @@ A record made under an older Scenario version is never re-judged by the current 
 
 S15 illustrates why a gap must be checked against the particular proof: missing file-change events can hide an earlier write, so a recorded read before a recorded write cannot establish success. But with complete file-read/command traces, a recorded write before every read already proves the ordering violation; missing other writes cannot erase it. Missing read traces still leave that ordering unknown. The complete, timeout and rerun-cell regressions use the actual S15 definition with its proposal prerequisite established.
 
+An individual unreadable native result is also a gap, even without a broad `missing` marker. An unresolved Wayfinder workflow Resource call in the refusal's session/turn may be the unrecorded rules source; its turn-end position cannot prove the client skipped recovery or guessed a version. An explicit `events[i].result` marker also invalidates any derived Resource event/phase, even if stale values remain. A known earlier exposure still proves a stale retry, and fresh initialization is independent evidence of the version it states. Conflict rereads require a completed native `read` result; an unfinished call cannot establish their order or success.
+
 ```sh
 npm run build
 node tests/behaviour/compare-main.mjs --out /tmp/wayfinder-verdict-comparison.json

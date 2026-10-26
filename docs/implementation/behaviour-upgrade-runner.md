@@ -215,8 +215,48 @@ The main-comparison manifest retains all 66 prior entries / 78 outcomes and adds
 
 The complete write-before-read case (including a command read) is again `fail` on both main and this branch, so it needs no exception. The previous read-before-write/write-gap comparisons still block false success. These are repeated judgements of fixed inputs, not real Attempts or new scenario definitions.
 
-The [updated saved comparison](behaviour-upgrade-main-comparison.json) judges code commit `593f8b0` against main `e4d54cc`: **1080 outcomes, 995 unchanged, 85 changed outcomes in 71 exact entries**, covering all 32 stock definitions and existing interactive fixed evidence. There are **zero unlisted changes, stale entries or count mismatches**; all 66 prior manifest entries and their 78 outcomes remain unchanged. The comparison suite passed **23 files / 799 tests**. Only this saved report and verification text were added after the compared code commit.
+The [fifth-round comparison](https://github.com/kun-g/wayfinder_map_service/blob/3c1a1b6/docs/implementation/behaviour-upgrade-main-comparison.json) judges code commit `593f8b0` against main `e4d54cc`: **1080 outcomes, 995 unchanged, 85 changed outcomes in 71 exact entries**, covering all 32 stock definitions and existing interactive fixed evidence. There are **zero unlisted changes, stale entries or count mismatches**; all 66 prior manifest entries and their 78 outcomes remain unchanged. The comparison suite passed **23 files / 799 tests**. Only that saved report and verification text were added after the compared code commit.
 
 Fifth-round verification on Node 26.3.0 after `npm ci`: `npm run build`, `npm test` (**39 files / 2019 tests**, 92.75 seconds), `npm run typecheck` and `git diff --check` pass. The increase from 1984 is 28 tests merged from main and seven S15 regressions. No real models or private run records were used.
+
+### Sixth-review missing native Resource results
+
+The [fifth Codex re-review](https://github.com/kun-g/wayfinder_map_service/pull/107#issuecomment-6425196069) passed the previous fixes and all 85 comparison differences. The [fifth Claude re-review](https://github.com/kun-g/wayfinder_map_service/pull/107#issuecomment-6425275350) found a missing individual Resource result still being treated as a skipped read and guessed version. Latest main was fetched before changes; `e4d54cc` was already included, so the comparison pin is unchanged.
+
+Unfinished native calls are flushed at turn end. Their sequence cannot prove whether a Resource read preceded the retry. Recovery, version attestation and guessed-version checks now distinguish a known contradiction from a potentially missing rules source in the same session and turn; both `result.known=false` and an explicit `.result` missing marker leave it unknown. The non-Codex committed-version branch follows the same rule. A Resource event's derived `ok` and `given` phase do not restore a missing native result; the audit found and fixed that same gap in canary reply applicability. A previously proved exposure followed by a stale retry remains a violation.
+
+| Evidence | Complete | Timeout | Item proof |
+| --- | --- | --- | --- |
+| Process recovery, sole new rules source is an unresolved Resource call | `insufficient-evidence` | `incomplete` | `guessed-version`, `invalid-recovery`, rules read and new-version write are unknown |
+| Resume recovery, unresolved Resource call after a forced refusal | `insufficient-evidence` | `incomplete` | Recovery is unknown; `guessed-version` still holds because fresh initialization independently states the current version |
+| Missing native Resource result with its stale derived event/phase retained | `insufficient-evidence` | `incomplete` | Neither version/recovery nor canary reply applicability is inferred from the derived copy |
+| Known new-rule exposure, then stale retry, then a later unresolved Resource call | `fail` | `fail` | Existing positive contradiction survives; two passing reruns yield `flaky` |
+| Legacy shared checks, only an unresolved Resource may supply the new version | `insufficient-evidence` | `incomplete` | Includes the committed-version branch outside strict Codex retry attestation |
+| Only an unrelated server, Resource URI, listing tool, session or later turn has an unresolved call | `fail` | `fail` | That call cannot supply the missing rules source for this retry |
+
+The fake driver adds two variants: `fake-upgrade-lost-resource` loses the Resource completion while still performing the correct recovery; `fake-upgrade-stale-lost-resource` first exposes the rules, makes an old-version retry, then loses the later Resource completion. Resume probes deliberately send the old request once so they exercise a refusal despite fresh initialization. They use only the fake's owned session log and the existing sandbox. Complete/timeout, explicit-field-marker and stale-retry/rerun cases cover both lifecycles; the retained-derived-phase case uses a labelled damaged copy of a successful native fake run.
+
+Claude's Conflict reread suggestion is fixed in this PR: an unresolved or declared-missing `map_read` result cannot prove a successful reread, while another independently completed `read` can. Two fixed controls verify unknown/`insufficient-evidence`, timeout/`incomplete`, and the completed-read alternative. The remaining read-dependent must-not audit found no further case: stored/committed old or duplicate writes, Conflict replay, forbidden file/bait operations, malformed Settlements and refusal mutations use present request/receipt/state evidence; missing rule exposure already leaves canary applicability unknown. The corrected Resource-derived source was the extra must-not path found by this audit.
+
+All twelve new cases were run against pre-fix code: **6 failed / 6 passed**, then **12 passed** after the changes. The six failures are two native Resource lifecycle probes, one derived-phase probe, one legacy shared-check probe and two Conflict-read probes. The six controls are two witnessed stale-retry lifecycles and four unrelated-read scopes. Fixed qualitative annotations are fixtures, not real model or human acceptance; no historical private Attempt was opened or re-judged.
+
+A thirteenth scope control caught an overbroad Resource-tool name match during self-review: `list_mcp_resources` with a missing result cannot expose the workflow rules. It failed before narrowing the helper to Resource read calls, then passed; its outcome agrees with main and adds no comparison exception.
+
+A fourteenth control keeps Conflict reread uncertainty scoped to its own session/turn: an unresolved read in one turn cannot hide a definitively skipped reread in another completed turn. It first failed with the broad unknown guard, then passed after checking each Conflict's scope; completion is `fail`, timeout remains `incomplete` because this is an absence-only expectation. Both outcomes agree with main.
+
+The comparison manifest retains the previous 71 entries / 85 outcomes and adds only the following 13 entries / 16 outcomes; all differences are against pinned main `e4d54cc`, not against the pre-fix PR:
+
+| New comparison | Entries / outcomes | Main → branch | Reason |
+| --- | --- | --- | --- |
+| Process, unresolved Resource result / explicit missing-result field | 2 / 4 | `fail` → `insufficient-evidence` or `incomplete` | R3/R4: a missing rules source cannot prove a guessed version |
+| Resume, unresolved Resource after a forced refusal | 1 / 2 | `pass` → `insufficient-evidence` | B02c/R4: v7 requires recovery after an actual refusal; main v2's resume definition does not |
+| Legacy shared checks, unresolved workflow Resource | 2 / 2 | `fail` → `insufficient-evidence` or `incomplete` | R3/R4: same missing-source rule applies to the non-Codex committed-version path |
+| Proven exposure then stale retry and later lost Resource result, both lifecycles | 4 / 4 | `insufficient-evidence` or `incomplete` → `fail` | R4: present contradiction survives the later gap and timeout |
+| Intact process recovery controls for the stale/derived-phase tests | 2 / 2 | `insufficient-evidence` → `pass` | B02c/R3: complete native Resource exposure is recognized by v7 |
+| Conflict reread, unknown / declared-missing result | 2 / 2 | `pass` → `insufficient-evidence` | R3/R4: a call without its read result cannot prove successful rereading |
+
+The damaged Resource-derived phase/reply cases already agree with main's overall outcomes, so they need no comparison exception. The regression tests still expose their false must-nots in the pre-fix v7 code. Unrelated-read controls and all earlier fixed evidence retain their outcomes.
+
+Sixth-round verification on Node 26.3.0 after `npm ci`: `npm run build`, full `npm test` (**39 files / 2033 tests**, including all fourteen new cases), `npm run typecheck` and `git diff --check` pass. Only fake drivers and fixed evidence were used.
 
 Standards: no new package dependency, product code or sandbox permission; service ownership and cleanup remain explicit; raw evidence is redacted and kept outside the repository. Spec: R2 lifecycle and isolation, R3 actual client exposure and independent persistence evidence, R4 no false green or W5 conflation, separate upgrade accounting. Only tests and documentation change, so the Release Version stays 2.1.0 under mcp-sqlite §14.3; this changes no shipped mandatory rule or client tool contract and requires no pre-merge ChatGPT run. The outstanding gate is Kun's approval for real Codex quota, followed by the approved verdict reviews.

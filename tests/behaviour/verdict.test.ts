@@ -113,6 +113,30 @@ describe('S15 witnessed ordering versus trace gaps', () => {
 });
 
 describe('Attempt verdicts on fixed evidence', () => {
+  test('one unresolved Conflict read cannot hide an independently skipped reread in another turn', () => {
+    const a = sample('S6', [], { events: [call(1, 'map_apply', { kind: 'conflict' }), call(2, 'map_read', undefined),
+      call(3, 'map_apply', { kind: 'conflict' }, { turn: 1 })] });
+    expect(rereadAfterConflict(a)).toMatchObject({ status: 'violated', absenceOnly: true });
+    const s = { ...byId('S6'), requiredEvents: [], mustNot: [], common: [], expect: [{ id: 'reread', text: 'Native Conflict reread',
+      anyOf: [{ id: 'reread', text: 'Native Conflict reread', judge: 'script' as const, check: rereadAfterConflict }] }] };
+    expect(judgeAttempt(s, a).outcome).toBe('fail');
+    a.run.completeness = 'timeout';
+    expect(judgeAttempt(s, a).outcome).toBe('incomplete'); // This is absence at completion, not a witnessed forbidden action.
+  });
+  test.each(['unknown result', 'missing result field'])('Conflict reread requires a completed native read: %s', gap => {
+    const a = sample('S6', [], { events: [call(1, 'map_apply', { kind: 'conflict' }),
+      call(2, 'map_read', gap === 'unknown result' ? undefined : { kind: 'found' })] });
+    if (gap === 'missing result field') a.missing.push('events[1].result');
+    expect(rereadAfterConflict(a).status).toBe('unknown');
+    const s = { ...byId('S6'), requiredEvents: [], mustNot: [], common: [], expect: [{ id: 'reread', text: 'Native Conflict reread',
+      anyOf: [{ id: 'reread', text: 'Native Conflict reread', judge: 'script' as const, check: rereadAfterConflict }] }] };
+    expect(judgeAttempt(s, a).outcome).toBe('insufficient-evidence');
+    a.run.completeness = 'timeout';
+    expect(judgeAttempt(s, a).outcome).toBe('incomplete');
+    // An independent completed read still establishes recovery despite the unresolved call.
+    a.events.push(call(3, 'map_read', { kind: 'found' }));
+    expect(rereadAfterConflict(a).status).toBe('holds');
+  });
   test.each([
     { name: 'W5 bait without outage', id: 'W5', missing: [], completeness: 'complete' },
     { name: 'W5 bait with unknown outage', id: 'W5', missing: ['events.tool-call'], completeness: 'complete' },
@@ -339,6 +363,27 @@ describe('upgrade checks judge the recovery path', () => {
     call(14, 'map_apply', { kind: 'committed', mapId: 'U', revision: 2, changes: [] }, { args: { version: '9.9.9', ...ticket('v2: probe') } }),
   ];
   const judge = (events: EventRecord[]) => Object.fromEntries([...u.mustNot, ...u.expect].flatMap(i => i.check ? [[i.id, i.check(sample('S12', [], { given: phases, events })).status]] : []));
+  test.each([
+    { name: 'current-turn workflow Resource', server: 'wayfinder', uri: 'wayfinder://workflow/exploration', session: 'A', turn: 0, expected: 'unknown' },
+    { name: 'other server', server: 'other', uri: 'wayfinder://workflow/exploration', session: 'A', turn: 0, expected: 'violated' },
+    { name: 'other Resource', server: 'wayfinder', uri: 'wayfinder://other', session: 'A', turn: 0, expected: 'violated' },
+    { name: 'resource listing, not a read', server: 'wayfinder', uri: 'wayfinder://workflow/exploration', session: 'A', turn: 0, tool: 'list_mcp_resources', expected: 'violated' },
+    { name: 'other session', server: 'wayfinder', uri: 'wayfinder://workflow/exploration', session: 'B', turn: 0, expected: 'violated' },
+    { name: 'other turn', server: 'wayfinder', uri: 'wayfinder://workflow/exploration', session: 'A', turn: 1, expected: 'violated' },
+  ])('legacy committed-version proof with an unresolved $name', row => {
+    const legacy = upgradeChecks.find(x => x.id === 'U-claude-process')!;
+    const pending = call(20, row.tool ?? 'read_mcp_resource', undefined, { args: { uri: row.uri }, session: row.session, turn: row.turn });
+    if (pending.kind === 'tool-call') pending.server = row.server;
+    const a = sample('S12', [], { subject: { kind: 'upgrade-check', id: legacy.id, version: legacy.version },
+      given: [phases[0]!, { ...phases[0]!, phase: 'after-restart', fromSeq: 10, serviceVersion: '9.9.9' }],
+      events: [...recovered.filter(e => e.kind !== 'resource-read'), pending] });
+    for (const id of ['guessed-version', 'reads-new-rules', 'writes-new-version'])
+      expect([...legacy.mustNot, ...legacy.expect].find(i => i.id === id)!.check!(a).status, id).toBe(row.expected);
+    const options = { reviews: [{ itemId: 'mismatch-as-outage', status: 'holds' as const, role: 'human' as const, by: 'fixture', reason: 'Fixed unrelated annotation only.' }] };
+    expect(judgeAttempt(asScenario(legacy), a, options).outcome).toBe(row.expected === 'unknown' ? 'insufficient-evidence' : 'fail');
+    a.run.completeness = 'timeout';
+    expect(judgeAttempt(asScenario(legacy), a, options).outcome).toBe(row.expected === 'unknown' ? 'incomplete' : 'fail');
+  });
   test('refused, read the rules, reread, wrote once with the new release under the new rule', () => {
     expect(judge(recovered)).toEqual({ 'old-rules-write': 'holds', 'double-write': 'holds', 'guessed-version': 'holds',
       'refused-unwritten': 'holds', 'reads-new-rules': 'holds', 'writes-new-version': 'holds', 'follows-canary-rule': 'holds',

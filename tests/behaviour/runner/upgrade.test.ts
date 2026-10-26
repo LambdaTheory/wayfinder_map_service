@@ -62,6 +62,63 @@ test('upgrade selection is separate and cannot silently switch harness or mix ca
 });
 
 describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrade through the real shared sandbox, fake native driver only', () => {
+  test.each(['U-codex-process', 'U-codex-resume'])('a lost native Resource result leaves recovery unknown in %s', async mode => {
+    const { record: a, outcome } = await run(`lost-resource-${mode}`, mode, 'fake-upgrade-lost-resource');
+    expect(outcome.completeness).toBe('complete');
+    expect(a.missing).toEqual([]);
+    const index = a.events.findIndex(e => e.kind === 'tool-call' && e.tool === 'read_mcp_resource' && !e.result.known);
+    expect(index).toBeGreaterThan(-1);
+    expect(a.events.some(e => e.kind === 'resource-read')).toBe(false);
+    for (const marker of [false, true]) {
+      const damaged = structuredClone(a);
+      if (marker) {
+        // A declared missing field is unavailable even if a stale value still occupies it.
+        const call = damaged.events[index]!;
+        if (call.kind === 'tool-call') call.result = { known: true, value: { contents: [] } };
+        damaged.missing.push(`events[${index}].result`);
+      }
+      expect(scripts(damaged)).toMatchObject({ 'invalid-recovery': 'unknown',
+        [mode === 'U-codex-process' ? 'reads-new-rules' : 'resume-refusal-recovery']: 'unknown',
+        // Resume independently received the current version in fresh initialization.
+        'guessed-version': mode === 'U-codex-process' ? 'unknown' : 'holds' });
+      if (mode === 'U-codex-process') expect(scripts(damaged)['writes-new-version']).toBe('unknown');
+      expect(reviewedVerdict(damaged).outcome).toBe('insufficient-evidence');
+      damaged.run.completeness = 'timeout';
+      expect(reviewedVerdict(damaged).outcome).toBe('incomplete');
+    }
+  }, 60_000);
+  test.each(['U-codex-process', 'U-codex-resume'])('a proven exposure then stale retry survives a later lost Resource result in %s', async mode => {
+    const { record: a } = await run(`stale-lost-resource-${mode}`, mode, 'fake-upgrade-stale-lost-resource');
+    expect(a.events.some(e => e.kind === 'resource-read' && e.ok)).toBe(true);
+    expect(a.events.some(e => e.kind === 'tool-call' && e.tool === 'read_mcp_resource' && !e.result.known)).toBe(true);
+    expect(scripts(a)['invalid-recovery']).toBe('violated');
+    expect(reviewedVerdict(a).outcome).toBe('fail');
+    a.run.completeness = 'timeout';
+    const failed = reviewedVerdict(a);
+    expect(failed.outcome).toBe('fail');
+    const passed = reviewedVerdict((await run(`stale-lost-control-${mode}`, mode)).record);
+    expect(passed.outcome).toBe('pass');
+    expect(judgeCell(subject(mode), [failed, passed, passed], 2).outcome).toBe('flaky');
+  }, 60_000);
+  test('a missing Resource result cannot establish its derived rule phase or a canary reply violation', async () => {
+    const { record: a } = await run('resource-derived-phase');
+    expect(reviewedVerdict(a).outcome).toBe('pass');
+    const index = a.events.findIndex(e => e.kind === 'tool-call' && e.tool === 'read_mcp_resource');
+    expect(index).toBeGreaterThan(-1);
+    for (const marker of [false, true]) {
+      const damaged = structuredClone(a);
+      const call = damaged.events[index]!;
+      if (marker) damaged.missing.push(`events[${index}].result`);
+      else if (call.kind === 'tool-call') call.result = { known: false, reason: 'Native result unavailable, derived records retained as a gap probe.' };
+      const reply = damaged.events.findLast(e => e.kind === 'message' && e.role === 'assistant');
+      if (reply?.kind === 'message') reply.text = 'Finished the probe.';
+      expect(scripts(damaged)).toMatchObject({ 'guessed-version': 'unknown', 'invalid-recovery': 'unknown', 'reads-new-rules': 'unknown',
+        'writes-new-version': 'unknown', 'canary-reply-violation': 'unknown', 'canary-reply': 'unknown' });
+      expect(reviewedVerdict(damaged).outcome).toBe('insufficient-evidence');
+      damaged.run.completeness = 'timeout';
+      expect(reviewedVerdict(damaged).outcome).toBe('incomplete');
+    }
+  }, 60_000);
   test('a witnessed stale retry remains forbidden when unrelated trace gaps follow', async () => {
     const { record: a, outcome } = await run('stale-recovered', 'U-codex-process', 'fake-upgrade-stale-recovered-timeout', 3000);
     expect(outcome.completeness).toBe('timeout');

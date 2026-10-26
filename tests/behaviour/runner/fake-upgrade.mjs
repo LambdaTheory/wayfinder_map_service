@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Deterministic Codex stand-in: real MCP over the shared sandbox route, no model or personal state.
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -42,6 +42,10 @@ const record = e => appendFileSync(log, JSON.stringify(e) + '\n');
 if (!resume) record({ type: 'session_meta', payload: { id: thread, cli_version: '0.0.0-fake' } });
 record({ type: 'event_msg', payload: { type: 'thread_settings_applied', thread_settings: { model, reasoning_effort: 'low' } } });
 record({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: init.instructions }] } });
+// Only this fake's owned rollout: force a refused old request after resume for Resource-recovery probes.
+const oldInstructions = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse)
+  .find(e => e.type === 'response_item' && e.payload?.role === 'developer').payload.content[0].text;
+const oldVersion = /^version: (\S+)$/m.exec(oldInstructions)[1];
 if (definitions && model !== 'fake-upgrade-no-native-tools') record({ type: 'response_item', payload: { type: 'additional_tools', tools: definitions.tools } });
 emit({ type: 'thread.started', thread_id: thread }); emit({ type: 'turn.started' });
 const say = text => emit({ type: 'item.completed', item: { id: `item_${item++}`, type: 'agent_message', text } });
@@ -69,6 +73,7 @@ if (!resume) {
 }
 let head = await call('map_read', { mapId: 'Upgrade.Probe' });
 let learned = init.instructions;
+if (resume && ['fake-upgrade-lost-resource', 'fake-upgrade-stale-lost-resource'].includes(model)) version = oldVersion;
 const write = (expectedRevision = head.revision.revision) => call('map_apply', { version, mapId: 'Upgrade.Probe', expectedRevision,
   commands: [{ kind: 'ticket.create', ticket: { id: model.includes('wrong-ticket') ? 'Probe.Uno' : 'Probe.One', title: `${learned.includes('LANTERN') ? 'v2: ' : ''}Probe`, question: 'Does the client pick up new rules after an upgrade?', type: 'research' } },
     ...(model.includes('two-tickets') ? [{ kind: 'ticket.create', ticket: { id: 'Probe.Two', title: 'v2: Extra', question: 'Extra?', type: 'research' } }] : [])] });
@@ -76,18 +81,18 @@ let result = await write(conflictReplay && resume ? head.revision.revision + 1 :
 if (result.code === 'version_mismatch') {
   if (model === 'fake-upgrade-stop') { say('Please refresh the tools.'); done(); process.exit(0); }
   if (model === 'fake-upgrade-pre-exposure-timeout') say('I will read the new rules.');
-  const resource = await call('read_mcp_resource', { uri: 'wayfinder://workflow/exploration' }, true);
+  const resource = await call('read_mcp_resource', { uri: 'wayfinder://workflow/exploration' }, true, model !== 'fake-upgrade-lost-resource');
   const text = resource.contents[0].text;
   version = /^version: (\S+)$/m.exec(text)[1];
   if (model !== 'fake-upgrade-version-only') learned = text;
   head = await call('map_read', { mapId: 'Upgrade.Probe' }, false, model !== 'fake-upgrade-lost-reread');
-  if (model === 'fake-upgrade-repeat-refusal' || model === 'fake-upgrade-stale-recovered-timeout') {
+  if (['fake-upgrade-repeat-refusal', 'fake-upgrade-stale-recovered-timeout', 'fake-upgrade-stale-lost-resource'].includes(model)) {
     const current = version;
-    version = /^version: (\S+)$/m.exec(init.instructions)[1];
+    version = oldVersion;
     await write();
     version = current;
-    if (model === 'fake-upgrade-stale-recovered-timeout') {
-      await call('read_mcp_resource', { uri: 'wayfinder://workflow/exploration' }, true);
+    if (model === 'fake-upgrade-stale-recovered-timeout' || model === 'fake-upgrade-stale-lost-resource') {
+      await call('read_mcp_resource', { uri: 'wayfinder://workflow/exploration' }, true, model !== 'fake-upgrade-stale-lost-resource');
       head = await call('map_read', { mapId: 'Upgrade.Probe' });
     } // repeat-refusal deliberately skips both reads after the second refusal.
   }

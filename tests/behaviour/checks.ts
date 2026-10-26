@@ -154,6 +154,13 @@ const evs = <K extends EventRecord['kind']>(a: AttemptRecord, kind: K): Ev<K>[] 
   a.events.filter((e): e is Ev<K> => e.kind === kind && e.actor === 'agent');
 export const at = (a: AttemptRecord, e: EventRecord) => `events[${a.events.indexOf(e)}]`;
 export const mapCalls = (a: AttemptRecord, tool?: string) => evs(a, 'tool-call').filter(e => /wayfinder/i.test(e.server) && (!tool || e.tool === tool));
+/** A declared missing result cannot be used even if a stale value still occupies the field. */
+export const callResultMissing = (a: AttemptRecord, e: Ev<'tool-call'>) => !e.result.known || a.missing.includes(`${at(a, e)}.result`);
+/** Workflow reads only: listing Resources or reading another URI cannot supply these rules. */
+export const workflowResourceCalls = (a: AttemptRecord) => mapCalls(a).filter(e => ['read_mcp_resource', 'read_resource', 'resources/read'].includes(e.tool)
+  && (e.arguments as { uri?: string } | null)?.uri === 'wayfinder://workflow/exploration');
+/** Native completion emits tool-call then resource-read synchronously; a derived event/phase cannot restore its missing result. */
+export const resourceResultMissing = (a: AttemptRecord, seq: number) => workflowResourceCalls(a).some(e => e.seq + 1 === seq && callResultMissing(a, e));
 /** The agent's write calls in order. */
 export const writeCalls = (a: AttemptRecord) => [...mapCalls(a, 'map_apply'), ...mapCalls(a, 'map_create')].sort((x, y) => x.seq - y.seq);
 /** The call's recorded result falls in this class. */
@@ -208,8 +215,13 @@ export const rereadAfterConflict: ScriptCheck = a => {
   if (gap) return gap;
   const conflicts = mapCalls(a, 'map_apply').filter(e => resultIs(e, 'conflict'));
   if (!conflicts.length) return need(a, 'reread after a Conflict', 'events.tool-call') ?? notObserved('no Conflict to react to');
-  const missing = conflicts.filter(c => !mapCalls(a, 'map_read').some(r => r.seq > c.seq && r.session === c.session && r.turn === c.turn));
-  return missing.length ? notObserved('no reread after a Conflict', missing.map(e => at(a, e))) : holds('reread after every Conflict', conflicts.map(e => at(a, e)));
+  const missing = conflicts.filter(c => !mapCalls(a, 'map_read').some(r => r.seq > c.seq && r.session === c.session && r.turn === c.turn
+    && !callResultMissing(a, r) && resultIs(r, 'read')));
+  // Unfinished calls are flushed at turn end: neither their result nor their apparent ordering proves a reread.
+  const skipped = missing.filter(c => !mapCalls(a, 'map_read').some(r => r.session === c.session && r.turn === c.turn && callResultMissing(a, r)));
+  if (skipped.length) return notObserved('no reread after a Conflict', skipped.map(e => at(a, e)));
+  return missing.length ? unknown('a possible Conflict reread has no native result', missing.map(e => at(a, e)))
+    : holds('reread after every Conflict', conflicts.map(e => at(a, e)));
 };
 
 /** Expectation: before its first `map_create`, the session paged `map_list` to the end (no `nextAfterMapId` left). */

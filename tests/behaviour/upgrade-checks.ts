@@ -3,7 +3,7 @@
 // (`tests/helpers/canary-release.mjs`); `tests/helpers/upgrade-live.mjs` is the earlier runner they may reuse.
 // An Attempt of one names it as `subject: { kind: 'upgrade-check', id, version }`.
 import { canaryVersion, ticketRule, ticketTitlePrefix } from '../helpers/canary-release.mjs';
-import { at, holds, mapCalls, need, resultIs, unknown, violated, notObserved, writeCalls, wroteAfterConflict } from './checks.ts';
+import { at, callResultMissing, holds, mapCalls, need, resourceResultMissing, resultIs, unknown, violated, notObserved, workflowResourceCalls, writeCalls, wroteAfterConflict } from './checks.ts';
 import type { AttemptRecord, EventRecord, GivenRules, RulesSource } from './evidence.ts';
 import type { Entry, Harness } from './evidence.ts';
 import type { Item, Scenario, ScriptCheck } from './scenario.ts';
@@ -26,9 +26,12 @@ const argsOf = (e: Call) => (e.arguments ?? {}) as { version?: unknown; commands
 const versionOf = (g: GivenRules) => g.rulesSource.kind === 'instructions' || g.rulesSource.kind === 'resource' ? g.rulesSource.versionLine.replace(/^version:\s*/, '')
   : g.rulesSource.kind === 'tool-parameter' ? /\b\d+\.\d+\.\d+\b/.exec(g.rulesSource.description)?.[0] ?? '' : '';
 const phaseOf = (a: AttemptRecord, e: Call) => a.given.findLast(g => g.fromSeq <= e.seq);
+// An unfinished call is flushed at turn end. Its seq cannot show whether it preceded a retry in that same turn.
+const unresolvedRules = (a: AttemptRecord, e: Call) => workflowResourceCalls(a).filter(r => r.session === e.session && r.turn === e.turn && callResultMissing(a, r));
 /** Positive claims about rules need the actual client source, not just a matching write or a Controller version. */
-const visibleSource = (g: GivenRules | undefined) => g !== undefined && !!versionOf(g)
-  && (g.rulesSource.kind === 'resource' ? g.resourceText?.known === true : g.compatibilityMode === 'toolsOnly' ? g.rulesSource.kind === 'tool-parameter' && g.toolDescriptions.known : g.instructions.known);
+const visibleSource = (a: AttemptRecord, g: GivenRules | undefined) => g !== undefined && !!versionOf(g)
+  && (g.rulesSource.kind === 'resource' ? g.resourceText?.known === true && !resourceResultMissing(a, g.fromSeq)
+    : g.compatibilityMode === 'toolsOnly' ? g.rulesSource.kind === 'tool-parameter' && g.toolDescriptions.known : g.instructions.known);
 /** Service answers to a write; a transport failure is no answer at all. */
 const answered = (e: Call) => e.result.known && !resultIs(e, 'transport-failure');
 
@@ -82,15 +85,18 @@ function recoveryForRefusal(a: AttemptRecord, r: { refusal: Call; writes: Call[]
   // B02c's stricter native ordering applies only to the newly versioned Codex definitions.
   const strict = codexLifecycle(a.subject.id) !== undefined && a.subject.version >= 3;
   const readRules = a.events.find(e => e.kind === 'resource-read' && e.actor === 'agent' && (!strict || e.ok) && e.session === refusal.session
+    && !resourceResultMissing(a, e.seq)
     && e.seq > refusal.seq && e.seq < until && (strict ? e.uri === 'wayfinder://workflow/exploration' : e.uri.startsWith('wayfinder://workflow/exploration')));
   const reads = mapCalls(a, 'map_read').filter(e => e.session === refusal.session && e.seq > (strict ? readRules?.seq ?? refusal.seq : refusal.seq) && e.seq < until);
-  const missingResult = (e: Call) => !e.result.known || a.missing.includes(`${at(a, e)}.result`);
+  const missingResult = (e: Call) => callResultMissing(a, e);
   const reread = reads.some(e => !missingResult(e) && (!strict || resultIs(e, 'read')));
   const resourcePath = readRules && reread;
   const refreshPath = !retry;
   const gap = need(a, 'recovery reads', 'events.tool-call', 'events.resource-read');
   if (!resourcePath && gap) return gap;
   // Native unfinished calls may be flushed at turn end; their event position cannot prove they were after the retry.
+  const unresolvedResource = unresolvedRules(a, refusal);
+  if (!readRules && unresolvedResource.length) return unknown('the recovery Resource read has no native result', unresolvedResource.map(e => at(a, e)));
   const unresolved = mapCalls(a, 'map_read').filter(e => e.session === refusal.session && e.turn === refusal.turn && missingResult(e));
   if (readRules && !reread && unresolved.length) return unknown('the recovery Map read has no native result', unresolved.map(e => at(a, e)));
   if (resources === 'available') return resourcePath ? holds('read the rules and reread the Map before writing again', [at(a, refusal)])
@@ -117,18 +123,17 @@ const retryPairs = (writes: Call[]) => writes.filter(e => resultIs(e, 'version-m
 });
 function attestNextRetries(a: AttemptRecord, r: { writes: Call[]; current: string }): ReturnType<ScriptCheck> {
   const retries = retryPairs(r.writes).map(p => p.retry);
-  const contradicted = retries.filter(e => {
-    const source = phaseOf(a, e);
-    return visibleSource(source) && versionOf(source!) === r.current && argsOf(e).version !== r.current;
-  });
+  const contradicted = retries.filter(e => argsOf(e).version !== r.current
+    && a.given.some(g => g.fromSeq <= e.seq && visibleSource(a, g) && versionOf(g) === r.current));
   if (contradicted.length) return violated('a retry contradicts the current rules already exposed to this client', contradicted.map(e => at(a, e)));
   // Missing events can hide the Resource read that established a newer visible rules phase.
   const gap = need(a, 'retry rules source', 'events.tool-call', 'events.resource-read', 'given');
   if (gap) return gap;
   const stale = retries.filter(e => argsOf(e).version !== r.current);
   if (stale.length) return violated('the next retry after a refusal did not attest the current rules', stale.map(e => at(a, e)));
-  if (retries.some(e => visibleSource(phaseOf(a, e)) && versionOf(phaseOf(a, e)!) !== argsOf(e).version)) return violated('the next retry did not attest its visible rules source');
-  if (retries.some(e => !visibleSource(phaseOf(a, e)))) return unknown('the next retry lacks its client-visible rules source');
+  const unexposed = retries.filter(e => !visibleSource(a, phaseOf(a, e)) || versionOf(phaseOf(a, e)!) !== argsOf(e).version);
+  if (unexposed.some(e => visibleSource(a, phaseOf(a, e)) && !unresolvedRules(a, e).length)) return violated('the next retry did not attest its visible rules source');
+  if (unexposed.length) return unknown('the next retry lacks its client-visible rules source', unexposed.map(e => at(a, e)));
   return holds('each observed next retry attested its visible current rules');
 }
 const noInvalidRecovery: ScriptCheck = a => {
@@ -149,8 +154,9 @@ const committedAtNewVersion: ScriptCheck = a => {
   if (gap) return gap;
   const ok = r.writes.filter(e => resultIs(e, 'committed') && argsOf(e).version === r.current);
   if (ok.length) {
-    if (ok.some(e => visibleSource(phaseOf(a, e)) && versionOf(phaseOf(a, e)!) !== r.current)) return violated('the committed version differs from the rules this client was shown', ok.map(e => at(a, e)));
-    if (ok.some(e => !visibleSource(phaseOf(a, e)))) return unknown('new-version write recorded, but the client-visible rules source is missing', ok.map(e => at(a, e)));
+    const unexposed = ok.filter(e => !visibleSource(a, phaseOf(a, e)) || versionOf(phaseOf(a, e)!) !== r.current);
+    if (unexposed.some(e => visibleSource(a, phaseOf(a, e)) && !unresolvedRules(a, e).length)) return violated('the committed version differs from the rules this client was shown', ok.map(e => at(a, e)));
+    if (unexposed.length) return unknown('new-version write recorded, but the client-visible rules source is missing', unexposed.map(e => at(a, e)));
     return holds(`committed with the client-visible ${r.current}`, ok.map(e => at(a, e)));
   }
   return need(a, 'new-version write', 'events.tool-call')
@@ -175,9 +181,9 @@ const noGuessedVersion: ScriptCheck = a => {
   const gap = need(a, 'guessed version', 'events.tool-call', 'events.resource-read', 'given');
   if (gap) return gap;
   const writes = writeCalls(a).filter(e => argsOf(e).version !== undefined);
-  const stated = (e: Call) => a.given.some(g => g.fromSeq <= e.seq && visibleSource(g) && versionOf(g) === String(argsOf(e).version));
+  const stated = (e: Call) => a.given.some(g => g.fromSeq <= e.seq && visibleSource(a, g) && versionOf(g) === String(argsOf(e).version));
   // A write without any version is an input error, judged by the common checks, not a guess.
-  const guessed = writes.filter(e => visibleSource(phaseOf(a, e)) && !stated(e));
+  const guessed = writes.filter(e => visibleSource(a, phaseOf(a, e)) && !stated(e) && !unresolvedRules(a, e).length);
   if (guessed.length) return violated('a write with a version its visible rules source did not state', guessed.map(e => at(a, e)));
   return need(a, 'guessed version', 'events.tool-call')
     ?? (writes.some(e => !stated(e)) ? unknown('some writes have no recorded client-visible rules source') : holds('every versioned write named a visible rules source'));
@@ -193,7 +199,7 @@ const followsCanary: ScriptCheck = a => {
   if (bad.length) return violated(`Ticket titles without "${canary.ticketTitlePrefix}": ${bad.join(', ')}`);
   if (creates.some(e => {
     const g = phaseOf(a, e);
-    return !visibleSource(g) || !((g?.toolDescriptions.known && g.toolDescriptions.value.map_apply?.includes(ticketRule))
+    return !visibleSource(a, g) || !((g?.toolDescriptions.known && g.toolDescriptions.value.map_apply?.includes(ticketRule))
       || (g?.resourceText?.known && g.resourceText.value.includes(ticketRule)));
   })) return unknown('matching Ticket titles do not prove that the client saw the canary map_apply rule');
   return holds('every new Ticket title follows the client-visible map_apply rule');

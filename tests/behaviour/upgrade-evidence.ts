@@ -1,9 +1,10 @@
 // Strict Codex upgrade assertions (definition v7). Older Attempts are not re-judged.
 import { isDeepStrictEqual } from 'node:util';
-import { holds, unknown, violated, notObserved, writeCalls, resultIs, at } from './checks.ts';
+import { holds, unknown, violated, notObserved, writeCalls, resultIs, resourceResultMissing, at } from './checks.ts';
 import type { ScriptCheck } from './scenario.ts';
 import { replyRule, replyWord, ticketTitlePrefix } from '../helpers/canary-release.mjs';
 import { classifyResult } from './evidence.ts';
+import type { AttemptRecord, GivenRules } from './evidence.ts';
 import { reservedPorts } from './runner/service.ts';
 
 const replyPattern = new RegExp(`^\\W*${replyWord}\\b`);
@@ -120,9 +121,12 @@ export const exactUpgradeHistory: ScriptCheck = a => {
   return holds('one agent create and one agent Ticket write, both corroborated by full history', ['maps', 'receipts']);
 };
 
+const replyRuleVisible = (a: AttemptRecord, g: GivenRules) =>
+  (g.instructions.known && g.instructions.value.includes(replyRule))
+  || (g.resourceText?.known && g.resourceText.value.includes(replyRule) && !resourceResultMissing(a, g.fromSeq));
+
 export const noCanaryReplyViolation: ScriptCheck = a => {
-  const source = a.given.find(g => g.phase !== 'initial' && ((g.instructions.known && g.instructions.value.includes(replyRule))
-    || (g.resourceText?.known && g.resourceText.value.includes(replyRule))));
+  const source = a.given.find(g => g.phase !== 'initial' && replyRuleVisible(a, g));
   if (!source) return unknown('no native evidence of the new reply rule');
   const replies = a.events.filter(e => e.kind === 'message' && e.actor === 'agent' && e.role === 'assistant' && e.seq >= source.fromSeq);
   const bad = replies.filter(e => e.kind === 'message' && !replyPattern.test(e.text));
@@ -139,8 +143,7 @@ export const replyCanary: ScriptCheck = a => {
   const final = a.events.findLast(e => e.kind === 'message' && e.actor === 'agent' && e.role === 'assistant' && e.seq > restart.seq);
   if (!final || final.kind !== 'message') return unknown('no final native reply');
   const source = a.given.findLast(g => g.fromSeq <= final.seq);
-  if (!(source?.instructions.known && source.instructions.value.includes(replyRule))
-    && !(source?.resourceText?.known && source.resourceText.value.includes(replyRule))) return unknown('no final native reply after exposure to the canary rule');
+  if (!source || !replyRuleVisible(a, source)) return unknown('no final native reply after exposure to the canary rule');
   if (!replyPattern.test(final.text)) return violated('final reply did not follow the canary instructions rule', [at(a, final)]);
   return holds('final reply follows the newly visible instructions rule', [at(a, final), 'given']);
 };
