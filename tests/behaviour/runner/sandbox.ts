@@ -130,6 +130,13 @@ function sandboxProfile(p: Policy): string {
     ...[...systemDirectories, ...p.readRoots, p.home, p.workdir].map(root => `(allow file-read* (subpath ${q(root)}))`),
     ...[...systemFiles, ...p.readFiles].map(file => `(allow file-read* (literal ${q(file)}))`),
     '(deny file-write*)', `(allow file-write* (subpath ${q(p.home)}) (subpath ${q(p.workdir)}) (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper"))`,
+    // Descriptor aliases duplicate only descriptors the client already holds.
+    '(allow file-read* file-write* (literal "/dev/stdin") (literal "/dev/stdout") (literal "/dev/stderr") (regex #"^/dev/fd/[0-9]+$"))',
+    // Seatbelt issues a per-sandbox extension for newly allocated slave ptys, never for arbitrary peers.
+    '(allow pseudo-tty)', '(allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))',
+    '(allow file-read* file-write* (require-all (regex #"^/dev/ttys[0-9]+$") (extension "com.apple.sandbox.pty")))',
+    // Do not let the client queue commands for its unsandboxed operator shell (including inherited fd 0).
+    '(deny file-ioctl (ioctl-command TIOCSTI))',
     ...p.denyRoots.map(root => `(deny file-write* (subpath ${q(root)}))`),
     ...p.denyEntries.map(path => `(deny file-write* (literal ${q(path)}))`),
     ...p.controlDirectories.map(root => `(deny file-read* (subpath ${q(root)}))`),

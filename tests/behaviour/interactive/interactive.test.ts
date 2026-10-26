@@ -172,7 +172,7 @@ it('manual launchers isolate HOME/configuration, use their own credential and co
   }
 });
 
-it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'claude-proxy', 'native-link', 'control-tamper', 'exit-nonzero', 'exit-signal', 'launch-failure', 'no-start', 'exit-without-start', 'missing-exit'])('the manual host stops only its own service and preserves subscription state (%s)', async mode => {
+it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'claude-proxy', 'native-link', 'control-tamper', 'exit-nonzero', 'exit-signal', 'launch-failure', 'no-start', 'exit-without-start', 'missing-exit', 'no-start-precondition-not-met', 'no-start-rate-limited', 'no-start-timeout', 'no-start-cancelled', 'repeat-launch', 'duplicate-start', 'reported-precondition-not-met', 'reported-rate-limited', 'reported-timeout', 'reported-cancelled'])('the manual host stops only its own service and preserves subscription state (%s)', async mode => {
   const { spawn } = await import('node:child_process');
   const { cacheRoot } = await import('./host.ts');
   const attempt = `fixture-${process.pid}-${Date.now()}`;
@@ -182,7 +182,7 @@ it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'claude-proxy', 'n
       ['claude-proxy', 'launch-failure'].includes(mode) ? 'claude' : 'codex', 'synthetic-model', 'high', 'W7', process.execPath], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, B09_SYNTHETIC_REFRESH: mode } });
     let output = ''; let answered = false;
     const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(output)); }, 20_000);
-    child.stdout.on('data', data => { output += data; if (!answered && output.includes('Client exited; enter')) { answered = true; if (mode === 'cancel') child.stdin.end(); else child.stdin.write('complete\n'); } });
+    child.stdout.on('data', data => { output += data; if (!answered && output.includes('Client exited; enter')) { answered = true; if (mode === 'cancel') child.stdin.end(); else child.stdin.write((mode.startsWith('no-start-') ? mode.slice('no-start-'.length) : mode.startsWith('reported-') ? mode.slice('reported-'.length) : 'complete') + '\n'); } });
     child.stderr.on('data', data => { output += data; });
     child.on('error', reject); child.on('close', code => { clearTimeout(timer); resolve({ code, output }); });
   });
@@ -208,17 +208,19 @@ it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'claude-proxy', 'n
   expect(isolation.database).toContain(`/B09Fixture-${attempt}/db/`);
   const capture = JSON.parse(readFileSync(join(dir, 'capture.json'), 'utf8')) as AttemptRecord;
   expect(capture.maps).toHaveLength(1);
-  if (['native-link', 'control-tamper', 'missing-exit'].includes(mode)) expect(capture.run.completeness).toBe('driver-failed');
+  if (['native-link', 'control-tamper', 'missing-exit', 'duplicate-start'].includes(mode)) expect(capture.run.completeness).toBe('driver-failed');
   if (mode === 'native-link') expect(capture.raw.files).toEqual(['raw/launch.jsonl']);
-  if (['no-start', 'launch-failure', 'exit-without-start'].includes(mode)) expect(capture.run.completeness).toBe('launch-failed');
-  if (['exit-nonzero', 'exit-signal'].includes(mode)) expect(capture.run.completeness).toBe('complete');
-  if (mode !== 'no-start') {
+  if (mode.startsWith('no-start') || ['launch-failure', 'exit-without-start'].includes(mode)) expect(capture.run.completeness).toBe('launch-failed');
+  if (mode.startsWith('reported-')) expect(capture.run.completeness).toBe(mode.slice('reported-'.length));
+  if (['exit-nonzero', 'exit-signal', 'repeat-launch'].includes(mode)) expect(capture.run.completeness).toBe('complete');
+  if (!mode.startsWith('no-start')) {
     expect(capture.raw.files).toContain('raw/launch.jsonl');
     const log = readFileSync(join(dir, 'raw/launch.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
     if (mode === 'launch-failure') expect(log.at(-1)).toMatchObject({ phase: 'refused', launched: false, launchFailure: 'client launch failed' });
     else {
       if (mode !== 'exit-without-start') expect(log[0]).toMatchObject({ phase: 'started', launched: true });
-      if (mode !== 'missing-exit') expect(log.at(-1)).toMatchObject({ phase: 'exited', code: mode === 'exit-signal' ? null : mode === 'exit-nonzero' ? 7 : 0,
+      if (mode === 'repeat-launch') expect(log.at(-1)).toMatchObject({ phase: 'refused', launched: false, duplicateLaunch: true });
+      if (mode !== 'missing-exit') expect(log.find(row => row.phase === 'exited')).toMatchObject({ phase: 'exited', code: mode === 'exit-signal' ? null : mode === 'exit-nonzero' ? 7 : 0,
         signal: mode === 'exit-signal' ? 'SIGTERM' : null });
     }
   }

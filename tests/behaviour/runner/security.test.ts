@@ -12,7 +12,7 @@ import { newToken, startService } from './service.ts';
 
 const available = spawnSync('which', ['sandbox-exec']).status === 0;
 const attack = test.skipIf(!available);
-const nativeAttack = test.skipIf(!available || !existsSync('/usr/bin/clang') || spawnSync('/usr/bin/clang', ['--version']).status !== 0);
+const nativeAttack = test.skipIf(!available || !existsSync('/usr/bin/clang') || spawnSync('/usr/bin/xcode-select', ['-p']).status !== 0);
 const root = realpathSync(mkdtempSync('/private/tmp/wf-behave-security-'));
 const clientState = syntheticClientState(root);
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -171,7 +171,7 @@ nativeAttack.each(['opens its controlling terminal', 'denies another same-user t
   const result = spawnSync(driver, [profile.path], { encoding: 'utf8', timeout: 8000 });
   expect(result.status, result.stderr).toBe(0);
   const observation = JSON.parse(result.stdout.match(/\{[^\r\n]+\}/)![0]);
-  if (boundary === 'opens its controlling terminal') expect(observation).toMatchObject({ ownRead: 1, ownWrite: 1 });
+  if (boundary === 'opens its controlling terminal') expect(observation).toMatchObject({ ownRead: 1, ownWrite: 1, windowSize: 1, attributes: 1, rawMode: 1, ttyAttributes: 1 });
   else expect(observation).toMatchObject({ peerReadError: 1, peerWriteError: 1 }); // EPERM
 });
 

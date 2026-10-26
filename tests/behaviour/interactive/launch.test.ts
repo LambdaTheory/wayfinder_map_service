@@ -46,11 +46,11 @@ writeFileSync('result.json', JSON.stringify({
   tokens: Object.keys(process.env).filter(k => /TOKEN|API_KEY/.test(k)),
 }));
 `, route.port);
-    writeFileSync(join(f.work, 'attack.json'), JSON.stringify({ controls: [f.manifestPath, f.profile.path],
+    writeFileSync(join(f.work, 'attack.json'), JSON.stringify({ controls: [f.manifestPath, f.profile.path, join(f.controlDir, 'launch.once')],
       source: join(f.subscriptionHome, '.codex/auth.json'), relay: route.port, direct: port }));
     writeFileSync(join(f.subscriptionHome, '.codex/auth.json'), 'synthetic-latest-login');
     expect(await launch(f.manifestPath, f.manifestHash, { WAYFINDER_TOKEN: 'excluded-token', OPENAI_API_KEY: 'excluded-key' })).toBe(0);
-    expect(JSON.parse(readFileSync(join(f.work, 'result.json'), 'utf8'))).toEqual({ reads: [false, false], writes: [false, false], source: false,
+    expect(JSON.parse(readFileSync(join(f.work, 'result.json'), 'utf8'))).toEqual({ reads: [false, false, false], writes: [false, false, false], source: false,
       ownLogin: 'synthetic-latest-login', own: 200, direct: 'denied', tokens: [] });
     expect(received).toEqual(['Bearer synthetic-session-token']);
     expect(readFileSync(join(f.subscriptionHome, '.codex/auth.json'), 'utf8')).toBe('synthetic-latest-login');
@@ -86,10 +86,29 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const token = readFileSync(Number(process.env.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR), 'utf8');
 writeFileSync('result.json', JSON.stringify({ subscription: token === 'synthetic-subscription', env: process.env }));
 `, 23456);
-  await expect(launch(f.manifestPath, f.manifestHash, {})).rejects.toThrow(/setup-token/);
   expect(await launch(f.manifestPath, f.manifestHash, { CLAUDE_CODE_OAUTH_TOKEN: 'synthetic-subscription', ANTHROPIC_API_KEY: 'excluded-key', EXTRA: 'excluded-setting' })).toBe(0);
   const result = JSON.parse(readFileSync(join(f.work, 'result.json'), 'utf8'));
   expect(result.subscription).toBe(true);
   expect(result.env).toMatchObject({ CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: '3', HTTPS_PROXY: 'http://synthetic-proxy.invalid', NO_PROXY: '127.0.0.1' });
   for (const key of ['WAYFINDER_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'EXTRA']) expect(result.env).not.toHaveProperty(key);
+});
+
+attack.each(['after exit', 'while running'])('a launcher refuses a second attempt %s', async timing => {
+  const f = fixture('codex', `import { appendFileSync } from 'node:fs'; appendFileSync('starts', 'x');`, 23456);
+  const first = launch(f.manifestPath, f.manifestHash, {});
+  if (timing === 'after exit') expect(await first).toBe(0);
+  await expect(launch(f.manifestPath, f.manifestHash, {})).rejects.toThrow(/already attempted/);
+  expect(await first).toBe(0);
+  expect(readFileSync(join(f.work, 'starts'), 'utf8')).toBe('x');
+  const rows = readFileSync(join(f.controlDir, 'launch.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  expect(rows.filter(row => row.phase === 'started')).toHaveLength(1);
+  expect(rows.find(row => row.duplicateLaunch)).toMatchObject({ phase: 'refused', launched: false });
+  expect(rows.find(row => row.duplicateLaunch)).not.toHaveProperty('launchFailure');
+});
+
+attack('a refused launch also consumes the Attempt and requires a fresh command', async () => {
+  const f = fixture('claude', `import { writeFileSync } from 'node:fs'; writeFileSync('started', 'yes');`, 23456);
+  await expect(launch(f.manifestPath, f.manifestHash, {})).rejects.toThrow(/setup-token/);
+  await expect(launch(f.manifestPath, f.manifestHash, { CLAUDE_CODE_OAUTH_TOKEN: 'synthetic-subscription' })).rejects.toThrow(/already attempted/);
+  expect(existsSync(join(f.work, 'started'))).toBe(false);
 });

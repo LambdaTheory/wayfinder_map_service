@@ -1,6 +1,6 @@
 // Trusted outer launcher. The operator's command pins the manifest before any launch data is read.
 import { spawn } from 'node:child_process';
-import { appendFileSync, chmodSync, copyFileSync, lstatSync, readFileSync, utimesSync } from 'node:fs';
+import { appendFileSync, chmodSync, copyFileSync, lstatSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Writable } from 'node:stream';
@@ -28,8 +28,15 @@ export function readManifest(path: string, expected: string): LaunchManifest {
 
 export async function launch(path: string, expected: string, inherited: NodeJS.ProcessEnv = process.env): Promise<number> {
   const record = (value: object) => appendFileSync(join(dirname(path), 'launch.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...value }) + '\n', { mode: 0o600 });
-  let launched = false;
+  let launched = false; let duplicateLaunch = false;
   try {
+    // Reserve before reading login bytes or spawning. A refusal consumes this Attempt too.
+    try { writeFileSync(join(dirname(path), 'launch.once'), '', { flag: 'wx', mode: 0o600 }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      duplicateLaunch = true;
+      throw new Error('Client launch already attempted; create a fresh Attempt');
+    }
     const manifest = readManifest(path, expected);
     const failure = verifyProfile(manifest.profile);
     if (failure) throw new IsolationError(failure);
@@ -73,7 +80,7 @@ export async function launch(path: string, expected: string, inherited: NodeJS.P
       return failure ? 1 : exit.code ?? 1;
     } finally { process.off('SIGINT', interrupt); process.off('SIGTERM', terminate); }
   } catch (error) {
-    record({ phase: 'refused', launched, ...(error instanceof IsolationError ? { isolationFailure: error.message } : { launchFailure: 'client launch failed' }) });
+    record({ phase: 'refused', launched, ...(duplicateLaunch ? { duplicateLaunch: true } : error instanceof IsolationError ? { isolationFailure: error.message } : { launchFailure: 'client launch failed' }) });
     throw error;
   }
 }

@@ -191,7 +191,7 @@ export async function host(args: string[], options: { subscriptionHome: string; 
       }
       let controlIntegrity: Field<boolean> = absent('launcher was not prepared');
       const controlFailures: string[] = [];
-      let launchFailed = false; let launchStarted = false; let launchExited = false;
+      let launchFailed = false; let launchStarts = 0; let launchExited = false;
       if (prepared) {
         // Preserve the launch record even if an independent manifest/profile check fails.
         try {
@@ -202,7 +202,7 @@ export async function host(args: string[], options: { subscriptionHome: string; 
             capture.raw.files.push('raw/launch.jsonl');
             for (const line of text.trim().split('\n').filter(Boolean)) {
               const entry = JSON.parse(line) as { isolationFailure?: string; launchFailure?: string; phase?: string; launched?: boolean };
-              if (entry.phase === 'started' && entry.launched) launchStarted = true;
+              if (entry.phase === 'started' && entry.launched) launchStarts++;
               if (entry.phase === 'exited') launchExited = true;
               if (entry.launchFailure) launchFailed = true;
               if (entry.isolationFailure) controlFailures.push(entry.isolationFailure);
@@ -214,15 +214,16 @@ export async function host(args: string[], options: { subscriptionHome: string; 
           const failure = verifyProfile(prepared.profile); if (failure) controlFailures.push(failure);
         } catch { controlFailures.push('launcher control files missing or changed'); }
         controlIntegrity = { known: true, value: controlFailures.length === 0 };
-        if (capture.run.completeness === 'complete') {
-          if (!launchStarted) {
-            capture.run.completeness = 'launch-failed';
-            capture.run.detail = launchFailed ? 'Interactive client launch failed' : 'No client start recorded';
-          } else if (launchFailed || !launchExited) {
-            capture.run.completeness = 'driver-failed'; capture.run.detail = 'Interactive launch record is incomplete';
-          }
-          // Exit codes and signals remain evidence. The operator's completion declaration is separate.
+        const needsStart = ['complete', 'precondition-not-met', 'rate-limited', 'timeout', 'cancelled'].includes(capture.run.completeness);
+        if (launchStarts > 1) {
+          capture.run.completeness = 'driver-failed'; capture.run.detail = 'Multiple client starts recorded for one Attempt';
+        } else if (needsStart && launchStarts === 0) {
+          capture.run.completeness = 'launch-failed';
+          capture.run.detail = launchFailed ? 'Interactive client launch failed' : 'No client start recorded';
+        } else if (capture.run.completeness === 'complete' && (launchFailed || !launchExited)) {
+          capture.run.completeness = 'driver-failed'; capture.run.detail = 'Interactive launch record is incomplete';
         }
+        // Exit codes and signals remain evidence. The operator's completion declaration is separate.
         if (controlFailures.length) { capture.run.completeness = 'driver-failed'; capture.run.detail = 'Interactive launcher isolation check failed'; }
       }
       let loginSync: unknown = { status: 'not-applicable' };

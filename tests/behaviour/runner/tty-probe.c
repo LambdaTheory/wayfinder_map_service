@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 #include <util.h>
@@ -14,6 +15,17 @@ int main(int argc, char **argv) {
   if (argc == 3 && strcmp(argv[1], "--client") == 0) {
     int tty = open("/dev/tty", O_RDWR | O_NOCTTY);
     int own_read = 0, own_write = 0;
+    struct winsize size;
+    struct termios original, raw;
+    int window = ioctl(STDIN_FILENO, TIOCGWINSZ, &size) == 0;
+    int attributes = tcgetattr(STDIN_FILENO, &original) == 0;
+    int raw_mode = 0;
+    if (attributes) {
+      raw = original; cfmakeraw(&raw);
+      raw_mode = tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0;
+      if (tcsetattr(STDIN_FILENO, TCSANOW, &original) != 0) return 8;
+    }
+    int tty_attributes = tty >= 0 && tcgetattr(tty, &original) == 0;
     if (tty >= 0) {
       char byte;
       own_write = write(tty, "own-write\n", 10) == 10;
@@ -26,8 +38,8 @@ int main(int argc, char **argv) {
     peer = open(argv[2], O_WRONLY | O_NONBLOCK);
     int peer_write = peer >= 0 ? 0 : errno;
     if (peer >= 0) { write(peer, "forged", 6); close(peer); }
-    printf("{\"ownRead\":%d,\"ownWrite\":%d,\"peerReadError\":%d,\"peerWriteError\":%d}\n",
-      own_read, own_write, peer_read, peer_write);
+    printf("{\"windowSize\":%d,\"attributes\":%d,\"rawMode\":%d,\"ttyAttributes\":%d,\"ownRead\":%d,\"ownWrite\":%d,\"peerReadError\":%d,\"peerWriteError\":%d}\n",
+      window, attributes, raw_mode, tty_attributes, own_read, own_write, peer_read, peer_write);
     return 0;
   }
   if (argc != 2) return 2;

@@ -29,10 +29,11 @@ process.stdout.write = (text, ...args) => {
     writeFileSync(join(privateLogs, 'secret.jsonl'), 'synthetic-private-native-marker');
     symlinkSync(privateLogs, join(scratch, 'home/.codex/sessions'));
   }
-  if (mode !== 'no-start' && String(text).includes('Client command')) {
+  if (!mode?.startsWith('no-start') && String(text).includes('Client command')) {
     const command = String(text).match(/Client command \(approved Batch only\): ([^\n]+)/)[1];
     const launched = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8', timeout: 10_000,
       env: { PATH: process.env.PATH, ...(mode === 'claude-proxy' ? { CLAUDE_CODE_OAUTH_TOKEN: 'synthetic-oauth' } : {}) } });
+    if (mode === 'repeat-launch') spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8', timeout: 10_000, env: { PATH: process.env.PATH } });
     if (!['exit-nonzero', 'exit-signal', 'launch-failure'].includes(mode) && launched.status !== 0)
       throw new Error('Synthetic launcher failed: ' + launched.stderr);
   }
@@ -48,6 +49,10 @@ try {
         const log = join(paths[2], 'launch.jsonl');
         const rows = readFileSync(log, 'utf8').trim().split('\n').filter(line => JSON.parse(line).phase !== (mode === 'missing-exit' ? 'exited' : 'started'));
         writeFileSync(log, rows.join('\n') + '\n');
+      }
+      if (observed === 2 && mode === 'duplicate-start') {
+        const log = join(paths[2], 'launch.jsonl'); const text = readFileSync(log, 'utf8');
+        writeFileSync(log, text + text.split('\n')[0] + '\n');
       }
       if (observed === 2 && mode === 'control-tamper') writeFileSync(join(paths[2], 'launch.json'), 'forged');
       if (observed === 2 && ['refresh', 'failure', 'cancel'].includes(mode)) {
