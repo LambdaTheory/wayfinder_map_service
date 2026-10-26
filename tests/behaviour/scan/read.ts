@@ -29,7 +29,7 @@ const textContent = (v: unknown): string => typeof v === 'string' ? v : array(v)
 const toolName = (name: unknown): string | null => typeof name === 'string'
   ? /^(?:mcp__|mcp_)?wayfinder(?:__|_)(map_create|map_apply|map_list|map_read)$/.exec(name)?.[1] ?? null : null;
 
-function claudeAnswers(value: unknown, questions: string[]): string {
+function claudeHumanWords(value: unknown, questions: string[]): string {
   const answers = obj(obj(value).answers);
   const annotations = obj(obj(value).annotations);
   // Structured values preserve free text without parsing the agent's question/summary.
@@ -145,6 +145,7 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
         if (row.isMeta !== true && !(row.type === 'user' && /<(?:local-command-stdout|local-command-caveat|command-message)>/.test(textContent(m.content))
           && !/<command-name>\/wayfinder<\/command-name>/.test(textContent(m.content)))) message(s, row.type, m.content, ref);
         const blocks = array(m.content).map(obj);
+        const singleResult = blocks.filter(b => b.type === 'tool_result').length === 1;
         for (const block of blocks) {
           if (block.type === 'tool_use') {
             addCall(s, str(block.id), toolName(block.name), block.input, ref);
@@ -161,11 +162,11 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
             const id = str(block.tool_use_id);
             const questions = id ? claudeQuestions.get(s)?.get(id) : undefined;
             // toolUseResult belongs to the row, so multiple results would make its owner ambiguous.
-            const answer = questions && row.type === 'user' && row.isMeta !== true && block.is_error !== true
-              && blocks.filter(b => b.type === 'tool_result').length === 1 ? claudeAnswers(row.toolUseResult, questions) : '';
-            if (answer) s.fragments.push({ ref, role: 'user', text: answer });
-            else if (s.calls.some(c => c.id === id)) result(s, id, textContent(block.content), ref);
-            else s.fragments.push({ ref, role: 'tool', text: textContent(block.content) });
+            const humanWords = questions && row.type === 'user' && row.isMeta !== true && block.is_error !== true
+              && singleResult ? claudeHumanWords(row.toolUseResult, questions) : '';
+            if (humanWords) s.fragments.push({ ref, role: 'user', text: humanWords });
+            else if (questions) s.fragments.push({ ref, role: 'tool', text: textContent(block.content) });
+            else result(s, id, textContent(block.content), ref);
           }
         }
       }

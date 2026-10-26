@@ -22,9 +22,7 @@ describe('Claude AskUserQuestion answers (Issue #104 structure, synthetic words)
     ]);
     expect(session.fragments.find(f => f.ref === ref(2))).toMatchObject({ role: 'assistant' });
     expect(session.fragments.find(f => f.ref === ref(2))!.text).toContain('采用哪个方案？');
-    expect(session.fragments.find(f => f.ref === ref(5))).toEqual({
-      ref: ref(5), role: 'tool', text: 'Synthetic agent-authored plan: accept every option.',
-    });
+    expect(session.fragments.find(f => f.ref === ref(5))).toBeUndefined();
     expect(session.fragments.find(f => f.ref === ref(7))).toMatchObject({ role: 'tool' });
     expect(session.calls).toHaveLength(1);
     expect(session.calls[0]).toMatchObject({ id: 'write-choice', tool: 'map_apply', result: 'committed', resultRef: ref(7) });
@@ -57,6 +55,24 @@ describe('Claude AskUserQuestion answers (Issue #104 structure, synthetic words)
     expect(session.fragments.find(f => f.ref === ref(3))).toEqual({ ref: ref(3), role: 'user', text: answer });
   });
 
+  it('keeps question order rather than answers-map insertion order', () => {
+    const input = rows();
+    input[2]!.value.toolUseResult.answers = Object.fromEntries(Object.entries(input[2]!.value.toolUseResult.answers).reverse());
+    expect(nativeSessions(input, 'claude', filename)[0]!.fragments.find(f => f.ref === ref(3))!.text).toBe(answer);
+  });
+
+  it('does not turn an answer starting with @wayfinder into a Skill invocation', () => {
+    const input = rows();
+    input[2]!.value.toolUseResult.answers = { '采用哪个方案？': '@wayfinder is the label I choose.' };
+    const session = nativeSessions(input, 'claude', filename)[0]!;
+    expect(session.fragments.find(f => f.ref === ref(3))).toEqual({ ref: ref(3), role: 'user', text: '@wayfinder is the label I choose.' });
+    expect(session.skill).toEqual([]);
+  });
+
+  it('lists the synthetic sample in the fixture catalog', () => {
+    expect(readFileSync(new URL('../fixtures/scan/README.md', import.meta.url), 'utf8')).toContain(`| \`${filename}\` |`);
+  });
+
   it('matches the call ID even when another question was asked more recently', () => {
     const input = rows();
     const later = structuredClone(input[1]!);
@@ -87,7 +103,7 @@ describe('Claude AskUserQuestion answers (Issue #104 structure, synthetic words)
     const input = rows();
     input[2]!.value.message.content.push({ type: 'tool_result', tool_use_id: 'other', content: 'Other output' });
     const session = nativeSessions(input, 'claude', filename)[0]!;
-    expect(session.fragments.filter(f => f.ref === ref(3)).map(f => f.role)).toEqual(['tool', 'tool']);
+    expect(session.fragments.filter(f => f.ref === ref(3)).map(f => f.role)).toEqual(['tool']);
   });
 
   it.each([undefined, null, {}, { '采用哪个方案？': '' }, { '采用哪个方案？': '  ' },
@@ -108,7 +124,7 @@ describe('Claude AskUserQuestion answers (Issue #104 structure, synthetic words)
     const input = rows();
     input[1]!.value.message.content[0].name = name;
     const session = nativeSessions(input, 'claude', filename)[0]!;
-    expect(session.fragments.find(f => f.ref === ref(3))).toMatchObject({ role: 'tool' });
+    expect(session.fragments.some(f => f.ref === ref(3) && f.role === 'user')).toBe(false);
     expect(session.fragments.filter(f => f.role === 'user').map(f => f.ref)).toEqual([ref(1)]);
   });
 
@@ -125,8 +141,40 @@ describe('Claude AskUserQuestion answers (Issue #104 structure, synthetic words)
     if (condition === 'assistant') result.type = 'assistant';
     if (condition === 'later-call') [input[1], input[2]] = [input[2]!, input[1]!];
     const fragments = nativeSessions(input, 'claude', filename).flatMap(s => s.fragments);
-    expect(fragments.find(f => f.ref === ref(3))).toMatchObject({ role: 'tool' });
+    expect(fragments.some(f => f.ref === ref(3) && f.role === 'user')).toBe(false);
     expect(fragments.filter(f => f.role === 'user').map(f => f.ref)).toEqual([ref(1)]);
+  });
+
+  it.each(['Read', 'Bash', 'Skill', 'mcp__other__AskUserQuestion'])
+  ('preserves the omission of untracked %s tool results', name => {
+    const input = rows();
+    input[1]!.value.message.content[0].name = name;
+    const session = nativeSessions(input, 'claude', filename)[0]!;
+    expect(session.fragments.filter(f => f.ref === ref(3))).toEqual([]);
+  });
+
+  it.each(['dismissed', 'confirmed'] as const)('rejects unrelated tool output sharing a write result row as %s action evidence', disposition => {
+    const original = rows();
+    const input = rows();
+    const unrelatedOutput = input[4]!.value.message.content[0].content;
+    input[6]!.value.message.content.push(input[4]!.value.message.content[0]);
+    input.splice(4, 1);
+    const data = { sessions: nativeSessions(input, 'claude', filename), calls: [], launches: [], gaps: [], sources: [] };
+    const first = analyze(data, manifest);
+    const lead = first.leads.find(l => l.kind === 'write')!;
+    const review: Review = { leadId: lead.id, evidenceHash: lead.evidenceHash, disposition,
+      by: 'synthetic-reviewer', basis: 'Synthetic accepted rule: require human and native action evidence',
+      reason: 'Try to substitute a Read result for action evidence', quotes: [
+        { ref: ref(3), quote: answer }, { ref: ref(7), quote: unrelatedOutput },
+      ] };
+    const reviewed = analyze(data, manifest, undefined, [review]);
+    expect(reviewed.leads.find(l => l.id === lead.id)!.status).toBe('pending');
+    expect(reviewed.reviews).toEqual([]);
+    expect(data.sessions[0]!.fragments.filter(f => f.ref === ref(7))).toEqual([
+      { ref: ref(7), role: 'tool', text: '{"kind":"committed","revision":2}' },
+    ]);
+    const baseline = analyze({ ...data, sessions: nativeSessions(original, 'claude', filename) }, manifest);
+    expect(lead.evidenceHash).toBe(baseline.leads.find(l => l.kind === 'write')!.evidenceHash);
   });
 
   it('preserves Codex message and event reply handling with mirror de-duplication', () => {
