@@ -17,6 +17,7 @@ Library inspection starts no service or model. Automated tests use disposable se
 | `seeds/` | Seed Maps and the shared capture/Controller write plan (`steps.ts`); `f11.json` is the redacted capture of a real Map |
 | `capture/`, `captures/` | Read-only problem capture tool, synthetic verification and admitted/paused capture traces (B04) |
 | `fixtures/` | Working-directory fixtures copied into the agent's directory |
+| `interactive/` | Manual Codex/Claude interactive acceptance, native import and fixed fixtures (B09b); see its [runbook](interactive/README.md) |
 | `runner/` | The runner: isolated service, Controller, Codex Driver, normalizer (B02a/B02b) |
 | `chatgpt/` | Manual isolated ChatGPT Batch preparation, relay capture and operator checklist (B09a; real acceptance pending) |
 | `verdict.ts`, `report.ts` | Verdicts of Attempts and cells, and the comparison report (B03a) |
