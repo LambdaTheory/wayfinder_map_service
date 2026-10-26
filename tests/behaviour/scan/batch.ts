@@ -1,9 +1,12 @@
 // Quota accounting only. This module cannot launch a model; the scan CLI never accepts approval or runs work.
 import { digest } from './read.ts';
 import type { ScanReport } from './analyze.ts';
+import { reviewCalls } from '../review-plan.ts';
+import type { ReviewCall } from '../review-plan.ts';
+import type { reviewPlan } from '../review-run.ts';
 
 export interface Work {
-  id: string; kind: 'reading' | 'reproduction' | 'regression' | 'arbitration';
+  id: string; kind: 'availability' | 'reading' | 'reproduction' | 'regression' | 'arbitration';
   combination: { harness: string; model: string; effort: string; entry: string };
   scope: string[]; repetitions: number; extraReviews: number;
   /** Bind readings to exactly the evidence the approver saw. */
@@ -11,26 +14,30 @@ export interface Work {
 }
 export interface BatchPlan {
   schema: 'wayfinder-scan-batch/1'; id: string; work: Work[]; ceiling: number;
+  /** Present only after explicit B01 evidence binding; the scan proposal itself is not executable. */
+  reviewRuns?: { leadId: string; scanEvidenceHash: string; plan: ReturnType<typeof reviewPlan>[number]; retry: boolean }[];
 }
 export interface Approval { planHash: string; reference: string; by: string }
 export interface Reservation { id: string; workId: string; status: 'reserved' | 'complete' | 'failed'; result: unknown }
 export interface Ledger { schema: 'wayfinder-scan-ledger/1'; planHash: string; approval: Approval; results: Reservation[] }
 
+export function reviewWork(leadId: string, evidenceHash: string, calls: ReviewCall[]): Work[] {
+  return calls.map(call => ({ id: `${leadId}-${call.id}`, kind: call.kind === 'review' ? 'reading' : call.kind,
+    combination: { harness: call.target.cli, model: call.target.model, effort: 'client-default', entry: 'review' },
+    scope: [leadId], repetitions: 1, extraReviews: 0, evidenceHash,
+    prerequisites: [call.conditional ? 'Only if independent readings disagree; otherwise leave unspent' : 'Bind complete B01 evidence and obtain exact Batch approval'] }));
+}
+
 export function proposeBatch(report: ScanReport): { plan: BatchPlan; deferred: { leadId: string; reason: string }[] } {
   const work: Work[] = []; const deferred: { leadId: string; reason: string }[] = [];
-  for (const lead of report.leads.filter(l => l.status !== 'dismissed' && l.kind !== 'missing-evidence')) {
+  for (const lead of report.leads.filter(l => l.status === 'screened' && l.change !== 'seen' && l.kind !== 'missing-evidence')) {
     const session = report.inventory.find(s => s.key === lead.session)!;
-    if (!lead.fragments.some(f => f.role === 'user')) { deferred.push({ leadId: lead.id, reason: 'Original words unavailable; screen whether a verdict needs them before requesting any' }); continue; }
-    const claude = session.harness === 'claude' || /claude|sonnet|opus|haiku|fable/i.test(session.model ?? '');
-    const combination = { harness: claude ? 'codex' : 'claude', model: claude ? 'gpt-6.1-sol' : 'claude-sonnet-5-5', effort: 'high', entry: 'review' };
-    work.push({ id: `${lead.id}-reading`, kind: 'reading', combination, scope: [lead.id], repetitions: 2, extraReviews: 0,
-      evidenceHash: lead.evidenceHash, prerequisites: ['Operator screens the signal and selects relevant full native evidence',
-        'B03b review of an evidence-complete Attempt with specified verdict items; otherwise remain pending', 'Confirm exact reviewer availability without substitution'] });
-    work.push({ id: `${lead.id}-arbitration`, kind: 'arbitration', combination: { ...combination, model: claude ? 'gpt-6-astra' : 'claude-opus-5-5' },
-      scope: [lead.id], repetitions: 1, extraReviews: 0, evidenceHash: lead.evidenceHash,
-      prerequisites: ['Only if the two independent readings disagree; otherwise leave unspent'] });
-    if (lead.status === 'confirmed') deferred.push({ leadId: lead.id,
-      reason: 'Prepare B04 Scenario and original Combination first; list two reproductions and separate regression/review work in a new approval plan' });
+    if (!lead.hasHumanWords || !session.model || session.harness === 'unknown') {
+      deferred.push({ leadId: lead.id, reason: 'Original words or Combination unavailable; collect evidence before a model Batch' }); continue;
+    }
+    const calls = reviewCalls({ combination: { harness: session.harness, requestedModel: session.model,
+      visibleModel: { known: true, value: session.model }, effort: { known: false, reason: 'Reviewer plan only' } } });
+    work.push(...reviewWork(lead.id, lead.evidenceHash, calls));
   }
   return { plan: { schema: 'wayfinder-scan-batch/1', id: `scan-${digest(work).slice(0,16)}`, work,
     ceiling: work.reduce((n, w) => n + w.repetitions + w.extraReviews, 0) }, deferred };
@@ -40,7 +47,7 @@ export function plannedInvocations(plan: BatchPlan): { id: string; workId: strin
   if (plan.schema !== 'wayfinder-scan-batch/1' || !plan.id || !Array.isArray(plan.work) || !Number.isSafeInteger(plan.ceiling) || plan.ceiling < 0) throw new Error('Invalid Batch plan');
   const ids = new Set<string>();
   return plan.work.flatMap(w => {
-    if (!w.id || ids.has(w.id) || !['reading', 'reproduction', 'regression', 'arbitration'].includes(w.kind)
+    if (!w.id || ids.has(w.id) || !['availability', 'reading', 'reproduction', 'regression', 'arbitration'].includes(w.kind)
       || !Number.isSafeInteger(w.repetitions) || w.repetitions < 1 || !Number.isSafeInteger(w.extraReviews) || w.extraReviews < 0
       || !Array.isArray(w.scope) || !w.scope.length || w.scope.some(x => typeof x !== 'string' || !x.trim()) || !w.evidenceHash
       || !w.combination || ['harness', 'model', 'effort', 'entry'].some(k => {

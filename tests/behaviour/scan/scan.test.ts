@@ -1,14 +1,16 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { analyze } from './analyze.ts';
 import { batchStatus, finish, openLedger, plannedInvocations, proposeBatch, reserve } from './batch.ts';
 import { privateJson, scanCommand } from './cli.ts';
 import { digest, loadInputs, nativeSessions } from './read.ts';
+import { ScanError, scanFailure } from './errors.ts';
+import { requestIdHash } from '../../../src/call-metadata.ts';
 import type { Inputs, Manifest, Review } from './types.ts';
 
 const fixtures = fileURLToPath(new URL('../fixtures/scan/', import.meta.url));
@@ -19,6 +21,27 @@ function scratch() { const path = mkdtempSync(join(tmpdir(), 'wayfinder-scan-'))
 afterEach(() => { temporary.splice(0).forEach(path => rmSync(path, { recursive: true, force: true })); });
 
 describe('native usage inventory and conservative correlation', () => {
+  it('does not invent Claude sessions for summary and file-history rows', () => {
+    const rows = [
+      { ref: 'claude#1', value: { type: 'summary', summary: 'synthetic summary' } },
+      { ref: 'claude#2', value: { type: 'user', sessionId: 'real', message: { content: 'Hello' } } },
+      { ref: 'claude#3', value: { type: 'file-history-snapshot', snapshot: {} } },
+    ];
+    expect(nativeSessions(rows, 'claude', 'claude')).toHaveLength(1);
+  });
+
+  it('exports no unrelated dialogue in any scan artifact', () => {
+    const root = scratch(); const log = join(root, 'native.jsonl');
+    const sentinel = 'UNRELATED-PRIVATE-CONTENT-SENTINEL';
+    writeFileSync(log, [
+      { type: 'session_meta', payload: { id: 'unrelated' } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ text: sentinel }] } },
+    ].map(x => JSON.stringify(x)).join('\n'));
+    const input = join(root, 'input.json');
+    writeFileSync(input, JSON.stringify({ schema: 'wayfinder-usage-input/1', sources: [{ id: 'native', kind: 'codex', path: log }] }));
+    const out = join(root, 'scan'); scanCommand(['--input', input, '--out', out]);
+    for (const file of readdirSync(out)) expect(readFileSync(join(out, file), 'utf8')).not.toContain(sentinel);
+  });
   it('covers the fixed R7 sample inventory with exact evidence and visible gaps', () => {
     const report = analyze(inputs(), manifest);
     const session = (id: string) => report.inventory.find(s => s.nativeId === id)!;
@@ -71,6 +94,7 @@ describe('native usage inventory and conservative correlation', () => {
     hashed.calls[0]!.requestId = null;
     // Compute exactly B07 SHA-256(domain + NUL + ID), not the scanner's JSON digest.
     const hash = createHash('sha256').update('wayfinder-call-request/1\0unsafe request').digest('hex');
+    expect(hash).toBe(requestIdHash('unsafe request'));
     hashed.calls[0]!.requestIdHash = hash;
     hashed.sessions.find(s => s.mcpSessionIds.length)!.calls[0]!.requestId = 'unsafe request';
     expect(analyze(hashed, manifest).matches[0]!.nativeCall).not.toBeNull();
@@ -111,13 +135,49 @@ describe('native usage inventory and conservative correlation', () => {
     expect(sessions[0]).toMatchObject({ model: null, effort: null });
     expect(sessions[0]!.gaps.join(' ')).toContain('Multiple model values');
   });
+
+  it('does not treat injected client context, maintenance reads or negated mentions as human Skill use', () => {
+    const codex = nativeSessions([
+      { ref: 'injected#1', value: { type: 'session_meta', payload: { id: 'injected' } } },
+      ...['# AGENTS.md instructions\n@wayfinder', '<environment_context>@wayfinder</environment_context>', "Do not use the wayfinder skill"].map((text, i) =>
+        ({ ref: `injected#${i+2}`, value: { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ text }] } } })),
+      { ref: 'injected#5', value: { type: 'response_item', payload: { type: 'function_call', name: 'exec_command', arguments: '{"cmd":"cat wayfinder/SKILL.md"}' } } },
+    ], 'codex', 'injected')[0]!;
+    expect(codex.skill).toEqual([]);
+    expect(codex.fragments).toHaveLength(1);
+    const claude = nativeSessions([
+      { ref: 'meta#1', value: { type: 'user', sessionId: 'meta', isMeta: true, message: { content: 'Injected approval' } } },
+      { ref: 'meta#2', value: { type: 'user', sessionId: 'meta', message: { content: '<local-command-stdout>Injected output</local-command-stdout>' } } },
+      { ref: 'meta#3', value: { type: 'assistant', sessionId: 'meta', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: 'wayfinder/SKILL.md' } }] } } },
+    ], 'claude', 'meta')[0]!;
+    expect(claude.fragments).toEqual([]); expect(claude.skill).toEqual([]);
+    const slash = nativeSessions([{ ref: 'slash#1', value: { type: 'user', sessionId: 'slash', message: { content: '<command-name>/wayfinder</command-name>' } } }], 'claude', 'slash')[0]!;
+    expect(slash.skill).toEqual(['slash#1']);
+  });
+
+  it('states the fresh-launch gap instead of inventing a native-session association', () => {
+    const freshManifest = { ...manifest, sources: manifest.sources.map(s => s.kind === 'launches' ? { ...s, path: 'launches-fresh.jsonl' } : s) };
+    const data = loadInputs(freshManifest, fixtures); const launch = data.launches.find(l => l.credentialFingerprint === '3'.repeat(64))!;
+    const report = analyze(data, manifest);
+    const native = report.inventory.find(s => s.key === 'codex:question-write')!;
+    const fresh = report.inventory.find(s => s.key === `launch:${launch.credentialFingerprint}`)!;
+    expect(native.serviceCalls).toEqual([]); expect(native.usage).toBe('unknown');
+    expect(fresh.matchingBasis.join(' ')).toContain('launch-only row');
+    expect(fresh.matchingBasis.join(' ')).not.toContain('native session ID');
+    expect(report.inventory.find(s => s.key === 'codex:read-b')!.matchingBasis.join(' ')).toContain('native session ID read-b + harness codex');
+  });
 });
 
 function decision(report: ReturnType<typeof analyze>, session: string, disposition: Review['disposition']): Review {
   const lead = report.leads.find(l => l.session === session && l.kind === 'write')!;
+  const original = inputs().sessions.find(s => s.key === session)!;
   return { leadId: lead.id, evidenceHash: lead.evidenceHash, disposition, by: 'synthetic-human-reviewer',
     basis: 'Synthetic accepted rule: ask before a scope change; the verdict was read in context', reason: 'Synthetic context review',
-    quotes: lead.fragments.filter(f => f.role === 'user' || f.role === 'tool').map(f => ({ ref: f.ref, quote: f.text })) };
+    quotes: original.fragments.filter(f => (f.role === 'user' || f.role === 'tool') && lead.evidenceRefs.some(e => e.ref === f.ref)).map(f => ({ ref: f.ref, quote: f.text })) };
+}
+function screenedReport() {
+  const first = analyze(inputs(), manifest);
+  return analyze(inputs(), manifest, undefined, [decision(first, 'codex:question-write', 'screened')]);
 }
 
 describe('screening, evidence-bound verdicts and B04 intake', () => {
@@ -162,6 +222,49 @@ describe('screening, evidence-bound verdicts and B04 intake', () => {
     const next = analyze(data, manifest, once.state, [review]);
     expect(next.summary).toMatchObject({ confirmed: 1, newFailures: 0, reminders: 0 });
     expect(next.state).toEqual(once.state);
+    expect(next.captureDrafts).toEqual([]);
+    expect(proposeBatch(next).plan.work).toEqual([]);
+    expect(next.leads.every(l => 'change' in l && l.change === 'seen')).toBe(true);
+  });
+
+  it.each(['screened', 'dismissed'] as const)('retains an unchanged %s disposition from state without re-supplying the old review file', status => {
+    const data = inputs(); const first = analyze(data, manifest);
+    const review = decision(first, 'codex:question-write', status);
+    const reviewed = analyze(data, manifest, first.state, [review]);
+    const next = analyze(data, manifest, reviewed.state);
+    expect(next.leads.find(l => l.id === review.leadId)).toMatchObject({ status, change: 'seen' });
+    expect(next.captureDrafts).toEqual([]); expect(proposeBatch(next).plan.work).toEqual([]);
+  });
+
+  it('keeps confirmations pinned after resume/missing logs and counts confirmation separately from screening', () => {
+    const data = inputs(); const first = analyze(data, manifest);
+    const screened = analyze(data, manifest, first.state, [decision(first, 'codex:question-write', 'screened')]);
+    const confirmed = analyze(data, manifest, screened.state, [decision(first, 'codex:question-write', 'confirmed')]);
+    expect(confirmed.summary).toMatchObject({ newFailures: 1, reminders: 0 });
+    data.sessions.find(s => s.key === 'codex:question-write')!.fragments.push({ ref: 'resume#1', role: 'user', text: 'Unrelated later turn' });
+    const resumed = analyze(data, manifest, confirmed.state);
+    expect(resumed.summary).toMatchObject({ confirmed: 1, newFailures: 0 });
+    expect(resumed.captureDrafts).toEqual([]);
+    expect(proposeBatch(resumed).plan.work).toEqual([]);
+    expect(analyze({ sessions: [], calls: [], launches: [], gaps: ['sources missing'], sources: [] }, manifest, confirmed.state).summary.confirmed).toBe(1);
+    expect(confirmed.captureDrafts[0]!.humanQuoteRefs.length).toBeGreaterThan(0);
+  });
+
+  it('exports only selected incident excerpts, including after screening, and rejects unrelated quotes', () => {
+    const data = inputs(); const source = data.sessions.find(s => s.key === 'codex:question-write')!;
+    const sentinel = 'UNRELATED-IN-A-RELATED-SESSION-SENTINEL';
+    source.fragments.unshift({ ref: 'irrelevant-before#1', role: 'user', text: sentinel });
+    source.fragments.push({ ref: 'irrelevant-after#1', role: 'user', text: sentinel });
+    const first = analyze(data, manifest);
+    const review = decision(first, source.key, 'confirmed');
+    // Small excerpts are enough to locate the relevant words; never export complete source messages by default.
+    review.quotes = [{ ...review.quotes[0]!, quote: 'broader scope' }, { ...review.quotes[1]!, quote: 'map_apply' }];
+    const report = analyze(data, manifest, first.state, [review]);
+    expect(report.summary.confirmed).toBe(1);
+    for (const artifact of [report, report.state, report.captureDrafts, proposeBatch(report)]) expect(JSON.stringify(artifact)).not.toContain(sentinel);
+    expect(report.leads.find(l => l.id === review.leadId)!.fragments.map(f => f.text)).toEqual(['broader scope', 'map_apply']);
+    const invalid = analyze(data, manifest, first.state, [{ ...review, quotes: [{ ref: 'irrelevant-before#1', quote: sentinel }] }]);
+    expect(invalid.summary.confirmed).toBe(0); expect(JSON.stringify(invalid)).not.toContain(sentinel);
   });
 
   it('requests ChatGPT words only after a screened verdict need, not for every metadata write', () => {
@@ -178,10 +281,17 @@ describe('screening, evidence-bound verdicts and B04 intake', () => {
 });
 
 describe('quota-free scan and bounded approved work accounting', () => {
+  it('budgets B03b availability probes as well as two readings and arbitration', () => {
+    const first = analyze(inputs(), manifest);
+    const lead = first.leads.find(l => l.session === 'codex:question-write' && l.kind === 'write')!;
+    const screened = analyze(inputs(), manifest, undefined, [{ ...decision(first, lead.session, 'screened') }]);
+    const work = proposeBatch(screened).plan.work.filter(w => w.scope.includes(lead.id));
+    expect(work.reduce((n,w) => n + w.repetitions + w.extraReviews, 0)).toBe(5);
+  });
   it('lists model work and preserves full results and remaining work at the approved ceiling', () => {
-    const { plan } = proposeBatch(analyze(inputs(), manifest));
+    const { plan } = proposeBatch(screenedReport());
     expect(plan.work.some(w => w.kind === 'arbitration')).toBe(true);
-    expect(plan.work.filter(w => w.kind === 'reading').every(w => w.repetitions === 2)).toBe(true);
+    expect(plan.work.filter(w => w.kind === 'reading').reduce((n,w) => n + w.repetitions, 0)).toBe(2);
     plan.ceiling = 2;
     const invocations = plannedInvocations(plan);
     expect(() => openLedger(plan, { planHash: '', by: '', reference: '' })).toThrow(/approval/);
@@ -202,7 +312,7 @@ describe('quota-free scan and bounded approved work accounting', () => {
   });
 
   it('counts reserved/crashed work and extra reviews against the cap across serialization', () => {
-    const plan = proposeBatch(analyze(inputs(), manifest)).plan;
+    const plan = proposeBatch(screenedReport()).plan;
     plan.work = [plan.work[0]!]; plan.work[0]!.extraReviews = 2; plan.ceiling = 1;
     const item = plannedInvocations(plan)[0]!;
     const reserved = reserve(plan, openLedger(plan, { planHash: digest(plan), by: 'synthetic-user', reference: 'synthetic-approval' }), item.id);
@@ -221,7 +331,7 @@ describe('quota-free scan and bounded approved work accounting', () => {
     expect(statSync(out).mode & 0o777).toBe(0o700);
     expect(statSync(join(out, 'inventory.json')).mode & 0o777).toBe(0o600);
     expect(() => scanCommand(['--input', join(fixtures, 'input.json'), '--out', out])).toThrow();
-    expect(() => scanCommand(['--input', join(fixtures, 'input.json'), '--out', resolve('tests/behaviour/scan/do-not-create')])).toThrow(/outside/);
+    expect(() => scanCommand(['--input', join(fixtures, 'input.json'), '--out', fileURLToPath(new URL('./do-not-create', import.meta.url))])).toThrow(/outside/);
     expect(() => scanCommand(['--input', join(fixtures, 'input.json'), '--out', join(root, 'other'), '--approve'])).toThrow();
   });
 
@@ -231,5 +341,13 @@ describe('quota-free scan and bounded approved work accounting', () => {
     expect(value).not.toContain(secret);
     expect(value).not.toContain('sk-ant-syntheticlongcredential');
     expect(JSON.parse(value).again).toMatch(/^<secret-/);
+  });
+
+  it('prints useful fixed CLI diagnostics without leaking private exception details', () => {
+    expect(scanFailure(new ScanError('node'))).toContain('26.3.0');
+    expect(scanFailure(new Error('/private/synthetic-secret.json'))).not.toContain('synthetic-secret');
+    const cli = fileURLToPath(new URL('./cli.ts', import.meta.url));
+    const child = spawnSync(process.execPath, [cli], { encoding: 'utf8' });
+    expect(child.status).toBe(1); expect(child.stderr).toContain('usage: scan/cli.ts');
   });
 });

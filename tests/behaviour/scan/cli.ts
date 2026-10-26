@@ -7,6 +7,7 @@ import { analyze } from './analyze.ts';
 import { proposeBatch } from './batch.ts';
 import { digest, loadInputs, validateManifest } from './read.ts';
 import type { Inputs, Review, ScanState } from './types.ts';
+import { ScanError, scanFailure } from './errors.ts';
 
 /** Private output still strips declared credentials and recognizable Bearer/API token forms. Not a general secret detector. */
 export function privateJson(value: unknown, secrets: string[]): string {
@@ -22,25 +23,29 @@ export function privateJson(value: unknown, secrets: string[]): string {
     return v;
   };
   const text = `${JSON.stringify(clean(value), null, 2)}\n`;
-  if (secrets.some(s => text.includes(s) || text.includes(JSON.stringify(s).slice(1,-1)))) throw new Error('Output needs additional redaction');
+  if (secrets.some(s => text.includes(s) || text.includes(JSON.stringify(s).slice(1,-1)))) throw new ScanError('redaction');
   return text;
 }
 
 export function scanCommand(argv: string[]): string {
-  const { values } = parseArgs({ args: argv, options: { input: { type: 'string' }, out: { type: 'string' }, state: { type: 'string' }, reviews: { type: 'string' } } });
-  if (!values.input || !values.out) throw new Error('usage: scan/cli.ts --input <manifest.json> --out <fresh-private-directory> [--state <previous/state.json>] [--reviews <reviews.json>]');
+  if (process.versions.node !== '26.3.0') throw new ScanError('node');
+  let values;
+  try { ({ values } = parseArgs({ args: argv, options: { input: { type: 'string' }, out: { type: 'string' }, state: { type: 'string' }, reviews: { type: 'string' } } })); }
+  catch { throw new ScanError('usage'); }
+  if (!values.input || !values.out) throw new ScanError('usage');
   const manifest: unknown = JSON.parse(readFileSync(values.input, 'utf8'));
   validateManifest(manifest);
   const output = resolve(realpathSync(dirname(resolve(values.out))), values.out.split(/[\\/]/).at(-1)!);
   const checkout = realpathSync(fileURLToPath(new URL('../../..', import.meta.url)));
   const within = relative(checkout, output);
-  if (!within || !isAbsolute(within) && within !== '..' && !within.startsWith(`..` + '/')) throw new Error('Scan output must stay outside the repository');
+  const insideCheckout = !within || (!isAbsolute(within) && within !== '..' && !within.startsWith('../'));
+  if (insideCheckout) throw new ScanError('output');
   const state = values.state ? JSON.parse(readFileSync(values.state, 'utf8')) as ScanState : undefined;
   const reviews: unknown = values.reviews ? JSON.parse(readFileSync(values.reviews, 'utf8')) : [];
   if (!Array.isArray(reviews) || reviews.some(r => !r || typeof r !== 'object'
     || ['leadId', 'evidenceHash', 'disposition', 'by', 'basis', 'reason'].some(k => typeof r[k] !== 'string')
     || !Array.isArray(r.quotes) || r.quotes.some((q: unknown) => !q || typeof q !== 'object'
-      || !('ref' in q) || typeof q.ref !== 'string' || !('quote' in q) || typeof q.quote !== 'string'))) throw new Error('Invalid review file');
+      || !('ref' in q) || typeof q.ref !== 'string' || !('quote' in q) || typeof q.quote !== 'string'))) throw new ScanError('reviews');
   // Hash and quote the redacted evidence, so a reviewer can cite exactly the private output they received.
   const inputs = JSON.parse(privateJson(loadInputs(manifest, dirname(resolve(values.input))), manifest.secrets ?? [])) as Inputs;
   const report = analyze(inputs, manifest, state, reviews as Review[]);
@@ -55,5 +60,5 @@ export function scanCommand(argv: string[]): string {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { console.log(scanCommand(process.argv.slice(2))); }
-  catch { console.error('Scan refused: check manifest, input permissions, review/state format and fresh private output path. No model was started.'); process.exitCode = 1; }
+  catch (error) { console.error(scanFailure(error)); process.exitCode = 1; }
 }

@@ -10,10 +10,14 @@ Every word, ID, fingerprint, request, launch and outcome here is invented. These
 | `codex/refusal.jsonl` | Version refusal, distinct from service failure |
 | `codex/conflict.jsonl` | Conflict; no automatic verdict about subsequent client behaviour |
 | `claude/normal.jsonl` | Explicit normal HITL approval followed by a write, never automatically failed |
+| Bookkeeping rows in `claude/normal.jsonl` | `summary` and `file-history-snapshot` without session IDs do not create extra sessions |
 | `claude/research.jsonl` | Skill invocation with an explicit operator research label |
 | `claude/sidechain.jsonl` | Child shares the parent's native ID but cannot inherit its launch/calls; purpose stays unknown |
 | `missing-log` launch | Metadata without native words; pending |
 | `chatgpt` launch | Metadata without words; no automatic request for human words |
 | `service.calls.gaps.jsonl` | A missing-observation counter from a previous service process |
+| `launches-fresh.jsonl` | Alternative launch source: the question/write launch has no native ID and must remain separate from native words |
 
 Unit tests add malformed records, ambiguous joins, duplicate/hashed request IDs, explicit reviews and repeated scans without reading any real logs.
+
+The default launch file deliberately depicts resumed launches with known native IDs. Fresh dedicated launches normally lack that bridge; the alternative fixture checks the resulting two inventory rows and potential separate leads. No test claims timestamp/model matching can repair that gap.

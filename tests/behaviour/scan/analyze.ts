@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { blankSession, digest } from './read.ts';
-import type { Call, CaptureDraft, Inputs, Inventory, Lead, Manifest, Match, Review, ScanState, Session } from './types.ts';
+import { blankSession, digest, mergeUsage, nativeHarness, sessionKey } from './read.ts';
+import type { Call, CaptureDraft, Fragment, Inputs, Inventory, Lead, LegacyScanState, Manifest, Match, Review, ScanState, Session } from './types.ts';
 
 const unique = <T>(xs: T[]): T[] => [...new Set(xs)];
 const requestHash = (id: string) => createHash('sha256').update(`wayfinder-call-request/1\0${id}`).digest('hex');
@@ -12,16 +12,20 @@ function mergeSessions(input: Session[]): Session[] {
     const s = structuredClone(original);
     const old = byKey.get(s.key);
     if (!old) { byKey.set(s.key, s); continue; }
-    for (const field of ['sources', 'skill', 'mcpSessionIds', 'fingerprints', 'usageBasis', 'gaps'] as const) old[field] = unique([...old[field], ...s[field]]);
+    for (const field of ['sources', 'skill', 'mcpSessionIds', 'fingerprints', 'usageBasis', 'gaps', 'ambiguities', 'correlationBasis'] as const) {
+      if (field === 'ambiguities') old.ambiguities = unique([...old.ambiguities, ...s.ambiguities]);
+      else old[field] = unique([...old[field], ...s[field]]);
+    }
     old.calls = [...new Map([...old.calls, ...s.calls].map(c => [c.ref, c])).values()];
     old.fragments = [...new Map([...old.fragments, ...s.fragments].map(f => [f.ref + f.role + f.text, f])).values()];
     for (const field of ['model', 'effort'] as const) {
-      if (old[field] && s[field] && old[field] !== s[field]) { old.gaps.push(`Conflicting ${field} evidence`); old[field] = null; }
-      else if (!old.gaps.some(g => g.includes(`${field} evidence`) || g.startsWith(`Multiple ${field}`))) old[field] ??= s[field];
+      if (old[field] && s[field] && old[field] !== s[field]) { old.gaps.push(`Conflicting ${field} evidence`); old.ambiguities.push(field); }
+      if (old.ambiguities.includes(field)) old[field] = null;
+      else old[field] ??= s[field];
     }
     if (old.entry === 'unknown') old.entry = s.entry;
-    if (old.usage === 'unknown') old.usage = s.usage;
-    else if (s.usage !== 'unknown' && old.usage !== s.usage) { old.usage = 'unknown'; old.gaps.push('Conflicting usage evidence'); }
+    mergeUsage(old, s.usage);
+    if (old.ambiguities.includes('usage')) old.usage = 'unknown';
   }
   return [...byKey.values()];
 }
@@ -34,8 +38,33 @@ export interface ScanReport {
   state: ScanState;
 }
 
-export function analyze(inputs: Inputs, manifest: Manifest, state: ScanState = { schema: 'wayfinder-scan-state/1', reminded: [] }, reviews: Review[] = []): ScanReport {
-  if (state.schema !== 'wayfinder-scan-state/1' || !Array.isArray(state.reminded) || state.reminded.some(x => typeof x !== 'string')) throw new Error('Invalid reminder state');
+function scanState(input: ScanState | LegacyScanState): ScanState {
+  if (!['wayfinder-scan-state/1', 'wayfinder-scan-state/2'].includes(input.schema)
+    || !Array.isArray(input.reminded) || input.reminded.some(x => typeof x !== 'string')) throw new Error('Invalid reminder state');
+  if (input.schema === 'wayfinder-scan-state/1') return { schema: 'wayfinder-scan-state/2', reminded: input.reminded, seen: [], confirmations: [] };
+  if (!Array.isArray(input.seen) || input.seen.some(s => !s.id || !s.evidenceHash || !['pending', 'screened', 'confirmed', 'dismissed'].includes(s.status))
+    || !Array.isArray(input.confirmations) || input.confirmations.some(c => c.disposition !== 'confirmed' || !c.leadId || !c.evidenceHash || !Array.isArray(c.quotes))) throw new Error('Invalid scan history');
+  return structuredClone(input);
+}
+
+/** Only an incident's call/result, preceding human turn and following reply are eligible quotation sources. */
+function incidentFragments(session: Session, refs: string[]): Fragment[] {
+  const selected = new Set<string>(refs);
+  for (const call of session.calls.filter(c => refs.includes(c.ref))) if (call.resultRef) selected.add(call.resultRef);
+  const indices = session.fragments.flatMap((f, i) => selected.has(f.ref) ? [i] : []);
+  for (const index of indices) {
+    for (let i = index - 1; i >= 0; i--) if (session.fragments[i]!.role === 'user') { selected.add(session.fragments[i]!.ref); break; }
+    for (let i = index + 1; i < session.fragments.length; i++) {
+      const next = session.fragments[i]!;
+      if (next.role === 'user') break;
+      if (next.role === 'assistant') { selected.add(next.ref); break; }
+    }
+  }
+  return session.fragments.filter(f => selected.has(f.ref));
+}
+
+export function analyze(inputs: Inputs, manifest: Manifest, previous: ScanState | LegacyScanState = { schema: 'wayfinder-scan-state/2', reminded: [], seen: [], confirmations: [] }, reviews: Review[] = []): ScanReport {
+  const state = scanState(previous);
   const sessions = mergeSessions(inputs.sessions);
   const gaps = [...inputs.gaps];
   for (const launch of inputs.launches) {
@@ -44,7 +73,7 @@ export function analyze(inputs: Inputs, manifest: Manifest, state: ScanState = {
       const key = launch.credentialFingerprint ? `launch:${launch.credentialFingerprint}` : `launch:${digest(launch.ref)}`;
       let placeholder = sessions.find(s => s.key === key);
       if (!placeholder) {
-        placeholder = blankSession(key, launch.harness === 'codex' || launch.harness === 'claude' || launch.harness === 'chatgpt' ? launch.harness : 'unknown', launch.nativeSessionId);
+        placeholder = blankSession(key, nativeHarness(launch.harness), launch.nativeSessionId);
         placeholder.gaps.push('Native conversation unavailable; no attribution by Client ID or time');
         sessions.push(placeholder);
       }
@@ -52,27 +81,21 @@ export function analyze(inputs: Inputs, manifest: Manifest, state: ScanState = {
     }
     if (candidates.length !== 1) { gaps.push(`${launch.ref}: ambiguous native session`); continue; }
     const s = candidates[0]!;
+    s.correlationBasis.push(s.key.startsWith('launch:') ? `${launch.ref}: launch-only row; native conversation unavailable`
+      : `${launch.ref}: native session ID ${launch.nativeSessionId} + harness ${launch.harness}`);
     s.sources.push(launch.ref);
     if (launch.credentialFingerprint) s.fingerprints.push(launch.credentialFingerprint);
-    if (!s.gaps.some(g => g.includes('model evidence') || g.startsWith('Multiple model'))) s.model ??= launch.model;
-    if (!s.gaps.some(g => g.includes('effort evidence') || g.startsWith('Multiple effort'))) s.effort ??= launch.effort;
+    if (!s.ambiguities.includes('model')) s.model ??= launch.model;
+    if (!s.ambiguities.includes('effort')) s.effort ??= launch.effort;
     if (s.entry === 'unknown') s.entry = launch.entry;
-    if (launch.usage !== 'unknown') {
-      s.usageBasis.push(`${launch.ref}: operator launch label ${launch.usage}`);
-      if (s.usage === 'unknown' && !s.gaps.includes('Conflicting usage evidence')) s.usage = launch.usage;
-      else if (s.usage !== launch.usage) { s.usage = 'unknown'; s.gaps.push('Conflicting usage evidence'); }
-    }
+    if (launch.usage !== 'unknown') mergeUsage(s, launch.usage, [`${launch.ref}: operator launch label ${launch.usage}`]);
   }
   for (const label of manifest.labels ?? []) {
     const matches = sessions.filter(s => s.nativeId === label.nativeId && s.harness === label.harness
-      && (label.agentId ? s.key === `${label.harness}:${label.nativeId}/subagent/${label.agentId}` : !s.subagent || s.harness === 'codex'));
+      && (label.agentId ? s.key === sessionKey(label.harness, label.nativeId, label.agentId) : !s.subagent || s.harness === 'codex'));
     if (matches.length !== 1) { gaps.push(`Usage label for ${label.harness}:${label.nativeId} is unmatched or ambiguous`); continue; }
     const s = matches[0]!;
-    s.usageBasis.push(`Operator label: ${label.basis}`);
-    s.gaps = s.gaps.filter(g => g !== 'Subagent evidence alone does not establish research purpose');
-    if (s.usage !== 'unknown' && s.usage !== label.usage || s.gaps.includes('Conflicting usage evidence')) {
-      s.usage = 'unknown'; s.gaps.push('Conflicting usage evidence');
-    } else s.usage = label.usage;
+    mergeUsage(s, label.usage, [`Operator label: ${label.basis}`]);
   }
   const matches: Match[] = [];
   const observations = new Map<string, Call>();
@@ -97,7 +120,7 @@ export function analyze(inputs: Inputs, manifest: Manifest, state: ScanState = {
       } else {
         m.session = s.key;
         if (id && s.mcpSessionIds.includes(id)) m.basis.push(`MCP session ${id} from Attempt`);
-        if (call.credentialFingerprint && s.fingerprints.includes(call.credentialFingerprint)) m.basis.push('Launch credential fingerprint; exact native session ID when available');
+        if (call.credentialFingerprint && s.fingerprints.includes(call.credentialFingerprint)) m.basis.push('B07 call credential fingerprint matches launch fingerprint');
         // B01 normalizes request IDs to strings and loses the numeric/string distinction. Require a unique observation.
         const sameRequest = (other: Call) => rpcSession(other) === id && other.requestId === call.requestId && other.requestIdHash === call.requestIdHash;
         const native = s.calls.filter(c => c.requestId !== null && c.tool === call.tool && s.mcpSessionIds.length === 1 && s.mcpSessionIds[0] === id
@@ -119,15 +142,18 @@ export function analyze(inputs: Inputs, manifest: Manifest, state: ScanState = {
   const inventory: Inventory[] = sessions.map(s => {
     const calls = matches.filter(m => m.session === s.key);
     const hasMcp = s.calls.length > 0 || calls.some(m => m.call.tool !== null);
-    const item: Inventory = { ...s, serviceCalls: calls.map(m => m.call.ref), matchingBasis: unique(calls.flatMap(m => m.basis)),
+    const { fragments: _privateWords, ...facts } = s;
+    const item: Inventory = { ...facts, serviceCalls: calls.map(m => m.call.ref), matchingBasis: unique([...s.correlationBasis, ...calls.flatMap(m => m.basis)]),
       gaps: unique([...s.gaps, ...calls.flatMap(m => m.gaps)]), activity: hasMcp ? 'mcp' : s.skill.length ? 'skill-only-observed' : s.nativeId ? 'unrelated' : 'unknown', authorization: 'not-assessed' };
     if (s.usage === 'unknown') item.gaps.push('Usage purpose unknown');
+    if (s.subagent && s.usage === 'unknown') item.gaps.push('Subagent evidence alone does not establish research purpose');
     if (!s.model) item.gaps.push('Model unknown');
     if (!s.effort) item.gaps.push('Effort unknown');
     if (item.activity === 'skill-only-observed') item.gaps.push('No MCP call observed in supplied evidence; absence is not proof of complete logs');
     return item;
   });
   const leads: Lead[] = [];
+  const acceptedReviews: Review[] = [];
   for (const s of inventory) {
     const service = matches.filter(m => m.session === s.key && m.call.tool);
     const signals = new Map<Lead['kind'], string[]>();
@@ -144,9 +170,11 @@ export function analyze(inputs: Inputs, manifest: Manifest, state: ScanState = {
     if (s.gaps.length && s.activity !== 'unrelated') add('missing-evidence', s.key);
     for (const [kind, refs] of signals) {
       const id = `lead-${digest([s.key, kind]).slice(0,24)}`;
-      const fragments = s.fragments;
-      const evidenceHash = digest({ fragments, calls: s.calls, service: service.map(m => m.call), gaps: s.gaps });
-      const lead: Lead = { id, session: s.key, kind, refs: unique(refs), evidenceHash, fragments,
+      const fragments = kind === 'missing-evidence' ? [] : incidentFragments(sessions.find(x => x.key === s.key)!, refs);
+      const evidenceHash = digest({ fragments, calls: s.calls.filter(c => refs.includes(c.ref)), service: service.filter(m => refs.includes(m.call.ref)).map(m => m.call),
+        ...(kind === 'missing-evidence' ? { gaps: s.gaps } : {}) });
+      const lead: Lead = { id, session: s.key, kind, refs: unique(refs), evidenceHash, fragments: [], change: 'new',
+        evidenceRefs: fragments.map(({ ref, role }) => ({ ref, role })), hasHumanWords: fragments.some(f => f.role === 'user'),
         status: 'pending', reason: 'Screening candidate only; metadata and missing evidence do not establish a behaviour violation', requestHumanWords: false, reminder: false };
       const decisions = reviews.filter(r => r.leadId === id);
       if (decisions.length > 1) gaps.push(`${id}: multiple review decisions; reconcile explicitly`);
@@ -159,29 +187,48 @@ export function analyze(inputs: Inputs, manifest: Manifest, state: ScanState = {
         if (review.evidenceHash !== evidenceHash || !review.by?.trim() || !review.reason?.trim() || !review.basis?.trim()) gaps.push(`${id}: stale or incomplete review`);
         else if (review.disposition === 'confirmed' || review.disposition === 'dismissed') {
           if (kind === 'missing-evidence' || !exact || !human || !action) gaps.push(`${id}: verdict needs original human words and native action evidence; remains pending`);
-          else { lead.status = review.disposition; lead.reason = review.reason; }
+          else { lead.status = review.disposition; lead.reason = review.reason; acceptedReviews.push(review); }
         } else if (review.disposition === 'screened' || review.disposition === 'needs-human-words') {
-          lead.status = kind === 'missing-evidence' ? 'pending' : 'screened'; lead.reason = review.reason;
+          if (quotes.length && !exact) { gaps.push(`${id}: screening quotes are outside incident evidence`); }
+          else { lead.status = kind === 'missing-evidence' ? 'pending' : 'screened'; lead.reason = review.reason; acceptedReviews.push(review); }
           // Explicit post-screening verdict need only. Never ask on every ChatGPT write.
-          lead.requestHumanWords = review.disposition === 'needs-human-words' && !fragments.some(f => f.role === 'user');
+          lead.requestHumanWords = lead.status === 'screened' && review.disposition === 'needs-human-words' && !lead.hasHumanWords;
         } else gaps.push(`${id}: unsupported review disposition`);
       }
+      const accepted = acceptedReviews.find(r => r.leadId === id);
+      // Export only explicitly selected exact excerpts, never the incident window or a whole conversation.
+      if (accepted) lead.fragments = accepted.quotes.map(q => ({ ref: q.ref, role: fragments.find(f => f.ref === q.ref && f.text.includes(q.quote))!.role, text: q.quote }));
+      const confirmation = accepted?.disposition === 'confirmed' ? accepted : state.confirmations.find(c => c.leadId === id);
+      if (confirmation) {
+        lead.confirmation = confirmation; lead.status = 'confirmed'; lead.reason = confirmation.reason;
+        if (confirmation.evidenceHash !== evidenceHash) gaps.push(`${id}: earlier confirmation retained; current evidence differs`);
+      }
+      const seen = state.seen.find(x => x.id === id);
+      if (!decisions.length && !confirmation && seen?.evidenceHash === evidenceHash && (seen.status === 'screened' || seen.status === 'dismissed')) {
+        lead.status = seen.status; lead.reason = 'Retained disposition at the same evidence hash; see the prior scan review';
+        lead.requestHumanWords = seen.requestHumanWords ?? false;
+      }
+      lead.change = !seen ? 'new' : seen.evidenceHash === evidenceHash && seen.status === lead.status ? 'seen' : 'changed';
       lead.reminder = (lead.status === 'confirmed' || lead.status === 'screened') && !state.reminded.includes(id);
       leads.push(lead);
     }
   }
   for (const review of reviews) if (!leads.some(l => l.id === review.leadId)) gaps.push(`${review.leadId}: review has no current lead`);
-  const nextState: ScanState = { schema: 'wayfinder-scan-state/1', reminded: unique([...state.reminded, ...leads.filter(l => l.reminder).map(l => l.id)]) };
-  return { schema: 'wayfinder-usage-scan/1', sources: inputs.sources, gaps: unique(gaps), inventory, matches, leads, reviews: structuredClone(reviews),
-    captureDrafts: leads.filter(l => l.kind !== 'missing-evidence' && l.status !== 'dismissed').map(l => captureDraft(l, inventory.find(s => s.key === l.session)!, matches)),
+  const confirmations = [...new Map([...state.confirmations, ...acceptedReviews.filter(r => r.disposition === 'confirmed')].map(r => [r.leadId, r])).values()];
+  const nextState: ScanState = { schema: 'wayfinder-scan-state/2', reminded: unique([...state.reminded, ...leads.filter(l => l.reminder).map(l => l.id)]), confirmations,
+    seen: [...new Map([...state.seen, ...leads.map(l => ({ id: l.id, evidenceHash: l.evidenceHash, status: l.status, requestHumanWords: l.requestHumanWords }))].map(s => [s.id, s])).values()] };
+  return { schema: 'wayfinder-usage-scan/1', sources: inputs.sources, gaps: unique(gaps), inventory, matches, leads, reviews: structuredClone(acceptedReviews),
+    captureDrafts: leads.filter(l => l.kind !== 'missing-evidence' && (l.status === 'screened' || l.status === 'confirmed') && l.change !== 'seen')
+      .map(l => captureDraft(l, inventory.find(s => s.key === l.session)!, matches)),
     summary: { sessions: inventory.length, serviceCalls: matches.length, pending: leads.filter(l => l.status === 'pending').length,
-      confirmed: leads.filter(l => l.status === 'confirmed').length, newFailures: leads.filter(l => l.status === 'confirmed' && l.reminder).length,
+      confirmed: confirmations.length, newFailures: confirmations.filter(c => !state.confirmations.some(old => old.leadId === c.leadId)).length,
       reminders: leads.filter(l => l.reminder).length, modelsStarted: 0 }, state: nextState };
 }
 
 function captureDraft(lead: Lead, session: Inventory, matches: Match[]): CaptureDraft {
   const mapIds = unique([...session.calls.map(c => c.mapId), ...matches.filter(m => m.session === session.key).map(m => m.call.mapId)].filter((m): m is string => m !== null));
   return { schema: 'wayfinder-capture-input-draft/1', leadId: lead.id, ready: false,
+    humanQuoteRefs: unique([...(lead.confirmation?.quotes.filter(q => lead.evidenceRefs.some(f => f.role === 'user' && f.ref === q.ref)).map(q => q.ref) ?? []), ...lead.fragments.filter(f => f.role === 'user').map(f => f.ref)]),
     input: { id: `Scan${lead.id.slice(5)}`, title: `Review ${lead.kind} signal`, origin: `Usage scan ${lead.id}; ${lead.status}`, date: '',
       mapId: mapIds.length === 1 ? mapIds[0]! : '', revision: null, restores: null, claims: null,
       sessionRef: session.key, humanWords: null, replayContext: '', originalCombination: `${session.harness}:${session.model ?? 'unknown'}`,

@@ -14,7 +14,7 @@ node tests/behaviour/scan/cli.ts \
 
 Omit `--state` on the first run. Thereafter carry the latest successful `state.json` forward, including runs with no reminders; do not reset it weekly. Invalid/unreadable state fails the command. Preserve a partial output directory for diagnosis and retry with a fresh destination and the last complete state. Use one scan/operator at a time; this is not a concurrent shared reminder service.
 
-Run the same command weekly and before preparing each release's behaviour Batch. Inspect gaps and pending evidence, screen candidate leads and preserve all scan directories. This defines the cadence and manual mechanism only: no launchd/cron job or Batch is created or approved by this change. Safe synthetic demonstration:
+The coordinator or Kun runs real scans only after explicit approval to read the selected private sources; workers and reviewers use synthetic fixtures. The same command is available for weekly and pre-release scans. Installing the weekly schedule remains Kun's decision, which the coordinator will ask after integration; this PR references Issue #79 rather than closing it. Inspect gaps and pending evidence, screen candidate leads and preserve all scan directories. No launchd/cron job or Batch is approved by this change. Safe synthetic demonstration:
 
 ```sh
 node tests/behaviour/scan/cli.ts \
@@ -26,7 +26,7 @@ The summary includes `modelsStarted: 0`, `newFailures: 0`, `batchApproved: false
 Observed synthetic output:
 
 ```json
-{"sessions":11,"serviceCalls":8,"pending":19,"confirmed":0,"newFailures":0,"reminders":0,"modelsStarted":0,"gaps":3,"batchInvocations":18,"batchApproved":false}
+{"sessions":11,"serviceCalls":8,"pending":19,"confirmed":0,"newFailures":0,"reminders":0,"modelsStarted":0,"gaps":3,"batchInvocations":0,"batchApproved":false}
 ```
 
 ## Selecting discoverable evidence
@@ -44,7 +44,7 @@ See [`Manifest`](../../tests/behaviour/scan/types.ts) and the runnable [syntheti
 
 Expand `~` yourself: the reader does not interpret shell syntax. It neither discovers homes nor reads configuration, credentials, memories or arbitrary workspace files. Missing, unreadable, empty, malformed, unsupported and truncated records remain gaps. B07 gap/summary counters and sequence discontinuities remain visible across restart. A missing tail without a surviving counter cannot be reconstructed; discovered files do not establish complete historical coverage.
 
-Locators use `source-id/relative-file#L<number>`; consult the private manifest for the original file. Fragments retain native user/assistant messages and Wayfinder calls/results, not shell output or unrelated tool bodies. Model/effort changes within a native session remain ambiguous instead of attributing all calls to the last model.
+Locators use `source-id/relative-file#L<number>`; consult the private manifest for the original file. The inventory exports facts and source locators, never session dialogue. Pending leads export eligible evidence locators without text. Only exact, explicitly selected excerpts from an accepted screening/verdict record appear in a lead; unrelated sessions and unselected turns remain absent from every output. Eligible context is the signal's native call/result, preceding human turn and following reply. Read wider context from the original privately when necessary rather than copying it into the inventory. Model/effort changes within a native session remain ambiguous instead of attributing all calls to the last model.
 
 Codex support follows repository synthetic rollouts and the public [protocol](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/protocol.rs) and [ResponseItem definitions](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/models.rs): `session_meta`, `turn_context`, `response_item` and selected `event_msg` envelopes. Claude support follows its documented [JSONL transcript and MCP tool conventions](https://code.claude.com/docs/en/hooks): `sessionId`, message content `tool_use`/`tool_result`, `isSidechain` and `agentId`. Future formats or renamed MCP servers need an explicit adapter update and fixtures.
 
@@ -52,24 +52,26 @@ Codex support follows repository synthetic rollouts and the public [protocol](ht
 
 The inventory distinguishes native sessions, launcher-only rows and unmatched service-session rows. A launch joins native evidence only by known native ID **and harness**, then B07 calls by credential fingerprint. A B01 Attempt can supply MCP session IDs and normalized JSON-RPC IDs. Exact request matches require an unambiguous MCP session plus request ID or B07's domain-separated request hash. Numeric/string collisions stay unmatched because B01 currently loses that type distinction. A native tool-use ID is never a JSON-RPC ID; a session association is not a committed-write receipt.
 
-Client ID, model, time proximity and Map ID never assign calls. Same-Combination sessions stay distinct. Fresh launches without native IDs remain launcher-only; no timestamp guess supplies words. Claude sidechains share the parent's `sessionId`, so inventory keys include the native `agentId` (or file locator if missing) and never inherit the parent's launch. These local inventory/reminder keys are not new product identities, Client IDs or Claimants.
+Client ID, model, time proximity and Map ID never assign calls. Same-Combination sessions stay distinct. Fresh launches without native IDs remain launcher-only; no timestamp guess supplies words. One actual conversation may therefore appear as separate native and launch/service rows and produce separate leads until stronger evidence exists. The default fixtures depict resumed launches; `launches-fresh.jsonl` demonstrates this limitation. The inventory records the exact native-ID/harness join separately from the credential-fingerprint join and never claims a native join for placeholders. Claude sidechains share the parent's `sessionId`, so inventory keys include native `agentId` (or file locator if missing) and never inherit the parent's launch. Session-less bookkeeping rows (`summary`, `file-history-snapshot`) do not create sessions. These inventory/reminder keys are not product identities, Client IDs or Claimants.
 
 Usage is `normal`, `test`, `research` or `unknown`. B07 operator labels, B01 provenance and manifest `labels` with explicit `basis` provide evidence. For a Claude subagent, a label must also supply its native `agentId`; a Codex subagent has its own native ID. Subagent status alone does not imply research; prompt keywords do not imply test use. Conflicting labels remain unknown. An unlabeled subagent never inherits a normal parent's purpose.
 
-`skill-only-observed` requires an explicit user Skill invocation or native Skill/read-tool invocation; a developer Skill catalog is insufficient. It means no Wayfinder MCP call was observed in supplied evidence; partial logs may still hide calls.
+`skill-only-observed` requires an explicit user invocation at the start of the message (`@wayfinder`, `$wayfinder`, `use the wayfinder skill`), a Claude `/wayfinder` command, or a native Skill-tool invocation. A developer catalog, negated mention, or maintenance read of `wayfinder/SKILL.md` is insufficient. This conservative recognizer can miss other natural-language invocations; it never infers invocation from a file read. It means no Wayfinder MCP call was observed in supplied evidence; partial logs may hide calls. Injected AGENTS/environment context, Claude `isMeta` and command-output messages never supply original human words.
 
 ## Screen first, then read original words
 
-All automatic leads start `pending`; there is no automatic failure rule. Signals group writes, refusals, Conflicts, service/transport failures, Skill-only observations and missing evidence. Refusals/Conflicts stay distinct from outages. `authorization` always remains `not-assessed`; normal HITL writes never fail from metadata.
+All automatic leads start `pending`, with no Batch work or B04 draft until screened; there is no automatic failure rule. Signals group writes, refusals, Conflicts, service/transport failures, Skill-only observations and missing evidence. Every call's exact result class remains in the inventory, including the separate refusal classes; grouping them into one screening lead is not a behaviour verdict. Refusals/Conflicts stay distinct from outages. `authorization` always remains `not-assessed`; normal HITL writes never fail from metadata.
 
 Optional `--reviews "$SCAN_REVIEWS"` accepts an array of [`Review`](../../tests/behaviour/scan/types.ts) records: lead ID, exact evidence hash, reviewer, accepted-rule/evidence basis, reason, disposition and native quotations. It records completed reviews, invokes nobody and approves no quota. Model analysis first needs complete B01 evidence and specified verdict items, then the existing B03b two-review/arbitration machinery in an approved Batch. Link retained review results in `basis`; never substitute one model answer or invent a human ruling.
 
 - `screened` is a relevant signal awaiting judgement, not a failure.
 - `needs-human-words` records a specific verdict need after screening; only this disposition requests missing words. ChatGPT metadata alone never triggers a request.
 - `confirmed`/`dismissed` require nonempty exact excerpts from original user words **and** native agent/tool evidence at the current hash. Metadata locators cannot supply these. The reviewer must read the relevant exchange and rule; exact string checks verify quotations, not reasoning or authorization.
-- Missing-evidence leads cannot become confirmed. Invalid/stale/duplicate reviews leave a pending lead and visible gap. Unknown never counts as a new failure.
+- Missing-evidence leads cannot become confirmed. Invalid/stale/duplicate new reviews leave a pending lead and visible gap; an already recorded confirmation remains pinned. Unknown never counts as a new failure. Invalid review quotations are not copied to output.
 
-Fragments and hashes use redacted evidence so reviewers can quote exactly the output they received. Preserve originals privately for contextual reading. Reminder state records each screened/confirmed native/launch/service-session-and-signal lead once. Later scans retain it without reminding again, even if it later becomes confirmed. Multiple same-kind events in one session form one screening group: split distinct incidents in B04. This deduplicates leads, not speculative cross-session root causes.
+Hashes use the incident evidence after credential redaction; quote the needed excerpt from the private original using the same redaction rules. State schema 2 retains every lead's hash/status and marks it `new`, `changed` or `seen`, including pending/unknown evidence. Schema 1 reminder IDs migrate without being reset. Unchanged seen leads do not reissue work or capture drafts. A current confirmed/dismissed decision never schedules another reading. Keep unfinished prior proposals instead of generating a new Batch every week.
+
+Confirmations retain their original evidence hash and selected quotations even after resume, changed evidence or missing logs; the inventory identifies newer evidence separately. First confirmation counts in `newFailures` independently of a prior screening reminder. Multiple same-kind events in one session remain one screening group: split distinct incidents in B04. This deduplicates leads, not speculative cross-session root causes.
 
 ## Private artifacts and B04 handoff
 
@@ -77,26 +79,26 @@ Output is a 0700 directory with 0600 files; existing outputs are refused:
 
 | File | Content |
 | --- | --- |
-| `inventory.json` | Sources, matches, basis/gaps, private fragments, retained review inputs, lead statuses and summary |
-| `state.json` | Reminder IDs only |
+| `inventory.json` | Sources, matches, basis/gaps, evidence locators, accepted selected excerpts and review records, lead status/change markers and summary |
+| `state.json` | Seen hashes/statuses, reminder IDs and pinned confirmations with selected excerpts |
 | `batch-proposal.json` | Unapproved work and deferred prerequisites |
-| `capture-input-drafts.json` | B04-shaped incomplete inputs; never automatically admitted or executed |
+| `capture-input-drafts.json` | B04-shaped incomplete inputs only for new/changed screened or confirmed leads |
 
-Select the actual incident and exact human turn. Verify its pre-incident Map/Revision using B04's consistent private database copy, choose seed mode and each Claim decision, state correct behaviour and literal redactions, and complete the draft. `revision`, `restores`, `claims`, `humanWords` and `verdict` are deliberately unset; metadata cannot supply them. Then use `capture/cli.ts` and B04's conversion audit, two reproductions and admission into the existing Scenario library. No parallel library is created.
+Select the actual incident and exact human turn; drafts carry `humanQuoteRefs` from the selected review evidence when available. Verify its pre-incident Map/Revision using B04's consistent private database copy, choose seed mode and each Claim decision, state correct behaviour and literal redactions, and complete the draft. `revision`, `restores`, `claims`, `humanWords` and `verdict` remain unset; metadata cannot supply them. Then use `capture/cli.ts` and B04's conversion audit, two reproductions and admission into the existing Scenario library. No parallel library is created.
 
 Manifest `secrets` declares literal credentials for stable replacement throughout output, including nested JSON text. Recognizable Bearer/API tokens are also stripped. This is not a complete secret detector: declare arbitrary credential literals and inspect before sharing. Real manifests, review files, inventories, proposals and raw conversations stay private outside Git; only synthetic fixtures and reviewed minimal B04 artifacts enter the repository.
 
 ## Batch approval and ceiling
 
-The scan CLI has no approve/run option. Proposals list reviewer Combinations, lead/evidence scope, two readings, optional stronger arbitration, extra review counts and total invocation ceiling. Missing words and incomplete capture prerequisites are deferred. Reproduction/regression need concrete follow-on plans after the Scenario and original Combination are known; reproduction starts with two Attempts. Never approve vague future scopes or substitute unavailable models.
+The scan CLI has no approve/run option. For new/changed screened leads, proposals list **five** B03b driver invocations: reviewer availability, arbiter availability, two independent readings and conditional arbitration. Reviewer selection and call order come from the same pure `review-plan.ts` used by B03b itself. Missing words/Combination and incomplete capture prerequisites are deferred. B03b currently leaves effort to the client default, which the plan states explicitly. Reproduction/regression need concrete follow-on plans after the Scenario and original Combination are known; reproduction starts with two Attempts. Never approve vague future scopes or substitute unavailable models.
 
-[`batch.ts`](../../tests/behaviour/scan/batch.ts) is accounting for an external approved executor, not another runner:
+The explicit [`scan/review.ts`](../../tests/behaviour/scan/review.ts) handoff is separate from the scan CLI and uses the existing B03b executor, not another reviewer:
 
-1. Finalize `BatchPlan` rows for reading, reproduction, regression or arbitration: exact Combination, scope, repetitions, extra reviews, evidence hash and prerequisites. Count every model invocation, including quota-spending probes. The operator verifies prerequisites before executing a row.
-2. Record Kun's approval reference and approver against exact `digest(plan)`; `openLedger` rejects absent/mismatched approval. This records scope and cannot authenticate the approving human.
-3. Call `reserve` and durably save its returned ledger **before** the existing runner/B03b invocation. Each invocation consumes a slot, including failures, timeouts, crashes and extra reviews. These helpers execute nothing. The coordinator must constrain the existing runner/reviewer to the same approved work; no automatic integration grants more work.
-4. Save `finish` with complete results/raw artifact references. Completed/failed results cannot be overwritten. Interrupted reservations stay unresolved and spent after resume, never silently retried.
-5. At the ceiling `reserve` refuses more work. `batchStatus` retains all results, unresolved reservations and the exact remaining list. Changed scope, models, evidence, retry counts or ceiling require a new approval and plan.
+1. Prepare complete B01 Attempt evidence and specified verdict items. Call `planReviewBatch(report, [{ leadId, directory }])`; it calls B03b `reviewPlan`, binds exact Attempt hashes/items/targets/call slots and sets the ceiling to B03b's actual maximum (five per nonempty review). This step runs no model. The initial scan proposal is not executable until this binding exists.
+2. Record Kun's approval against `digest(plan)` and `openLedger(plan, approval)`. A changed Attempt, scope, model, count or ceiling fails before spending quota. The ledger records approval scope but cannot authenticate the human.
+3. Only after approval, call `executeReviewBatch(plan, ledger, driver, persist)`. The caller supplies B03b's Driver and a private durable ledger writer. The adapter passes the **same** approved ceiling to B03b `reviewDirectories` and intercepts each Driver invocation; it reserves and persists one slot **before** each probe, reading or arbitration. No outer one-slot reservation hides a multi-call round.
+4. Each response/error and its request are retained in the ledger; B03b also preserves native round files and attaches its summary. Interrupted calls consume their reserved slots. A failed durable reservation starts no driver call; a saved but unresolved reservation stays spent. Resuming a partially spent round stops for reconciliation, never restarts its probes. A separately approved retry uses B03b's existing retry rules.
+5. `batchStatus` retains complete results, unresolved reservations and the remaining planned invocations. Agreement normally spends four and leaves conditional arbitration unspent; disagreement spends five and reaches the ceiling. Unplanned calls are refused at the Driver boundary. Reproduction/regression remain separate explicitly approved runner work; scan execution does not start them.
 
 ## Verification and self-review
 
@@ -104,7 +106,7 @@ All scan evidence is synthetic. Fixed tests cover every Issue sample, metadata-o
 
 Validation uses Node 26.3.0, `npm ci`, `npm run build`, the complete `npm test` suite, `npm run typecheck` and `git diff --check`. The existing fake runner reads daily login/configuration and snapshots service credentials even in model-free tests. To honor this task's private-read boundary, the complete suite was run with a temporary Vitest setup that returns `false` from `existsSync` for the real `.codex*`, `.claude*`, `.wayfinder-service`, workspace `contexts` and `raw` roots, and throws before reads/copies of those paths. All other filesystem operations, tests and assertions remain unchanged; the temporary setup/config is removed afterward. No real credentials are copied. This guard is verification setup, not part of the scan command or a runner modification.
 
-Final verification on 2026-10-26: build, **23 test files / 1496 tests** (including **16 scan tests**), strict type checking and whitespace checks passed after fetching/merging current `origin/main` at `00c2f4e`. All scenarios used fixed evidence or fake drivers; models started: **0**. The PR identifies the final implementation commit.
+Initial implementation verification on 2026-10-26: build, **23 test files / 1496 tests** (including **16 scan tests**), strict type checking and whitespace checks passed against `origin/main` at `00c2f4e`. The [independent-review response](behaviour-usage-scan-review.md) records the subsequent regressions, fixes and final validation. All scenarios use fixed evidence or fake drivers; models started: **0**.
 
 Two earlier isolation attempts were rejected by existing tests and retained as diagnostic context: changing HOME caused one runner path/sandbox assertion failure; an outer macOS sandbox prevented nested sandbox tests and exposed the runner's attempted private configuration reads. Neither is reported as a pass. The successful filesystem guard preserves the actual home path for existing sandbox assertions while presenting private client configuration as absent.
 

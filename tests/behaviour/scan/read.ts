@@ -2,11 +2,20 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { basename, join, relative, resolve } from 'node:path';
-import { classifyResult, entries } from '../evidence.ts';
+import { classifyResult, entries, resultClasses } from '../evidence.ts';
 import type { Entry } from '../evidence.ts';
+import type { CallResult } from '../../../src/call-metadata.ts';
 import type { Call, Inputs, Launch, Manifest, NativeCall, Session, Usage } from './types.ts';
 
 export const digest = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
+export const sessionKey = (harness: string, nativeId: string, agentId?: string | null) => `${harness}:${nativeId}${agentId ? `/subagent/${agentId}` : ''}`;
+export const nativeHarness = (value: unknown): Session['harness'] => value === 'codex' || value === 'claude' || value === 'chatgpt' ? value : 'unknown';
+export function mergeUsage(s: Session, next: Usage, basis: string[] = []): void {
+  s.usageBasis.push(...basis);
+  if (next === 'unknown' || s.ambiguities.includes('usage')) return;
+  if (s.usage !== 'unknown' && s.usage !== next) { s.usage = 'unknown'; s.ambiguities.push('usage'); s.gaps.push('Conflicting usage evidence'); }
+  else s.usage = next;
+}
 type ObjectValue = Record<string, unknown>;
 const obj = (v: unknown): ObjectValue => v !== null && typeof v === 'object' && !Array.isArray(v) ? v as ObjectValue : {};
 const str = (v: unknown): string | null => typeof v === 'string' && v.length > 0 ? v : null;
@@ -22,7 +31,7 @@ const toolName = (name: unknown): string | null => typeof name === 'string'
 
 export function blankSession(key: string, harness: Session['harness'], nativeId: string | null): Session {
   return { key, harness, nativeId, subagent: false, model: null, effort: null, entry: 'unknown', usage: 'unknown',
-    usageBasis: [], sources: [], skill: [], mcpSessionIds: [], fingerprints: [], calls: [], fragments: [], gaps: [] };
+    usageBasis: [], sources: [], skill: [], mcpSessionIds: [], fingerprints: [], calls: [], fragments: [], gaps: [], ambiguities: [], correlationBasis: [] };
 }
 
 /** Parse the clients' native JSONL envelopes, retaining original words and stable line references. */
@@ -30,7 +39,7 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
   const sessions = new Map<string, Session>();
   let current: Session | undefined;
   const get = (id: string | null, subagentId: string | null = null) => {
-    const key = `${harness}:${id ?? fileRef}${subagentId ? `/subagent/${subagentId}` : ''}`;
+    const key = sessionKey(harness, id ?? fileRef, subagentId);
     if (!sessions.has(key)) sessions.set(key, blankSession(key, harness, id));
     return sessions.get(key)!;
   };
@@ -46,21 +55,23 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
     const content = obj(parsed).structuredContent ?? obj(parsed).structured_content
       ?? parse(textContent(obj(parsed).content)) ?? parsed;
     call.result = classifyResult(content);
+    call.resultRef = ref;
     s.fragments.push({ ref, role: 'tool', text: typeof value === 'string' ? value : JSON.stringify(value) });
   };
   const message = (s: Session, role: unknown, value: unknown, ref: string) => {
     const text = textContent(value);
     if ((role !== 'user' && role !== 'assistant') || !text) return;
+    if (role === 'user' && /^(?:# AGENTS\.md instructions|<environment_context>|<permissions instructions>|<INSTRUCTIONS>)/.test(text.trim())) return;
     s.fragments.push({ ref, role, text });
     // A directory's Skill catalog and server instructions are not a Skill invocation.
-    if (role === 'user' && /(?:^|\s)[@$]wayfinder\b|\buse (?:the )?wayfinder skill\b/i.test(text)) s.skill.push(ref);
+    if (role === 'user' && /^(?:[@$]wayfinder\b|(?:please )?use (?:the )?wayfinder skill\b|<command-name>\/wayfinder<\/command-name>)/i.test(text.trim())) s.skill.push(ref);
   };
   const setting = (s: Session, field: 'model' | 'effort', value: unknown, ref: string) => {
     const next = str(value);
     if (!next) return;
     const changed = `Multiple ${field} values in this session`;
-    if (s.gaps.some(g => g.startsWith(changed))) { s.gaps.push(`${changed}: ${next} at ${ref}`); return; }
-    if (s[field] && s[field] !== next) { s.gaps.push(`${changed}: ${s[field]}, ${next} at ${ref}`); s[field] = null; }
+    if (s.ambiguities.includes(field)) { s.gaps.push(`${changed}: ${next} at ${ref}`); return; }
+    if (s[field] && s[field] !== next) { s.gaps.push(`${changed}: ${s[field]}, ${next} at ${ref}`); s.ambiguities.push(field); s[field] = null; }
     else s[field] = next;
   };
   for (const { value: row, ref } of rows) {
@@ -82,9 +93,6 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
         if (p.type === 'message') message(s, p.role, p.content, ref);
         if (p.type === 'function_call') {
           addCall(s, str(p.call_id), toolName(p.name), p.arguments, ref);
-          const args = obj(parse(p.arguments));
-          if (/^(?:exec_command|shell|shell_command|read_file)$/.test(String(p.name))
-            && /(?:^|\/)wayfinder\/SKILL\.md\b/.test(String(args.cmd ?? args.command ?? args.path ?? ''))) s.skill.push(ref);
         }
         if (p.type === 'function_call_output') result(s, str(p.call_id), p.output, ref);
       }
@@ -94,6 +102,8 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
         if (!s.fragments.some(f => f.role === role && f.text === p.message)) message(s, role, p.message, ref);
       }
     } else {
+      // Bookkeeping rows such as summary/file-history-snapshot do not create conversations.
+      if (row.type !== 'user' && row.type !== 'assistant') continue;
       const id = str(row.sessionId);
       const sidechain = row.isSidechain === true;
       // Claude subagents share the parent's sessionId: never attach their calls to the parent's launch.
@@ -102,12 +112,14 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
       const m = obj(row.message);
       setting(s, 'model', m.model, ref);
       if (row.type === 'user' || row.type === 'assistant') {
-        message(s, row.type, m.content, ref);
+        if (row.isMeta !== true && !(row.type === 'user' && /<(?:local-command-stdout|local-command-caveat|command-message)>/.test(textContent(m.content))
+          && !/<command-name>\/wayfinder<\/command-name>/.test(textContent(m.content)))) message(s, row.type, m.content, ref);
         for (const block of array(m.content).map(obj)) {
           if (block.type === 'tool_use') {
             addCall(s, str(block.id), toolName(block.name), block.input, ref);
-            if (block.name === 'Skill' && /^(?:[^:]+:)?wayfinder$/.test(String(obj(block.input).skill))) s.skill.push(ref);
-            if (block.name === 'Read' && /(?:^|\/)wayfinder\/SKILL\.md$/.test(String(obj(block.input).file_path))) s.skill.push(ref);
+            if (block.name === 'Skill' && /^(?:[^:]+:)?wayfinder$/.test(String(obj(block.input).skill))) {
+              s.skill.push(ref); s.fragments.push({ ref, role: 'tool', text: JSON.stringify({ name: 'Skill', skill: obj(block.input).skill }) });
+            }
           }
           if (block.type === 'tool_result') result(s, str(block.tool_use_id), textContent(block.content), ref);
         }
@@ -117,7 +129,6 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
   for (const s of sessions.values()) {
     s.sources.push(fileRef);
     if (!s.nativeId) s.gaps.push('Native session ID missing');
-    if (s.subagent) s.gaps.push('Subagent evidence alone does not establish research purpose');
     if (s.calls.length) s.gaps.push('Native tool-use IDs are not JSON-RPC request IDs; correlation needs a launch or Attempt bridge');
   }
   return [...sessions.values()];
@@ -126,10 +137,10 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
 function readAttempt(value: ObjectValue, ref: string): Session[] {
   if (value.schema !== 'wayfinder-behaviour-attempt/1' || !str(value.attemptId) || !Array.isArray(value.sessions)) throw new Error('Invalid Attempt');
   const combination = obj(value.combination);
-  const harness = combination.harness === 'codex' || combination.harness === 'claude' || combination.harness === 'chatgpt' ? combination.harness : 'unknown';
+  const harness = nativeHarness(combination.harness);
   return array(value.sessions).map(obj).map(record => {
     const nativeId = str(known(record.nativeId));
-    const s = blankSession(nativeId ? `${harness}:${nativeId}` : `attempt:${value.attemptId}:${record.label}`, harness, nativeId);
+    const s = blankSession(nativeId ? sessionKey(harness, nativeId) : `attempt:${value.attemptId}:${record.label}`, harness, nativeId);
     s.usage = 'test'; s.usageBasis = [`${ref}: B01 Attempt ${value.attemptId}`]; s.sources = [ref];
     s.model = str(known(combination.visibleModel)) ?? str(combination.requestedModel);
     s.effort = str(known(combination.effort)); s.entry = entry(value.entry);
@@ -215,12 +226,12 @@ export function loadInputs(manifest: Manifest, base: string): Inputs {
           else if (v.missingObservations > 0) out.gaps.push(`${ref}: ${v.missingObservations} missing service observations (${v.serviceStartedAt})`);
         } else if (source.kind === 'calls' && v.schema === 'wayfinder-service-call/1' && str(v.serviceStartedAt)
           && Number.isSafeInteger(v.sequence) && Number(v.sequence) > 0 && Number.isSafeInteger(v.missingObservations) && Number(v.missingObservations) >= 0
-          && ['committed', 'read', 'input-error', 'command-rejected', 'version-mismatch', 'map-exists', 'not-found', 'conflict', 'service-failure', 'transport-failure', 'stream-not-supported', 'ok'].includes(String(v.result))
+          && [...resultClasses, 'stream-not-supported', 'ok'].includes(String(v.result))
           && ['mcpSessionId', 'presentedMcpSessionId', 'requestId', 'requestIdHash', 'credentialFingerprint', 'clientId', 'tool', 'mapId'].every(k => v[k] === null || typeof v[k] === 'string')) {
           const c: Call = { ref, serviceStartedAt: String(v.serviceStartedAt), sequence: Number(v.sequence), missingObservations: Number(v.missingObservations),
             mcpSessionId: str(v.mcpSessionId), presentedMcpSessionId: str(v.presentedMcpSessionId), requestId: str(v.requestId),
             requestIdType: v.requestIdType === 'string' || v.requestIdType === 'number' ? v.requestIdType : null, requestIdHash: str(v.requestIdHash),
-            credentialFingerprint: str(v.credentialFingerprint), clientId: str(v.clientId), tool: str(v.tool), mapId: str(v.mapId), result: String(v.result) };
+            credentialFingerprint: str(v.credentialFingerprint), clientId: str(v.clientId), tool: str(v.tool), mapId: str(v.mapId), result: v.result as CallResult };
           out.calls.push(c);
           if (c.missingObservations > 0) out.gaps.push(`${ref}: ${c.missingObservations} missing service observations`);
         } else if (source.kind === 'launches' && v.schema === 'wayfinder-launch/1') {
