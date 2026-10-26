@@ -8,7 +8,7 @@ Date: 2026-09-18. Planning Destination: a minimal client-neutral SQLite-backed M
 
 Use [GLOSSARY.md](../../GLOSSARY.md) for domain language, [M1](m1.md) for unchanged domain behavior and the [v1 contract](v1.md) for the wider product. This document consolidates the human-confirmed local slice, not completion of v1 or M2–M6.
 
-Sections 1–14 record their original slice and acceptance boundaries. The [Answer Desk follow-on in section 15](#15-answer-desk-follow-on-slice), accepted by Kun on 2026-10-26 under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109), amends the tool/protocol/viewer-write boundaries and §8/§9 storage and migration rules. Those amendments take effect after #109 closeout and the respective implementation is delivered; they are not claims about the current service.
+Sections 1–14 record their original slice and acceptance boundaries. The [Answer Desk follow-on in section 15](#15-answer-desk-follow-on-slice), accepted by Kun on 2026-10-26 under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109), amends the tool/protocol/viewer-write boundaries, §6's net-no-op classification and §8/§9 storage and migration rules. Those amendments take effect after #109 closeout and the respective implementation is delivered; they are not claims about the current service.
 
 | Source | Role |
 | --- | --- |
@@ -146,7 +146,7 @@ Preserve the structured M1 ReadResult, PrepareResult, CommitResult and Rejection
 | Proven non-publication | State/history unchanged; do not label uncertain outcomes as this class |
 | Commit/response interruption with unproven outcome | Unknown outcome; authoritative reread before any decision, no automatic replay |
 
-Known rejects, conflicts and net-no-ops publish no Revision. Storage-busy is not proof of stale head and must not become Conflict. Unexpected infrastructure/programming failures remain Promise failures at the StateAdapter seam, safely mapped by MCP without changing the pure library's result unions.
+Known rejects, conflicts and net-no-ops publish no Revision; the Answer Desk follow-on amends the no-net-change classification through its [agent request-closing contract](answer-desk.md#81-revision-boundary-and-adapters). Storage-busy is not proof of stale head and must not become Conflict. Unexpected infrastructure/programming failures remain Promise failures at the StateAdapter seam, safely mapped by MCP without changing the pure library's result unions.
 
 Attempt transaction cleanup. If the connection cannot return to usable state, stop DB operations and require restart. A missing/failed response never alone proves no publication. Reread current/history, decide whether the intention is already satisfied, and seek human judgment if evidence cannot resolve uncertainty. No automatic retry, rebase, merge, idempotency cache, Claim takeover or memory fallback. A lost connection cannot necessarily deliver an error envelope; client/workflow handling must still retain this rule.
 
@@ -356,7 +356,7 @@ Publish a new implementation report and machine-readable evidence without rewrit
 
 ## 15. Answer Desk follow-on slice
 
-Status: accepted by Kun on 2026-10-26 under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109); the design session checks the transcription before Issue closeout. This amends the tool, protocol and viewer-write boundaries and §8/§9 storage/migration rules, after #109 closes and the respective implementation is delivered. Original acceptance evidence remains historical evidence.
+Status: accepted by Kun on 2026-10-26 under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109); the design session checks the transcription before Issue closeout. This amends the tool, protocol and viewer-write boundaries, §6's net-no-op classification and §8/§9 storage/migration rules, after #109 closes and the respective implementation is delivered. Original acceptance evidence remains historical evidence.
 
 The [Answer Desk specification](answer-desk.md) is the single normative source for desk behavior. [ADR 0006](../adr/0006-answer-desk-in-the-map-viewer.md) and [ADR 0007](../adr/0007-map-wait-for-answer-delivery.md) record the architectural alternatives.
 
@@ -385,7 +385,7 @@ Both eras share `/mcp`, operator-controlled credential identity, the process's i
 
 Implement the [Tasks, admission and shutdown contract](answer-desk.md#63-tasks-admission-and-shutdown) and [release boundary](answer-desk.md#agent-delivery). The upstream [Tasks server implementation issue](https://github.com/modelcontextprotocol/ext-tasks/issues/30) was open when checked on 2026-10-26; #112 identifies server-everything 2.0.1's `dist/server/tasks.js` as a reference, not a supplied SDK implementation.
 
-[Answer Desk §8.1](answer-desk.md#81-revision-boundary-and-adapters) defines which writes create Revisions, the retained StateAdapter seam and the desk-side paths outside it. [Section 8.2](answer-desk.md#82-format-2-and-startup-migration) is the authoritative format-2 schema and backup-before-migration rule, expressly amending §8's initial-format/no-migration restriction and §9's representation. Migration and desk persistence must not be inferred from the task registry's lifetime.
+[Answer Desk §8.1](answer-desk.md#81-revision-boundary-and-adapters) defines which writes create Revisions, the request-closing amendment to §6 and M1's no-net-change check, the retained StateAdapter seam and the desk-side paths outside it. [Section 8.2](answer-desk.md#82-format-2-and-startup-migration) is the authoritative format-2 schema and backup-before-migration rule, expressly amending §8's initial-format/no-migration restriction and §9's representation. Migration and desk persistence must not be inferred from the task registry's lifetime.
 
 ### 15.4 Verification and release boundary
 
