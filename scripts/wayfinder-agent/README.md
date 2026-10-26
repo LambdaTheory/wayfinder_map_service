@@ -68,6 +68,16 @@ wayfinder help
 - 主令牌只给启动器自己探活用，记成 `Wayfinder-Launcher`；谁借了主令牌写图，看得出来。
 - 服务还是旧代码、不认凭据文件时，这次启动退回主令牌并提示，写入记成 `Wayfinder-Launcher`；`restart` 换到新代码后就分开。
 
+## 调用关联
+
+启动器在服务目录的 `launches.jsonl` 里追加私有的 `wayfinder-launch/1` 记录，覆盖普通、测试、续接、Matt 原版和 ChatGPT 中继入口。Client ID 仍是原来的 `harness:model:effort` 或 `ChatGPT`；启动器和服务用同一份凭据派生的指纹关联，不创建第二套身份。同一组合的两次启动使用不同凭据，MCP 连接也各有会话 ID。指纹经过用途隔离，不等于凭据文件中的认证校验值。启动器不向 harness 注入服务作者配置变量 `WAYFINDER_CLIENT_ID`。
+
+记录只含入口、harness、方法、模型、推理强度、UTC 启动时间（以 `Z` 结尾）和进程 ID，不含提示词、参数、工作目录、令牌或私有路径。续接时写入已知的 `nativeSessionId`；新会话尚未产生原生 ID，会在 `missing` 中明确列出。后续分析必须从客户端记录补齐或保留缺口，不能靠元数据推断人的授权。吊销凭据不会删除启动记录。
+
+`WAYFINDER_AGENT_USAGE=normal|test|research` 是操作者声明的用途；未声明或无效值记为 `unknown`，dry run 明确记为 `test`。路径覆盖项本身不能证明用途，隔离测试应显式设置 `test`。写记录失败会输出固定的缺失提示，启动继续。服务不依赖这个标签或启动器，始终独立记录 MCP 调用；格式见[操作者说明](../../docs/implementation/local-mcp-service.md#default-call-metadata)。
+
+启动记录和服务记录都不自动轮转，会持续增长。操作者可在停止自己管理的服务后手动归档日志；不要把日志当作 Map 备份。经 ChatGPT 隧道到达中继的公网请求会被中继加上令牌，因此服务将它们记为该凭据的已认证调用；这个标签不证明请求来自本人。
+
 ## ChatGPT 测试
 
 `wayfinder chatgpt` 在前台运行产品仓库的 `scripts/local-chatgpt-test.mjs`，带 `WAYFINDER_ATTACH_TOKEN`：它不另起服务，转发到已在跑的这个服务上，照常每 30 分钟备份，Ctrl-C 关掉转发和 Cloudflare 隧道，服务继续跑。ChatGPT 和专用 Agent 能同时用同一批地图。公开地址没有用户认证，不测就关。需要产品仓库的 client-credentials 改动；没有时命令会停下说明。单独跑 `npm run serv` 仍可用，但它自己起服务，要先 `wayfinder stop`。

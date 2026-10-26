@@ -11,6 +11,8 @@ import { createMapMcpServer } from './mcp-tools.js';
 import type { SQLiteStorage } from './sqlite-storage.js';
 import { isPlainObject, validateAuthor, validateId, validateObject } from './values.js';
 import { handleViewer, requestTarget } from './viewer-http.js';
+import { CallMetadata, classifyCallResult } from './call-metadata.js';
+import type { CallObservation } from './call-metadata.js';
 
 export const MAX_REQUEST_BYTES = 1_048_576;
 export interface LocalServiceConfiguration {
@@ -25,7 +27,10 @@ export interface LocalServiceConfiguration {
   // The primary credential's client shows its model no server instructions (compatibility mode).
   readonly toolsOnly?: boolean;
 }
-export interface LocalMcpService { stop(): Promise<void> }
+export interface LocalMcpService {
+  stop(): Promise<void>;
+  metadataStatus(): { observations: number; missingObservations: number };
+}
 export class LocalServiceFailure extends Error {
   constructor(readonly code: 'invalid_configuration' | 'storage_not_ready' | 'port_unavailable' | 'service_failure') {
     super(`Local MCP ${code}`);
@@ -97,6 +102,7 @@ async function requestTooLarge(request: IncomingMessage, response: ServerRespons
 interface Session {
   // Requests within a session must present the credential that opened it.
   readonly credential: Buffer;
+  readonly clientId: string;
   readonly server: Server;
   readonly transport: WebStandardStreamableHTTPServerTransport;
   readonly pending: Set<Promise<void>>;
@@ -107,6 +113,7 @@ interface Session {
 // Production enters through mcp-service.ts, which opens only existing private DBs.
 export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceConfiguration): Promise<LocalMcpService> {
   const config = captureConfiguration(input);
+  const metadata = new CallMetadata(config.databasePath, config.token);
   const tokenHash = digest(`Bearer ${config.token}`);
   function authenticate(authorization: string | undefined): Credential | undefined {
     const presented = digest(authorization ?? '');
@@ -123,7 +130,7 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
   let activeCalls = 0;
   const drains = new Set<() => void>();
   const requests = new Set<Promise<void>>();
-  const control = async (call: () => Promise<CallToolResult>): Promise<CallToolResult> => {
+  const admit = async (call: () => Promise<CallToolResult>): Promise<CallToolResult> => {
     if (stopping) return refusal('service_stopping');
     if (activeCalls >= 4) return refusal('service_busy');
     activeCalls++;
@@ -132,13 +139,18 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
       if (--activeCalls === 0) { for (const resolve of drains) resolve(); drains.clear(); }
     }
   };
-  async function handle(request: IncomingMessage, response: ServerResponse) {
+  const control = (call: () => Promise<CallToolResult>) => metadata.observeTool(() => admit(call), classifyCallResult);
+  async function handle(request: IncomingMessage, response: ServerResponse, observation: CallObservation | undefined) {
     if (stopping) { httpFailure(response, 503, 'Service stopping'); return; }
     if (request.headers.host !== host) { httpFailure(response, 403, 'Host forbidden'); return; }
     // The read-only viewer needs no token; routing by pathname keeps /mcp?query on the 404 below.
     if (requestTarget(request.url, host)?.pathname !== '/mcp') { await handleViewer(request, response, storage, host); return; }
     const credential = authenticate(request.headers.authorization);
     if (!credential) { httpFailure(response, 401, 'Local token required'); return; }
+    const presentedSession = typeof request.headers['mcp-session-id'] === 'string' ? sessions.get(request.headers['mcp-session-id']) : undefined;
+    const matchingSession = presentedSession && timingSafeEqual(presentedSession.credential, credential.key) ? presentedSession : undefined;
+    metadata.identify(observation, matchingSession?.clientId ?? credential.clientId, request.headers.authorization!.slice(7),
+      request.headers['mcp-session-id'], matchingSession?.transport.sessionId);
     const origin = request.headers.origin;
     if (origin !== undefined && !origins.has(origin)) { httpFailure(response, 403, 'Origin forbidden'); return; }
     if (request.url !== '/mcp') { httpFailure(response, 404, 'Endpoint not found'); return; }
@@ -159,6 +171,7 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
       if (request.method === 'POST') {
         try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))); }
         catch { httpFailure(response, 400, 'Invalid JSON', -32700); return; }
+        metadata.capture(observation, body);
         // Current MCP requires one message per POST; no protocol batch bridge.
         if (body === null || typeof body !== 'object' || Array.isArray(body)) {
           httpFailure(response, 400, 'Invalid protocol request', -32600); return;
@@ -175,11 +188,11 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
       if (request.method !== 'POST' || !isInitializeRequest(body)) { httpFailure(response, 400, 'Initialization required'); return; }
       initializing = true;
       const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: randomUUID, enableJsonResponse: true,
-        onsessioninitialized(id) { sessions.set(id, created); },
+        onsessioninitialized(id) { sessions.set(id, created); metadata.update(observation, value => { value.fields.mcpSessionId = id; }); },
       });
       const server = createMapMcpServer(storage,
         { actorId: config.actorId, clientId: credential.clientId, viewerOrigin: `http://${host}`, toolsOnly: credential.toolsOnly }, control);
-      const created: Session = { credential: credential.key, server, transport, pending: new Set(), closing: false };
+      const created: Session = { credential: credential.key, clientId: credential.clientId, server, transport, pending: new Set(), closing: false };
       await server.connect(transport);
       session = created;
       const closed = transport.onclose;
@@ -213,6 +226,7 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
         // error data/prose, which must not expose malformed request contents.
         const text = await result.text();
         const payload = text ? JSON.parse(text) as Record<string, unknown> : undefined;
+        metadata.response(observation, payload, classifyCallResult);
         if (payload?.error && typeof payload.error === 'object') {
           payload.error = { code: (payload.error as { code: number }).code, message: 'Protocol request failed' };
         }
@@ -229,7 +243,13 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
     }
   }
   const http = createServer((request, response) => {
-    const work = handle(request, response).catch(() => { httpFailure(response, 500, 'Service failure; outcome unknown'); });
+    const observation = requestTarget(request.url, host)?.pathname === '/mcp'
+      ? metadata.begin(request.method) : undefined;
+    const work = metadata.run(observation, async () => {
+      try { await handle(request, response, observation); }
+      catch { httpFailure(response, 500, 'Service failure; outcome unknown'); }
+      finally { metadata.finishHttp(observation, response.writableEnded ? response.statusCode : null); }
+    });
     requests.add(work); void work.finally(() => requests.delete(work));
   });
   http.requestTimeout = 30_000;
@@ -241,7 +261,7 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
     });
   } catch { throw new LocalServiceFailure('port_unavailable'); }
   let stopped: Promise<void> | undefined;
-  return { stop() {
+  return { metadataStatus: () => metadata.status(), stop() {
     if (!stopped) {
       stopping = true;
       stopped = (async () => {
@@ -250,6 +270,7 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
         await Promise.all([...sessions.values()].map(session => session.server.close()));
         await new Promise<void>((resolve, reject) => { http.close(error => error ? reject(error) : resolve()); });
         storage.close();
+        metadata.stop();
       })().catch(() => { throw new LocalServiceFailure('service_failure'); });
     }
     return stopped;
