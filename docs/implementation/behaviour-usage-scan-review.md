@@ -1,0 +1,57 @@
+# B08 independent-review response
+
+Responds to the [Claude review](https://github.com/kun-g/wayfinder_map_service/pull/100#issuecomment-6409261538) and [Codex review](https://github.com/kun-g/wayfinder_map_service/pull/100#issuecomment-6409329810) on PR #100. Only synthetic evidence and fake drivers were used. No real model, private session/configuration/metadata, database or scheduler was used.
+
+## Required regressions
+
+The first targeted run with the new regressions failed **four tests** and passed 15: unrelated dialogue appeared in output, confirmed leads produced another capture draft, proposals budgeted three instead of five calls, and Claude bookkeeping produced an extra session. The same tests pass after the changes below.
+
+| Finding | Change and evidence |
+| --- | --- |
+| Unrelated dialogue copied into every inventory/lead | Inventories omit dialogue; pending leads contain evidence locators only. Accepted reviews export only their explicitly selected exact excerpts from incident evidence. Sentinels in an unrelated session are absent from every CLI output file; unselected earlier/later turns in a related session and rejected quotes are absent from the report, state, proposal and drafts. |
+| Weekly repeats | State schema 2 records pending as well as reviewed leads with `new`/`changed`/`seen`. Unchanged screened/dismissed dispositions survive without re-supplying the old review file. Confirmations remain pinned across changed or missing evidence, never trigger another model proposal, and count as new failures only once, independently of earlier screening reminders. Seen leads do not produce another draft/proposal. |
+| Proposal and B03b budgets disagree | B03b and B08 now share reviewer selection and the actual five-call plan: two availability probes, two readings, conditional arbitration. `scan/review.ts` binds exact B01 evidence before approval, passes the same ceiling to B03b and persists one reservation at each Driver call. Tests use the existing B03b executor with a fake driver: agreement spends four, disagreement spends five, interruption retains three spent/two remaining, and an unresolved durable reservation never replays probes. Under-budget or changed-evidence plans start no calls. |
+| Claude session-less bookkeeping creates sessions | Ignore non-conversation records before creating a session. Fixed Claude fixtures include session-less `summary` and `file-history-snapshot` lines; both direct parser and full inventory tests retain one conversation. |
+| Issue closure and scheduling | PR description uses `Refs #79`. The scan command and weekly/pre-release mechanism are documented; installing a weekly schedule remains Kun's decision after integration. |
+
+## Additional review points
+
+Standards: README now includes scan tests in `npm test` and states that real scans require coordinator/Kun approval. Public CLI errors are a closed set of useful fixed messages (including the exact Node version), while private exception details remain hidden. Tests locate checkout paths with `import.meta.url`. Typed ambiguity flags replace gap-string control flow; session keys, usage merging and harness narrowing share helpers; the output-path predicate is named and parenthesized.
+
+Reviewer selection and the complete call plan have one pure source shared with B03b. The scanner uses the B07 `CallResult` type and the existing evidence result-class list. The tiny domain-separated request hash stays local to keep the source-only scan CLI independent of a runtime import of shipped service modules; a conformance test compares it with B07's `requestIdHash`. This is a deliberate alternative to importing the runtime helper, not an untested second protocol.
+
+Spec: automatic signals stay pending until screening and produce no model proposal or capture draft. Injected Codex AGENTS/environment messages, Claude `isMeta` and command output cannot supply human quotations. Skill recognition requires an explicit invocation, including Claude slash/Skill-tool calls; maintenance reads and negated mentions do not count. The fresh-launch fixture removes the native ID and documents the resulting separate launch/native rows instead of guessing by timestamp. Correlation records distinguish native ID plus harness from credential fingerprint joins. Capture drafts carry the selected human quote references while leaving human words and other admission fields unset.
+
+Refusal classes remain grouped into one screening lead per session, with every native/service call's exact result class retained in the inventory. This intentionally avoids multiple speculative reminders; B04 splits concrete incidents after screening. The grouping never treats different refusal classes as the same authorization verdict.
+
+## Validation
+
+Final verification after merging `origin/main` at `046043e` on 2026-10-26: Node **26.3.0** passed `npm run build`, `npm test` (**25 files / 1628 tests**), `npm run typecheck` and whitespace checks. This includes 26 scan tests and five tests of the real B03b handoff with fake drivers. The earlier run before that main update also passed (**24 files / 1511 tests**). The synthetic manual command still produces the summary recorded in the implementation document: 11 sessions, eight calls, 19 pending leads, zero failures, zero proposed invocations and zero models started.
+
+The full suite uses the temporary private-files guard described in the [implementation record](behaviour-usage-scan.md#verification-and-self-review), removed after the run. One earlier full run used Node 26.10.0 in npm's script subprocess and failed the repository's runtime guards; it is not counted as a pass. A temporary local script-shell wrapper prepends the resolved Node 26.3.0 binary for npm scripts; no global configuration or version checks change.
+
+Standards self-review checks minimal private output, safe diagnostics, shared B03b semantics, durable per-invocation accounting and no scan execution imports. Spec self-review checks all four mandatory regressions, conservative authorization/purpose handling, retained decisions, B04 drafts and no scheduler. Independent re-review and merge remain with the coordinator.
+
+## Second re-review: continue approved multi-lead work
+
+The [Claude re-review](https://github.com/kun-g/wayfinder_map_service/pull/100#issuecomment-6409980380) confirmed the earlier fixes and found that one pending run, or the first recorded run on resume, stopped the entire Batch. Four new synthetic regressions initially failed while the original five handoff tests passed: undecided arbitration, rejected readings, a Driver exception and a durable checkpoint between leads each left the second lead at **zero** calls.
+
+The executor now continues other approved leads after a human-verdict boundary or individual failure. Resume skips every already-started run and executes the unstarted runs without replaying any reservation. A shared helper supplies work IDs; per-lead issues explain skipped or failed runs. Each B03b round records its own five-call maximum, while the ledger enforces the approved aggregate maximum. Tests cover two-lead arbitration reaching ten calls, continuation after rejected readings or Driver failure, and resuming both completed and partial prefixes with unchanged earlier results.
+
+Other review suggestions were handled as follows:
+
+| Suggestion | Response |
+| --- | --- |
+| Slash tag after command-message | Recognize the Claude command-name tag throughout a user row; the reordered synthetic case failed before the fix. |
+| Compaction / older injected instructions | Exclude `isCompactSummary` rows and `user_instructions` wrappers from human evidence; both synthetic cases failed before the fix. These are conservative marker exclusions, not a claim of verification against private transcripts. |
+| Whole-Batch ceiling recorded for each round | B03b receives the round's approved maximum; a two-lead test checks both native approval files contain five, while the Batch ledger caps ten. |
+| Post-call ledger failure loses paid output | Return the actual response to B03b even if its ledger save fails, and report storage failure separately. The fixed test checks the native paid output and review survive, no more calls start while the shared ledger is unavailable, and unstarted leads resume from the last durable reservation. |
+| Skill-only quotes include an earlier unrelated user turn | A user-row signal starts at that invocation. The synthetic earlier-turn sentinel test failed before the fix and now rejects that quotation. |
+| Unchecked scan hash | Removed the unused `scanEvidenceHash`. The operator binds the lead to complete B01 evidence; the exact approved B01 hash remains enforced before execution. |
+| Pinned test changes no evidence | The test now adds a second native write, asserts that the evidence hash changed and checks the original confirmation remains pinned. |
+| Layout, duplicated expressions and indirect imports | README distinguishes the quota-free CLI from the approved executor and lists `review-plan.ts`; work IDs and quote matching share helpers; reviewer selection accepts only the fields it reads; callers import selection directly from its source. |
+| Remove legacy state migration | Retained the small schema-1 reminder migration. Earlier commands on this reviewed branch already emitted that format; preserving their reminded IDs avoids silently resetting deduplication when reusing those outputs. This does not expand source discovery or model execution. |
+
+Targeted validation passes **40 scan/handoff tests** and **81 existing B03b tests**. Only synthetic records and fake drivers are used, with no real transcript/configuration/metadata reads, models, services or schedules. The four mandatory multi-lead red tests are now green; Standards and Spec self-review also checked failure isolation, durable output retention and the existing private-output boundary.
+
+Final second-round verification on 2026-10-26 against current `origin/main` at `046043e`: Node **26.3.0**, `npm run build`, full `npm test` (**25 files / 1637 tests**), `npm run typecheck` and `git diff --check` all pass. The same temporary private-files guard and local npm runtime wrapper described above were removed after verification; no tests were skipped or assertions bypassed. No real models ran.

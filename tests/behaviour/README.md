@@ -16,12 +16,13 @@ Listing and validation start no service or model. Manual runners start isolated 
 | `upgrade-checks.ts` | Upgrade compatibility checks, listed apart from the 26 |
 | `seeds/` | Seed Maps and the shared capture/Controller write plan (`steps.ts`); `f11.json` is the redacted capture of a real Map |
 | `capture/`, `captures/` | Read-only problem capture tool, synthetic verification and admitted/paused capture traces (B04) |
+| `scan/` | Quota-free usage scan CLI, pending leads, B04 drafts and Batch proposals (B08); `scan/review.ts` separately executes explicitly approved B03b work |
 | `fixtures/` | Working-directory fixtures copied into the agent's directory |
 | `interactive/` | Manual Codex/Claude interactive acceptance, native import and fixed fixtures (B09b); see its [runbook](interactive/README.md) |
 | `runner/` | The runner: isolated service, Controller, Codex Driver, normalizer (B02a) |
 | `chatgpt/` | Manual isolated ChatGPT Batch preparation, relay capture and operator checklist (B09a; real acceptance pending) |
 | `verdict.ts`, `report.ts` | Verdicts of Attempts and cells, and the comparison report (B03a) |
-| `model-review.ts`, `review-verdict.ts`, `review-no-writes.ts`, `review-types.ts`, `review-cli.ts`, `review-run.ts` | Other-vendor model readings, their evidence boundary, isolated CLI Driver and manual command (B03b) |
+| `model-review.ts`, `review-plan.ts`, `review-verdict.ts`, `review-no-writes.ts`, `review-types.ts`, `review-cli.ts`, `review-run.ts` | Other-vendor model readings, shared invocation plan, evidence boundary, isolated CLI Driver and manual command (B03b) |
 
 ```sh
 node tests/behaviour/cli.ts list       # candidates, readiness, item counts, capture inventory
@@ -31,6 +32,18 @@ node tests/behaviour/cli.ts validate   # structural validation and capture inven
 ```
 
 Use Node 26.3.0. `library.test.ts` runs in `npm test`; it validates the library and pins check semantics on small fixed evidence.
+
+## Usage scans
+
+Run the [manual usage scan](../../docs/implementation/behaviour-usage-scan.md) weekly and before releases with explicit private sources and a fresh private output directory. It starts no model and creates no schedule. Its safe synthetic example is:
+
+```sh
+node tests/behaviour/scan/cli.ts --input tests/behaviour/fixtures/scan/input.json --out "$FRESH_SCAN_OUTPUT"
+```
+
+`scan/*.test.ts` runs in `npm test` with synthetic records and fake review drivers. Workers/reviewers do not run real scans; the coordinator or Kun needs explicit approval before reading real sources. Installing a weekly schedule remains Kun's decision after integration.
+
+For subsequent scans, pass `--state "$PREVIOUS_SCAN_OUTPUT/state.json"` to retain seen leads and confirmations. Pending observations produce no model work or capture drafts until screened. Inspect new/changed evidence before asking for quota approval; metadata alone never establishes a failure or human authorization. Complete the generated input drafts through B04 before admission to this library. The separately approved `scan/review.ts` handoff uses B03b's exact call plan and meters each probe/reading/arbitration through the same ledger.
 
 ## A Scenario
 

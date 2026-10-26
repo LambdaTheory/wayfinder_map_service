@@ -9,14 +9,9 @@ import { decideReviews, evidenceHash, evidenceLocations, missingForReview, revie
 import type { Review, ReviewSummary } from './review-verdict.ts';
 import { expectationSupport, judgementItems } from './scenario.ts';
 import type { Capability, Item, Scenario } from './scenario.ts';
-
-export interface Reviewer { cli: 'codex' | 'claude'; model: string }
-export function reviewersFor(a: AttemptRecord): { reviewer: Reviewer; arbiter: Reviewer } {
-  const claude = a.combination.harness === 'claude' || /claude|sonnet|opus|haiku|fable/i.test(
-    a.combination.visibleModel.known ? a.combination.visibleModel.value : a.combination.requestedModel);
-  return claude ? { reviewer: { cli: 'codex', model: 'gpt-6.1-sol' }, arbiter: { cli: 'codex', model: 'gpt-6-astra' } }
-    : { reviewer: { cli: 'claude', model: 'claude-sonnet-5-5' }, arbiter: { cli: 'claude', model: 'claude-opus-5-5' } };
-}
+import { reviewCalls } from './review-plan.ts';
+import type { Reviewer } from './review-plan.ts';
+export type { Reviewer } from './review-plan.ts';
 
 export interface ReviewItem { id: string; kind: 'required' | 'must-not' | 'expect' | 'quality'; text: string; criterion: string }
 export function reviewItems(s: Scenario, a: AttemptRecord, supports: Partial<Record<Capability, boolean | 'unverified'>> = clientProfiles[a.combination.harness].supports): ReviewItem[] {
@@ -115,7 +110,7 @@ export async function reviewAttempt(s: Scenario, a: AttemptRecord, driver: Revie
   const summary: ReviewSummary = { schema: 'wayfinder-model-review/1', roundId, evidenceHash: evidenceHash(a), path, reviews: [], responseIds: [], pending: [] };
   // Approval provenance exists before any probe, even if the process is killed during the first call.
   writeFileSync(join(dir, 'review-plan.json'), JSON.stringify(options.approval ?? { mode: 'direct-driver', attemptId: a.attemptId }, null, 2), { flag: 'wx', mode: 0o600 });
-  const targets = reviewersFor(a); const previous = savedReviews(a);
+  const plannedCalls = reviewCalls(a, items.length > 0); const previous = savedReviews(a);
   const ids = new Set((a.modelReviews ?? []).flatMap(r => [...(r.responseIds ?? []), ...r.reviews.flatMap(x => x.readingId ? [x.readingId] : [])]));
   let count = 0;
   const all = () => [...previous, ...summary.reviews];
@@ -138,15 +133,15 @@ export async function reviewAttempt(s: Scenario, a: AttemptRecord, driver: Revie
   let failure: string | undefined;
   try {
     if (items.length) {
-      for (const target of [targets.reviewer, targets.arbiter]) {
+      for (const { target } of plannedCalls.filter(c => c.kind === 'availability')) {
         const response = await call('availability', target, 'Availability check only. Reply with exactly AVAILABLE. Do not use tools.');
         if (response.text.trim() !== 'AVAILABLE') throw new Error(`${target.model}: availability check returned an unexpected response`);
       }
       const input = prompt(s, a, items);
-      await call('review', targets.reviewer, input, items);
-      await call('review', targets.reviewer, input, items);
+      for (const { target } of plannedCalls.filter(c => c.kind === 'review')) await call('review', target, input, items);
       const disputed = items.filter(i => { const d = decideReviews(i.id, all(), a); return 'open' in d && d.next === 'arbitration'; });
-      if (disputed.length) await call('arbitration', targets.arbiter, prompt(s, a, disputed, all().filter(r => disputed.some(i => i.id === r.itemId))), disputed);
+      if (disputed.length) await call('arbitration', plannedCalls.find(c => c.kind === 'arbitration')!.target,
+        prompt(s, a, disputed, all().filter(r => disputed.some(i => i.id === r.itemId))), disputed);
     }
   } catch (e) { failure = e instanceof Error ? e.message : 'review driver failed; see private invocation output'; }
   summary.pending = items.flatMap(i => {

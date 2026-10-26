@@ -7,10 +7,11 @@ import { attemptSchema } from './evidence.ts';
 import type { AttemptRecord } from './evidence.ts';
 import { library } from './library.ts';
 import { CliReviewDriver } from './review-cli.ts';
-import { reviewAttempt, reviewersFor, reviewItems } from './model-review.ts';
+import { reviewAttempt, reviewItems } from './model-review.ts';
 import type { ReviewDriver } from './model-review.ts';
 import { decideReviews, evidenceHash, savedReviews } from './review-verdict.ts';
 import { asScenario, upgradeChecks } from './upgrade-checks.ts';
+import { reviewCalls, reviewersFor } from './review-plan.ts';
 
 function load(dir: string) {
   const text = readFileSync(join(dir, 'attempt.json'), 'utf8');
@@ -39,9 +40,10 @@ export function reviewPlan(dirs: string[], retry = false) {
       return 'open' in d && d.next !== 'human';
     });
     if (repeated && !items.length) throw new Error('No retryable items: completed decisions and human verdict boundaries cannot be re-read');
-    return { directory: resolve(dir), attemptId: attempt.attemptId, evidenceHash: evidenceHash(attempt), items: items.map(i => i.id), ...reviewersFor(attempt),
-      availabilityCalls: items.length ? 2 : 0, reviewCalls: items.length ? 2 : 0, arbitrationCeiling: items.length ? 1 : 0,
-      callCeiling: items.length ? 5 : 0 };
+    const calls = reviewCalls(attempt, items.length > 0);
+    return { directory: resolve(dir), attemptId: attempt.attemptId, evidenceHash: evidenceHash(attempt), items: items.map(i => i.id), ...reviewersFor(attempt), calls,
+      availabilityCalls: calls.filter(c => c.kind === 'availability').length, reviewCalls: calls.filter(c => c.kind === 'review').length,
+      arbitrationCeiling: calls.filter(c => c.kind === 'arbitration').length, callCeiling: calls.length };
   });
 }
 
