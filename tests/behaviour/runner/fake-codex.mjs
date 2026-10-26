@@ -2,7 +2,7 @@
 // A stand-in for `codex exec` in tests: makes real MCP calls to the run's service and prints Codex-shaped JSON
 // events, so the runner, normalizer and receipts are exercised without a model. It plays S0b: the first turn
 // pages the catalog and asks to confirm the Destination; a reply creates one Map and publishes a Ticket.
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 // The account's real home, not the private HOME the runner gives the client.
 const realHome = userInfo().homedir;
@@ -13,7 +13,7 @@ const args = process.argv.slice(2);
 if (args[0] === '--version') { console.log('codex-cli 0.0.0-fake'); process.exit(0); }
 const url = /mcp_servers\.wayfinder\.url="([^"]+)"/.exec(args.join(' '))[1];
 const sessionDrill = args[args.indexOf('-m') + 1] === 'fake-sessions';
-const resume = args[1] === 'resume' ? args.at(-2) : null;
+const resume = args[args.indexOf('exec') + 1] === 'resume' ? args.at(-2) : null;
 const thread = resume ?? randomUUID();
 const prompt = await new Promise(resolve => { let text = ''; process.stdin.on('data', d => { text += d; }); process.stdin.on('end', () => resolve(text)); });
 const emit = event => console.log(JSON.stringify(event));
@@ -23,7 +23,7 @@ if (prompt.includes('FAKE-SLEEP')) await new Promise(resolve => setTimeout(resol
 let session; let n = 0;
 async function rpc(method, params, notify = false) {
   const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json',
-    Accept: 'application/json, text/event-stream', ...(session ? { 'mcp-session-id': session, 'mcp-protocol-version': '2025-11-25' } : {}) },
+    Accept: 'application/json, text/event-stream', ...(process.env.WAYFINDER_TOKEN ? { Authorization: `Bearer ${process.env.WAYFINDER_TOKEN}` } : {}), ...(session ? { 'mcp-session-id': session, 'mcp-protocol-version': '2025-11-25' } : {}) },
     body: JSON.stringify({ jsonrpc: '2.0', method, params, ...(notify ? {} : { id: ++n }) }) });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   session ??= response.headers.get('mcp-session-id');
@@ -44,6 +44,23 @@ if (prompt === 'FAKE-EARLY-SKILL') {
 const tools = await rpc('tools/list', {});
 record({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: init.instructions }] } });
 record({ type: 'response_item', payload: { type: 'additional_tools', tools: tools.tools.map(t => ({ name: t.name, description: t.description })) } });
+// Exercise the launcher's actual context installation, without claiming a real model read it.
+if (process.env.CODEX_HOME.endsWith('/.codex-wayfinder')) {
+  const instructions = readFileSync(join(process.env.CODEX_HOME, 'AGENTS.md'), 'utf8');
+  const skill = readFileSync(join(process.env.HOME, '.agents/skills/wayfinder/SKILL.md'), 'utf8');
+  writeFileSync('entry-probe.json', JSON.stringify({ privateHome: process.env.HOME, codexHome: process.env.CODEX_HOME,
+    authTarget: readlinkSync(join(process.env.CODEX_HOME, 'auth.json')), authReadable: Boolean(readFileSync(join(process.env.CODEX_HOME, 'auth.json'), 'utf8')), instructionsAvailable: Boolean(instructions), skillAvailable: Boolean(skill),
+    bootstrapKeys: Object.keys(process.env).filter(k => k.startsWith('WAYFINDER_AGENT_')), args, resumed: Boolean(resume) }));
+}
+if (prompt.includes('FAKE-REFRESH')) {
+  const auth = join(process.env.CODEX_HOME, 'auth.json');
+  const token = `synthetic-refreshed-token-${randomUUID()}`;
+  rmSync(auth);
+  writeFileSync(auth, JSON.stringify({ access_token: token }), { mode: 0o600 });
+  const newer = new Date(Date.now() + 1000);
+  utimesSync(auth, newer, newer);
+  console.log(token); // Deliberate native-output leak: the runner must discover the refreshed token first.
+}
 emit({ type: 'thread.started', thread_id: thread });
 emit({ type: 'turn.started' });
 let item = 0;

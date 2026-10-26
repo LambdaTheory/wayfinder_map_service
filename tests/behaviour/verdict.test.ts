@@ -234,10 +234,10 @@ describe('upgrade checks judge the recovery path', () => {
 describe('report', () => {
   const dir = mkdtempSync(join(tmpdir(), 'wf-behave-report-'));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
-  const batch = (name: string, release: string, version: number, outcomes: { id: string; record?: AttemptRecord | null; notRun?: boolean }[], combination = 'codex:gpt-6-astra:xhigh') => {
+  const batch = (name: string, release: string, version: number, outcomes: { id: string; record?: AttemptRecord | null; notRun?: boolean }[], combination = 'codex:gpt-6-astra:xhigh', entry = 'mcp-only') => {
     const b = join(dir, name);
     mkdirSync(b, { recursive: true });
-    writeFileSync(join(b, 'batch.json'), JSON.stringify({ batchId: name, combination, entry: 'mcp-only', outcomes: outcomes.map(o => {
+    writeFileSync(join(b, 'batch.json'), JSON.stringify({ batchId: name, combination, entry, outcomes: outcomes.map(o => {
       if (o.notRun) return { attemptId: o.id, scenario: 'S12', completeness: 'not-run' };
       if (o.record) { mkdirSync(join(b, o.id), { recursive: true }); writeFileSync(join(b, o.id, 'attempt.json'), JSON.stringify({ ...o.record, service: { ...o.record.service, version: release }, subject: { ...o.record.subject, version } })); }
       return { attemptId: o.id, scenario: 'S12', completeness: 'complete', record: `${o.id}/attempt.json` };
@@ -246,6 +246,27 @@ describe('report', () => {
   };
   const failed = sample('S12', [createdMap]);
   const clean = sample('S12');
+
+  test('Dedicated cells, missing Attempts and baselines stay separate from MCP-only', () => {
+    const mcp = batch('B-entry-mcp', '2.0.2', 1, [{ id: 'S12-1', record: failed }]);
+    const dedicated = batch('B-entry-dedicated', '2.0.2', 1,
+      [{ id: 'S12-1', record: { ...clean, entry: 'dedicated' } }, { id: 'S12-2', record: null }], 'codex:gpt-6-astra:xhigh', 'dedicated');
+    const report = buildReport([mcp, dedicated]);
+    expect(report.cells.map(c => [c.key.entry, c.planned, c.verdict.outcome])).toEqual([
+      ['mcp-only', 1, 'fail'], ['dedicated', 2, 'insufficient-evidence'],
+    ]);
+    expect(compare(buildReport([dedicated]), buildReport([mcp])).cells[0]!.comparison!.baseline).toBeNull();
+    const md = renderMarkdown(report);
+    expect(md).toContain('### dedicated');
+    expect(md).toContain('### mcp-only');
+    expect(md).toContain('**S12** · dedicated ·');
+    expect(md).toContain('**S12** · mcp-only ·');
+  });
+
+  test('mislabeled Attempt records cannot contaminate another Entry', () => {
+    const wrong = batch('B-entry-mismatch', '2.0.2', 1, [{ id: 'S12-1', record: { ...clean, entry: 'dedicated' } }]);
+    expect(() => buildReport([wrong])).toThrow(/Attempt Entry dedicated differs from Batch Entry mcp-only/);
+  });
 
   test('a missing attempt file and a not-run Attempt both leave the cell uncovered', () => {
     const r = buildReport([batch('B-missing', '2.0.2', 1, [{ id: 'S12-1', record: null }, { id: 'S12-2', notRun: true }])]);
