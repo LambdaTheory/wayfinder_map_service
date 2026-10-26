@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import type { LocalMcpService, LocalServiceConfiguration } from '../../../src/mcp-service.ts';
 import { attemptSchema, redact } from '../evidence.ts';
 import type { AttemptRecord, Completeness, EventRecord, Field, GivenRules, Surface } from '../evidence.ts';
@@ -32,6 +33,8 @@ export interface Capture {
   effort?: string;
   /** Exact tools exposed by the client, not a copy from controller-tools.json. */
   toolsShown?: Tool[];
+  /** Exact raw/wire.json#rpc-N reference for the chat's pre-turn tools/list response. */
+  toolsShownSource?: string;
   versionSourceEvidence?: string;
   resources?: Surface;
   prompts?: Surface;
@@ -60,6 +63,8 @@ export class ChatGPTAttempt {
   private tools: Tool[] = [];
   private readonly isolation: ReturnType<typeof observeIsolation>[] = [];
   private exchanges: Exchange[] = [];
+  private readonly snapshotBoundaries = new Map<string, number>();
+  private wireSinceRestart = 0;
   private lastMessages = '';
   private stopped = false;
   private upgraded = false;
@@ -132,7 +137,7 @@ export class ChatGPTAttempt {
   private observe(e: Exchange) {
     this.exchanges.push(e);
     this.saveRaw('wire.json', this.exchanges);
-    if (this.activeTurn === null) return;
+    if (this.activeTurn === null || e.httpMethod !== 'POST') return;
     if (e.request.method === 'resources/read') {
       this.record.events.push({ seq: this.record.events.length, at: e.at, actor: 'agent', session: this.scenario.turns[this.activeTurn]!.session,
         turn: this.activeTurn, kind: 'resource-read', uri: String((e.request.params as { uri?: unknown })?.uri ?? ''),
@@ -163,6 +168,8 @@ export class ChatGPTAttempt {
     if (turn.answers && (!proposalConfirmed || !turn.answers.cue.test(this.lastMessages)))
       throw new Error(`Precondition unmet: confirm the actual proposal before sending a reply: ${turn.answers.proposal}`);
     this.activeTurn = index;
+    const snapshotKey = `${this.phase}:${turn.session}`;
+    if (!this.snapshotBoundaries.has(snapshotKey)) this.snapshotBoundaries.set(snapshotKey, this.exchanges.length);
     this.relay.token = this.tokens[turn.session as 'A' | 'B'];
     const at = now();
     this.record.sessions.find(s => s.label === turn.session)!.turns.push({ index, input: turn.say, startedAt: at, endedAt: '', durationMs: 0 });
@@ -180,7 +187,7 @@ export class ChatGPTAttempt {
       || capture.messages.some(m => !m || typeof m.text !== 'string' || !m.text.trim() || !(m.afterCall === null || typeof m.afterCall === 'string'))
       || (capture.messagesComplete && !capture.messages.length))
       throw new Error('Capture needs messages with text/afterCall and messagesComplete');
-    for (const key of ['nativeId', 'clientVersion', 'visibleModel', 'effort', 'versionSourceEvidence'] as const)
+    for (const key of ['nativeId', 'clientVersion', 'visibleModel', 'effort', 'versionSourceEvidence', 'toolsShownSource'] as const)
       if (capture[key] !== undefined && (typeof capture[key] !== 'string' || !capture[key]!.trim())) throw new Error(`Invalid capture ${key}`);
     for (const key of ['resources', 'prompts'] as const) if (capture[key] !== undefined && !['available', 'unavailable', 'undocumented'].includes(capture[key]!)) throw new Error(`Invalid capture ${key}`);
     if (capture.resources !== undefined && capture.resources !== 'unavailable' && clientProfiles.chatgpt.supports['resource-read'] === false)
@@ -226,11 +233,37 @@ export class ChatGPTAttempt {
     if (capture.effort) this.record.combination.effort = { known: true, value: capture.effort };
     const given = this.record.given.at(-1)!;
     if (capture.toolsShown) {
-      given.toolDescriptions = { known: true, value: Object.fromEntries(capture.toolsShown.map(t => [t.name, t.description ?? ''])) };
-      given.rulesSource = { kind: 'tool-parameter', tool: 'map_apply', description: capture.toolsShown.find(t => t.name === 'map_apply')!.inputSchema.properties!.version!.description! };
+      // The operator's declaration alone cannot establish which definitions this chat received.
+      const callIds = new Set(calls.filter(e => e.kind === 'tool-call' && e.server === 'wayfinder').map(e => e.kind === 'tool-call' ? e.callId : ''));
+      const sessionIds = new Set(this.exchanges.filter(e => e.httpMethod === 'POST' && callIds.has(e.id)).map(e => e.sessionId));
+      const sessionId = sessionIds.size === 1 ? [...sessionIds][0] : null;
+      const boundary = this.snapshotBoundaries.get(`${this.phase}:${turn.session}`)!;
+      const listed = sessionId ? this.exchanges.slice(this.wireSinceRestart, boundary).findLast(e => e.httpMethod === 'POST'
+        && e.request.method === 'tools/list' && e.sessionId === sessionId) : undefined;
+      const source = listed ? `raw/wire.json#${listed.id}` : null;
+      const result = listed?.response as { result?: { tools?: unknown }; error?: unknown } | null | undefined;
+      const verified = listed && listed.status === 200 && !result?.error && capture.toolsShownSource === source
+        && isDeepStrictEqual(capture.toolsShown, result?.result?.tools);
+      const reason = !sessionId ? 'no unambiguous MCP session from this turn’s tool calls'
+        : !listed ? 'no tools/list for this MCP session before its first turn in this phase'
+          : capture.toolsShownSource !== source ? 'missing or incorrect reference to the last pre-turn tools/list'
+            : 'toolsShown differs from the recorded tools/list result or that request failed';
+      this.saveRaw(`tool-snapshot-${index}.json`, { verified: !!verified, reason: verified ? null : reason, source,
+        suppliedSource: capture.toolsShownSource ?? null, sessionId: sessionId ?? null, phase: this.phase, session: turn.session,
+        firstTurnWireBoundary: boundary, wireSinceRestart: this.wireSinceRestart });
+      if (verified) {
+        given.toolDescriptions = { known: true, value: Object.fromEntries(capture.toolsShown.map(t => [t.name, t.description ?? ''])) };
+        given.rulesSource = { kind: 'tool-parameter', tool: 'map_apply', description: capture.toolsShown.find(t => t.name === 'map_apply')!.inputSchema.properties!.version!.description! };
+        this.record.missing = this.record.missing.filter(m => m !== `given.${this.phase}.toolDescriptions` && m !== `given.${this.phase}.rulesSource`);
+      } else {
+        given.toolDescriptions = unknown(reason);
+        given.rulesSource = { kind: 'unknown', reason };
+        for (const field of ['toolDescriptions', 'rulesSource']) {
+          const marker = `given.${this.phase}.${field}`;
+          if (!this.record.missing.includes(marker)) this.record.missing.push(marker);
+        }
+      }
     }
-    this.record.missing = this.record.missing.filter(m => !(capture.toolsShown && m === `given.${this.phase}.toolDescriptions`)
-      && !(capture.toolsShown && m === `given.${this.phase}.rulesSource`));
     if (capture.resources) given.resources = capture.resources;
     if (capture.prompts) given.prompts = capture.prompts;
     this.lastMessages = capture.messages.map(m => m.text).join('\n');
@@ -255,6 +288,7 @@ export class ChatGPTAttempt {
     await writeCanaryCheckout(checkoutRoot, target);
     await this.controller.close(); await this.service.stop();
     this.phase = 'after-restart';
+    this.wireSinceRestart = this.exchanges.length;
     this.record.events.push({ seq: this.record.events.length, at: now(), actor: 'controller', session: null, turn: null, kind: 'controller', action: 'restart-canary' });
     await this.startService(target);
     if (this.upgradeRecovery === 'new-chat') this.relay.token = this.tokens.B;

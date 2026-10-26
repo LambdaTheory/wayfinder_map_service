@@ -57,7 +57,7 @@ export function checklist(scenarios: Scenario[], surface: string, count: number,
     '5. Send exactly the printed Scenario line with the plugin mention. Never paste this checklist, a version, controller-tools.json or expected outcomes into the chat.',
     '6. Collect all native assistant messages and other relevant activity. The relay captures actual Wayfinder calls in raw/wire.json; position messages using those rpc-N call IDs.',
     '7. Write a capture JSON in the private raw directory (format in tests/behaviour/chatgpt/README.md), then `end /absolute/path/capture.json`. Repeat turns in order.',
-    '8. Preserve the actual client tool snapshot and native evidence of where it obtained version. Controller definitions alone do not prove model visibility. Missing evidence stays missing.',
+    '8. Preserve the actual client tool snapshot and native version-source evidence. toolsShown needs toolsShownSource (raw/wire.json#rpc-N), matching this MCP session’s last tools/list before its first begin in the phase; missing/mismatched records stay unknown. Never use Controller definitions.',
     '9. Enter `next` after all turns. Ctrl-C, stdin EOF or `stop` preserves unfinished Attempts and closes only owned resources.',
     '10. If the operator stopped the daily ChatGPT connector, restore it under approval, refresh its normal tool snapshot and record both actions with the Batch evidence. The command does not restore it automatically.',
     '', '## Scenario messages (operator only)', ''];

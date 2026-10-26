@@ -45,6 +45,17 @@ Other suggestions addressed:
 
 Two suggestions remain deliberate limits: the restartable in-process service retains its small database/credential setup separately from the subprocess runner, while reusing ports, Controller and seeds; runtime databases/evidence stay in the mandated cache directory. The runbook requires the coordinator to archive the stopped Batch's evidence to an approved durable location before acceptance because macOS can purge Caches. The command does not silently select or write another destination.
 
+## Second re-review remediation
+
+Read the complete **Independent re-review (Claude /code-review)** comment. This round addresses its two must-fix findings and the related DELETE evidence defect; it does not claim that every optional design suggestion was implemented.
+
+- Each fake fixture now uses a random tunnel UUID and therefore its own lease directory. CLI Batch IDs also use random UUIDs. Cleanup targets only that fixture's lease; it cannot delete the lease of another gate run. `verify-parallel.mjs` runs two independent copies of the ChatGPT suite in one checkout, or two complete `npm test` gates with `--full`.
+- A supplied `toolsShown` array no longer establishes visibility by itself. Its `toolsShownSource` must name the exact `raw/wire.json#rpc-N` record for the same MCP session as the turn's observed tool calls. It must be the last POST `tools/list` before that session's first `begin` in the phase, after any service restart, with a successful result structurally identical to the full supplied definitions. Missing, mismatched, late, superseded and other-session evidence remains unknown. The validation result, source reference, session and phase boundary are preserved in `raw/tool-snapshot-N.json`.
+- Eight canary cases exercise the actual capture import and `judgeAttempt`, with the model item reviewed: a matching pre-turn snapshot passes; no list, no reference, changed version, changed rule, another session, a superseded reference and a late list all leave the upgrade items unknown. The old-chat refusal test also verifies that a prior service/session's reference cannot populate the new phase.
+- The relay records HTTP method and rejects bodies on session DELETE requests; the observer derives JSON-RPC events only from POST. A regression proves DELETE cannot fabricate a `map_apply` event.
+
+Wire equality establishes what the identified client session fetched, not a direct observation of model cognition. Native chat evidence, intended-chat attribution, actual version use and Kun's acceptance are still required; an uncorrelatable real client stays unknown rather than inviting a Controller substitute. No shared verdict semantics, product code, release number or approval gate changed in this round.
+
 ## Verification
 
 Node `v26.3.0`; `npm ci`; latest main merged first. Final gates ran in this order:
@@ -52,13 +63,13 @@ Node `v26.3.0`; `npm ci`; latest main merged first. Final gates ran in this orde
 | Command | Result |
 | --- | --- |
 | `npm run build` | Passed |
-| `npm test` | 20 files, 1338 tests passed, including 17 fake-tunnel ChatGPT regressions |
+| `node tests/behaviour/chatgpt/verify-parallel.mjs --full` | Two concurrent `npm test` gates, each 20 files / 1347 tests passed, including 26 ChatGPT regressions |
 | `npm run typecheck` | Passed |
 | `git diff --check` | Passed |
 
-The targeted ChatGPT/verdict run also passed 52 tests. The new regression tests only requested their own temporary loopback services. The fake cannot invoke real cloudflared, never reads its fixture credential path, and marks reports as fake. Daily-service observations used listener metadata without an HTTP request. The real database was neither discovered nor opened for comparison. Tests remove only their own directories and processes.
+The targeted ChatGPT suite passed 26 tests, and the default `verify-parallel.mjs` check passed two concurrent copies (26 each). The new regression tests only requested their own temporary loopback services. The fake cannot invoke real cloudflared, never reads its fixture credential path, and marks reports as fake. Daily-service observations used listener metadata without an HTTP request. The real database was neither discovered nor opened for comparison. Tests remove only their own directories and processes.
 
-The original separate manual verification (five cases; 18 files / 1301 engineering tests at release 2.0.2) is historical evidence. The gate results above supersede it for this revision.
+The original separate manual verification (five cases; 18 files / 1301 engineering tests at release 2.0.2) and first remediation's 20 files / 1338 tests plus 52 targeted ChatGPT/verdict tests are historical evidence. The gate results above supersede them for this revision.
 
 ## Standards self-check
 

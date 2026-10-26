@@ -1,5 +1,6 @@
 // Merge-gate checks: fake cloudflared only, no model and no real tunnel.
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { connect } from 'node:net';
@@ -8,6 +9,8 @@ import { join } from 'node:path';
 import { test } from 'vitest';
 import { createHttpTestClient } from '../../helpers/mcp-http-client.mjs';
 import { ChatGPTAttempt } from './attempt.ts';
+import type { Capture } from './attempt.ts';
+import type { Exchange } from './relay.ts';
 import { checklist, initialFive, selectScenarios } from './plan.ts';
 import { connectorsFrom, acquireTunnel, hasLocalConnector, readTunnelConfig } from './tunnel.ts';
 import { clientVisibility, runBatch, runRoot } from './run.ts';
@@ -15,17 +18,19 @@ import { judgeAttempt } from '../verdict.ts';
 import { asScenario, upgradeChecks } from '../upgrade-checks.ts';
 import { observeIsolation, everydayListener, unchangedListener } from './isolation.ts';
 
-const tunnelId = '11111111-1111-4111-8111-111111111111';
 mkdirSync(runRoot, { recursive: true, mode: 0o700 });
 const fresh = () => mkdtempSync(join(runRoot, 'verify-chatgpt-'));
 function fixture(root: string) {
+  const tunnelId = randomUUID();
   const configPath = join(root, 'config.yml');
   // No credential file exists: only real cloudflared would need to open it.
   writeFileSync(configPath, `tunnel: ${tunnelId}\ncredentials-file: ${join(root, 'not-readable-credentials.json')}\n`);
-  return { root, dir: root, configPath, fake: true, hostname: 'test.example.com' };
+  return { id: tunnelId, root, dir: root, configPath, fake: true, hostname: 'test.example.com' };
 }
 const attemptOptions = (root: string, id: string) => ({ dir: join(root, 'attempt'), batchId: 'verification', attemptId: id, scenario: selectScenarios([id])[0]!,
   surface: 'app', model: 'fake', commit: 'verification', version: JSON.parse(readFileSync('package.json', 'utf8')).version as string });
+const wireOf = (a: ChatGPTAttempt): Exchange[] => JSON.parse(readFileSync(join(a.dir, 'raw/wire.json'), 'utf8'));
+const listedSource = (a: ChatGPTAttempt) => `raw/wire.json#${wireOf(a).findLast(e => e.httpMethod === 'POST' && e.request.method === 'tools/list')!.id}`;
 
 async function eventually(check: () => boolean, detail: () => string = () => 'condition not observed') {
   const deadline = Date.now() + 15_000;
@@ -37,7 +42,7 @@ async function eventually(check: () => boolean, detail: () => string = () => 'co
 
 async function cliFixture(fault?: 'throw' | 'reject' | 'exit', scenarios = 'F11') {
   const root = fresh(); const config = fixture(root);
-  const batchId = `cli-fault-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const batchId = `cli-fault-${randomUUID()}`;
   const batchDir = join(runRoot, batchId);
   const trigger = join(root, 'trigger'); const hook = join(root, 'fault.mjs');
   writeFileSync(hook, `import { existsSync } from 'node:fs';\nconst timer = setInterval(() => { if (!existsSync(${JSON.stringify(trigger)})) return; clearInterval(timer); ${fault === 'throw' ? "throw new Error('injected uncaught failure')" : fault === 'reject' ? "void Promise.reject(new Error('injected rejected failure'))" : 'process.exit(7)'}; }, 20); timer.unref();\n`);
@@ -58,7 +63,7 @@ async function cliFixture(fault?: 'throw' | 'reject' | 'exit', scenarios = 'F11'
       try { process.kill(JSON.parse(readFileSync(run, 'utf8')).pid, 'SIGTERM'); } catch { /* owned fake already exited */ }
       await eventually(() => !existsSync(join(root, 'fake-connector.json')));
     }
-    rmSync(join(runRoot, `opencode-${tunnelId}.lock`), { recursive: true, force: true });
+    rmSync(join(runRoot, `opencode-${config.id}.lock`), { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true }); rmSync(batchDir, { recursive: true, force: true });
   };
   try { await waitFor(/Ready F11-1/); }
@@ -78,7 +83,7 @@ test('checklist selects the initial five without injecting version or controller
 }, 30_000);
 
 test('tunnel refuses foreign connectors, unknown remote records and an existing lease; restores config on exit', async () => {
-  const root = fresh(); const options = fixture(root); const original = readFileSync(options.configPath, 'utf8');
+  const root = fresh(); const options = fixture(root); const tunnelId = options.id; const original = readFileSync(options.configPath, 'utf8');
   try {
     assert.equal(readTunnelConfig(options.configPath).id, tunnelId);
     assert.equal(hasLocalConnector('42 /opt/homebrew/bin/cloudflared tunnel --config config.yml run opencode'), true);
@@ -214,9 +219,9 @@ test('canary upgrade restarts only the owned database; old version refuses witho
 }, 30_000);
 
 test('manual command uses fake cloudflared and owned listeners only, ignores daily environment, cleans up on SIGTERM', async () => {
-  const root = fresh(); const fixtureOptions = fixture(root);
+  const root = fresh(); const fixtureOptions = fixture(root); const tunnelId = fixtureOptions.id;
   const sentinel = join(root, 'everyday-sentinel.sqlite'); writeFileSync(sentinel, 'not a database; never open');
-  const batchId = `verify-cli-${Date.now()}`; const batchDir = join(runRoot, batchId);
+  const batchId = `verify-cli-${randomUUID()}`; const batchDir = join(runRoot, batchId);
   const child = spawn(process.execPath, ['tests/behaviour/chatgpt/run.ts', 'run', '--batch', batchId, '--scenarios', 'F11,S1,S5', '--ceiling', '3',
     '--approval', 'fake-only verification', '--hostname', 'test.example.com', '--fake-tunnel', '--config', fixtureOptions.configPath], {
     env: { ...process.env, WAYFINDER_DATABASE_PATH: sentinel, WAYFINDER_PORT: '18766', WAYFINDER_ATTACH_TOKEN: 'never-use-daily-token' }, stdio: ['pipe', 'pipe', 'pipe'],
@@ -314,22 +319,24 @@ test('an old chat is refused after upgrade and cannot take a Resource recovery p
   const a = await ChatGPTAttempt.start(options);
   let client: Awaited<ReturnType<typeof createHttpTestClient>>['client'] | undefined;
   try {
-    await a.begin();
     ({ client } = await createHttpTestClient(a.relay.port, 'ignored'));
     const oldTools = (await client.listTools()).tools;
+    const oldSource = listedSource(a);
+    await a.begin();
     await client.callTool({ name: 'map_create', arguments: { version: options.version, mapId: 'ChatGPTUpgrade', title: 'Upgrade', destination: 'Test upgrade', notes: '' } });
-    await a.end({ messagesComplete: true, messages: [{ text: 'Created.', afterCall: null }], toolsShown: oldTools });
+    await a.end({ messagesComplete: true, messages: [{ text: 'Created.', afterCall: null }], toolsShown: oldTools, toolsShownSource: oldSource });
     await client.close(); client = undefined;
     await a.upgrade(); a.operator('refresh-tools');
     await a.begin();
     ({ client } = await createHttpTestClient(a.relay.port, 'ignored'));
     const refusal = await client.callTool({ name: 'map_apply', arguments: { version: options.version, mapId: 'ChatGPTUpgrade', expectedRevision: 1, commands: [] } });
     assert.equal((refusal.structuredContent as { code: string }).code, 'version_mismatch');
-    await a.end({ messagesComplete: true, messages: [{ text: 'Refresh tools and open a new chat.', afterCall: null }], toolsShown: oldTools });
+    await a.end({ messagesComplete: true, messages: [{ text: 'Refresh tools and open a new chat.', afterCall: null }], toolsShown: oldTools, toolsShownSource: oldSource });
     await client.close(); client = undefined; await a.stop();
     assert.equal(a.record.maps[0]!.history.length, 1);
     assert.equal(a.record.given[0]!.rulesSource.kind, 'tool-parameter');
     assert.equal(a.record.given[0]!.toolDescriptions.known, true);
+    assert.equal(a.record.given.at(-1)!.rulesSource.kind, 'unknown'); // A prior service/session's artifact cannot fill this phase.
     const scenario = asScenario(upgradeChecks.find(u => u.id === options.scenario.id)!);
     const judged = judgeAttempt(scenario, a.record);
     assert.equal(judged.expect.find(g => g.id === 'refused-unwritten')!.status, 'holds');
@@ -343,6 +350,75 @@ test('an old chat is refused after upgrade and cannot take a Resource recovery p
       { ...refusalEvent, seq: seq + 2 } as typeof refusalEvent);
     assert.equal(judgeAttempt(scenario, altered).expect.find(g => g.id === 'asks-refresh')!.status, 'violated');
   } finally { await client?.close(); await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }
+}, 30_000);
+
+for (const variant of ['matched', 'no-list', 'no-reference', 'different-version', 'different-rule', 'other-session', 'stale-reference', 'late-list'] as const)
+  test(`canary snapshot import ${variant} is checked against its own pre-turn wire evidence`, async () => {
+    const root = fresh(); const options = attemptOptions(root, 'U-chatgpt-new-chat');
+    const a = await ChatGPTAttempt.start(options);
+    let client: Awaited<ReturnType<typeof createHttpTestClient>>['client'] | undefined;
+    let other: Awaited<ReturnType<typeof createHttpTestClient>>['client'] | undefined;
+    try {
+      ({ client } = await createHttpTestClient(a.relay.port, 'ignored'));
+      const initialTools = (await client.listTools()).tools;
+      const initialSource = listedSource(a);
+      await a.begin();
+      await client.callTool({ name: 'map_create', arguments: { version: options.version, mapId: 'ChatGPTUpgrade', title: 'Upgrade', destination: 'Test upgrade', notes: '' } });
+      await a.end({ messagesComplete: true, otherToolsComplete: true, messages: [{ text: 'Created (fixed test evidence).', afterCall: null }],
+        toolsShown: initialTools, toolsShownSource: initialSource });
+      assert.equal(a.record.given[0]!.rulesSource.kind, 'tool-parameter');
+      await client.close(); client = undefined;
+      await a.upgrade(); a.operator('refresh-tools'); a.operator('new-chat');
+      ({ client } = await createHttpTestClient(a.relay.port, 'ignored'));
+      // Controller data is deliberately supplied in the no-list negative case: shape alone proves nothing.
+      let tools: NonNullable<Capture['toolsShown']> = JSON.parse(readFileSync(join(a.dir, 'raw/controller-tools-after-restart.json'), 'utf8'));
+      let source: string | undefined;
+      if (!['no-list', 'late-list'].includes(variant)) {
+        tools = (await client.listTools()).tools;
+        source = listedSource(a);
+      }
+      if (variant === 'other-session') {
+        ({ client: other } = await createHttpTestClient(a.relay.port, 'ignored'));
+        await other.listTools(); source = listedSource(a);
+      }
+      if (variant === 'stale-reference') await client.listTools(); // Same content, superseded wire reference.
+      if (variant === 'no-reference') source = undefined;
+      if (variant === 'different-version') tools.find(t => t.name === 'map_apply')!.inputSchema.properties!.version!.description = 'Use version 8.8.8';
+      if (variant === 'different-rule') tools.find(t => t.name === 'map_apply')!.description += ' Extra operator-invented rule.';
+      await a.begin();
+      if (variant === 'late-list') { tools = (await client.listTools()).tools; source = listedSource(a); }
+      await client.callTool({ name: 'map_apply', arguments: { version: '9.9.9', mapId: 'ChatGPTUpgrade', expectedRevision: 1,
+        commands: [{ kind: 'ticket.create', ticket: { id: 'TimeZones', title: 'v2: Time zones', question: 'Which zones?', type: 'research' } }] } });
+      await a.end({ messagesComplete: true, otherToolsComplete: true, messages: [{ text: 'Ticket created (fixed test evidence).', afterCall: null }],
+        toolsShown: tools, ...(source ? { toolsShownSource: source } : {}), versionSourceEvidence: 'Operator assertion alone is not proof.' });
+      await client.close(); client = undefined; await other?.close(); other = undefined; await a.stop();
+      const verdict = judgeAttempt(options.scenario, a.record, { reviews: ['A', 'B'].map(by => ({ itemId: 'mismatch-as-outage', status: 'holds',
+        reason: 'fixed test review', by, role: 'review' })) });
+      const verified = variant === 'matched';
+      assert.equal(a.record.given.at(-1)!.toolDescriptions.known, verified);
+      assert.equal(a.record.given.at(-1)!.rulesSource.kind, verified ? 'tool-parameter' : 'unknown');
+      assert.equal(a.record.missing.includes('given.after-refresh.rulesSource'), !verified);
+      assert.equal(JSON.parse(readFileSync(join(a.dir, 'raw/tool-snapshot-1.json'), 'utf8')).verified, verified);
+      assert.equal(verdict.outcome, verified ? 'pass' : 'insufficient-evidence');
+      for (const id of ['writes-new-version', 'follows-canary-rule']) assert.equal(verdict.expect.find(i => i.id === id)!.status, verified ? 'holds' : 'unknown');
+      assert.equal(verdict.mustNot.find(i => i.id === 'guessed-version')!.status, verified ? 'holds' : 'unknown');
+    } finally { await client?.close(); await other?.close(); await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }
+  }, 30_000);
+
+test('a session DELETE cannot fabricate a JSON-RPC tool call', async () => {
+  const root = fresh(); const a = await ChatGPTAttempt.start(attemptOptions(root, 'F11'));
+  const { client, transport } = await createHttpTestClient(a.relay.port, 'ignored');
+  try {
+    await a.begin();
+    const response = await fetch(`http://127.0.0.1:${a.relay.port}/mcp`, { method: 'DELETE', headers: { 'mcp-session-id': transport.sessionId! },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'map_apply', arguments: { version: '9.9.9' } } }) });
+    assert.equal(response.status, 400);
+    const deleted = await fetch(`http://127.0.0.1:${a.relay.port}/mcp`, { method: 'DELETE', headers: { 'mcp-session-id': transport.sessionId! } });
+    assert.equal(deleted.status, 200);
+    assert.equal(a.record.events.some(e => e.kind === 'tool-call'), false);
+    const exchange = wireOf(a).at(-1)!;
+    assert.equal(exchange.httpMethod, 'DELETE'); assert.deepEqual(exchange.request, {});
+  } finally { await client.close(); await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }
 }, 30_000);
 
 test('aborted POST and tools/call without params do not crash the full fake-tunnel CLI', async () => {
@@ -362,7 +438,7 @@ test('aborted POST and tools/call without params do not crash the full fake-tunn
     f.child.stdin.end(); await f.exited;
     assert.equal(f.child.exitCode, 0, f.output());
     assert.equal(existsSync(join(f.batchDir, 'tunnel.yml')), false);
-    assert.equal(existsSync(join(runRoot, `opencode-${tunnelId}.lock`)), false);
+    assert.equal(existsSync(join(runRoot, `opencode-${f.config.id}.lock`)), false);
     assert.equal(existsSync(join(f.root, 'fake-connector.json')), false);
   } finally { await f.cleanup(); }
 }, 30_000);
@@ -373,7 +449,7 @@ for (const fault of ['throw', 'reject', 'exit'] as const) test(`${fault} path st
     writeFileSync(f.trigger, 'go'); await f.exited;
     assert.equal(f.child.exitCode, fault === 'exit' ? 7 : 1, f.output());
     await eventually(() => !existsSync(join(f.root, 'fake-connector.json')));
-    assert.equal(existsSync(join(runRoot, `opencode-${tunnelId}.lock`)), false);
+    assert.equal(existsSync(join(runRoot, `opencode-${f.config.id}.lock`)), false);
     assert.equal(existsSync(join(f.batchDir, 'tunnel.yml')), false);
     if (fault !== 'exit') {
       const record = JSON.parse(readFileSync(join(f.batchDir, 'F11-1/attempt.json'), 'utf8'));
@@ -389,7 +465,7 @@ test('new competing connector is rejected before forwarding, recorded, and abort
     f.child.stdin.write('begin\n'); await f.waitFor(/Send this Scenario message/);
     const statePath = join(f.root, 'fake-connector.json');
     const own = JSON.parse(readFileSync(statePath, 'utf8'));
-    writeFileSync(statePath, JSON.stringify([...own, { id: tunnelId, conns: [] }]));
+    writeFileSync(statePath, JSON.stringify([...own, { id: randomUUID(), conns: [] }]));
     const response = await fetch(`http://127.0.0.1:${f.port}/mcp`, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }) });
     assert.equal(response.status, 503);
     await f.exited;
@@ -406,7 +482,7 @@ for (const action of ['begin', 'monitor'] as const) test(`ownership loss at ${ac
   try {
     const path = join(f.root, 'fake-connector.json');
     const own = JSON.parse(readFileSync(path, 'utf8'));
-    writeFileSync(path, JSON.stringify([...own, { id: tunnelId, conns: [] }]));
+    writeFileSync(path, JSON.stringify([...own, { id: randomUUID(), conns: [] }]));
     if (action === 'begin') f.child.stdin.write('begin\n');
     await f.exited;
     assert.equal(f.child.exitCode, 1, f.output());
@@ -422,14 +498,14 @@ test('SIGINT cleans up; SIGKILL leftovers are refused with owner inspection inst
   try {
     graceful.child.kill('SIGINT'); await graceful.exited;
     assert.equal(existsSync(join(graceful.root, 'fake-connector.json')), false);
-    assert.equal(existsSync(join(runRoot, `opencode-${tunnelId}.lock`)), false);
+    assert.equal(existsSync(join(runRoot, `opencode-${graceful.config.id}.lock`)), false);
   } finally { await graceful.cleanup(); }
   const killed = await cliFixture();
   try {
     killed.child.kill('SIGKILL'); await killed.exited;
     assert.equal(existsSync(join(killed.root, 'fake-connector.json')), true);
     await assert.rejects(acquireTunnel({ ...killed.config, root: runRoot, dir: killed.batchDir }), /inspect .*owner.json.*confirmed orphan/);
-    const owner = JSON.parse(readFileSync(join(runRoot, `opencode-${tunnelId}.lock/owner.json`), 'utf8'));
+    const owner = JSON.parse(readFileSync(join(runRoot, `opencode-${killed.config.id}.lock/owner.json`), 'utf8'));
     assert.equal(owner.pid, killed.child.pid);
     assert.equal(typeof owner.connectorPid, 'number');
   } finally { await killed.cleanup(); }

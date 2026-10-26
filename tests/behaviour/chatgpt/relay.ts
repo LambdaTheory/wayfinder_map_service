@@ -3,7 +3,7 @@ import { createServer, request } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { freePort, reservedPorts } from '../runner/service.ts';
 
-export interface Exchange { id: string; at: string; request: Record<string, unknown>; response: unknown; status: number; sessionId: string | null }
+export interface Exchange { id: string; at: string; httpMethod: string; request: Record<string, unknown>; response: unknown; status: number; sessionId: string | null }
 export interface Relay {
   port: number;
   /** Writes and reads by the client are allowed only inside a labelled turn. Discovery is allowed between turns. */
@@ -43,6 +43,8 @@ export async function startRelay(servicePort: number, token: string, observe: (e
       }
     } catch { respond(outgoing, 400); return; } // Interrupted POSTs are client errors, never unhandled rejections.
     const body = Buffer.concat(chunks);
+    // DELETE terminates a session; its body can never supply JSON-RPC evidence.
+    if (incoming.method === 'DELETE' && body.length) { respond(outgoing, 400); return; }
     let rpc: Record<string, unknown> = {};
     try { if (body.length) rpc = JSON.parse(body.toString()) as Record<string, unknown>; }
     catch { respond(outgoing, 400); return; }
@@ -72,7 +74,7 @@ export async function startRelay(servicePort: number, token: string, observe: (e
     const finish = (response: unknown, status: number, sessionId: string | null) => {
       if (finished) return;
       finished = true;
-      try { observe({ id, at, request: rpc, response, status, sessionId }); }
+      try { observe({ id, at, httpMethod: incoming.method!, request: rpc, response, status, sessionId }); }
       catch (error) { fail(error); respond(outgoing, 500); }
       finally { state.inFlight--; }
     };
