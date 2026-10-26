@@ -37,7 +37,7 @@ Other suggestions addressed:
 - Move ChatGPT upgrade turns and recovery kind into `upgrade-checks.ts`; use metadata rather than ID prefix/suffix semantics. All affected upgrade checks advance to version 2 because shared evidence requirements changed; older records are not re-judged.
 - Rename the local type to `ChatGPTSurface`; add `canary-release.d.mts` and remove the corresponding type-error suppressions.
 - Move ChatGPT guidance under Running a Batch and include `chatgpt/` in the existing two-review rule. That project rule remains the single review-policy location; PR review evidence verifies it was followed. No authorization gate changed.
-- Allow ping and Resource/Prompt listing between turns. State reads/writes stay gated. Verify actual Refresh tools in the approved run.
+- Allow `ping`, `resources/list`, `resources/templates/list` and `prompts/list` between turns, alongside initialization, `tools/list` and bodyless session DELETE. `tools/call`, `resources/read` and `prompts/get` stay gated. Verify actual Refresh tools in the approved run.
 - Bound registration/deregistration visibility retries and allow ten seconds for shutdown. Unknown/foreign state fails closed. Remote inventory is the authoritative guard for connectors, including service-manager launches without a visible target identity (see the startup fix below).
 - Record handshake version and refuse a package/dist version mismatch. Still require a build immediately before every run: version comparison cannot detect same-version source edits. HEAD labels the checkout, not proof that a dirty build matches it.
 - Print public read/mutate and attribution risks, unattended prohibition, other-hostname downtime, Kun takeover and surface-specific refresh steps. The operator must inventory original ingress hostnames before approval; generic `plan` intentionally reads no local configuration.
@@ -81,6 +81,16 @@ The two Codex suggestions are covered: the fake records only an `info` counter m
 The operating guide now explicitly allows read-only diagnostics during a Batch and documents default/indirect config reliance on remote inventory. This follow-up used only synthetic process lists and the checked-in fake cloudflared; real-client acceptance and the approved retry remain with the coordinator.
 
 Verification on Node `v26.3.0`, after merging the latest `origin/main` (already up to date): `npm run build`, the focused ChatGPT suite (51 tests), `npm test` (38 files / 1894 tests), `npm run typecheck` and `git diff --check` passed. Type checking caught an overly narrow inferred UUID type in the test fixture; an explicit string parameter fixed it and the rerun passed. No shipped files or Release Version changed.
+
+## Out-of-turn Resource Template discovery fix (2026-10-27)
+
+The coordinator reported that ChatGPT's Refresh tools failed twice during the approved Batch; its public-endpoint diagnostic isolated HTTP 503 to `resources/templates/list` outside a labelled turn. The relay's discovery allowlist omitted that method. It now forwards it, with the same ownership check and wire capture as the other discovery calls. No Map read/write methods were added to the allowlist.
+
+A full CLI regression uses only the checked-in fake cloudflared and a fresh real local service/database. Without starting any turn, it exercises initialization, its notification, tool/Resource/Resource Template/Prompt listing, ping and bodyless session DELETE. It checks exact wire responses and session IDs, refuses both read and write `tools/call` requests plus `resources/read` and `prompts/get` with HTTP 503, and verifies the refused calls never enter forwarded wire or Scenario events. A ping after DELETE receives HTTP 404, proving the upstream session was terminated.
+
+The new test failed before the fix with `resources/templates/list: 503 !== 200`. The current service has no Resource Template handler, so the expected forwarded response is HTTP 200 with JSON-RPC error code `-32601` and the service's sanitized message `Protocol request failed`, preserved unchanged in `raw/wire.json`. This fixes the relay rejection; actual ChatGPT acceptance of that upstream response remains for the coordinator's approved Refresh tools retry. No real tunnel, credential file, model, daily service or real database was used, and no Release Version bump is required for these test/documentation changes.
+
+Verification on Node `v26.3.0`, after `npm ci` and confirming the branch includes the latest `origin/main`: `npm run build`, the focused new regression, `npm test` (38 files / 1895 tests, including 52 ChatGPT cases), `npm run typecheck` and `git diff --check` passed. An initial expectation used the SDK's error text; the service sanitizes that text, so the test now asserts the actual service response and the complete gate was rerun successfully.
 
 ## Original command verification (PR #97)
 

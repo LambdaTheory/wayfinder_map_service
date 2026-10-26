@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -16,7 +16,7 @@ import { upgradeChecks } from '../upgrade-checks.ts';
 import { observeIsolation } from './isolation.ts';
 import type { Scenario } from '../scenario.ts';
 import { startRelay } from './relay.ts';
-import type { Exchange, Relay } from './relay.ts';
+import type { Exchange, RefusalReason, Relay, RelayRefusal } from './relay.ts';
 import { writeCanaryCheckout } from '../../helpers/canary-release.mjs';
 
 type Tool = { name: string; description?: string | undefined; inputSchema: { properties?: Record<string, { description?: string | undefined }> | undefined } };
@@ -42,10 +42,31 @@ export interface Capture {
 const unknown = (reason: string) => ({ known: false as const, reason });
 const now = () => new Date().toISOString();
 const safeWrite = (path: string, value: unknown, secrets: Record<string, string>) => writeFileSync(path, redact(JSON.stringify(value, null, 2), secrets), { mode: 0o600 });
+export interface RelayRefusalSummary {
+  path: 'raw/relay-refusals.json';
+  total: number;
+  byReason: Partial<Record<RefusalReason, number>>;
+  byStatus: Record<string, number>;
+  withinTurn: number;
+  outsideTurn: number;
+}
+/** Driver diagnostics do not add events or affect the shared Scenario verdicts. */
+export interface ChatGPTAttemptRecord extends AttemptRecord {
+  diagnostics: { relayRefusals: RelayRefusalSummary };
+}
+const summarizeRefusals = (refusals: readonly RelayRefusal[]): RelayRefusalSummary => {
+  const summary: RelayRefusalSummary = { path: 'raw/relay-refusals.json', total: refusals.length, byReason: {}, byStatus: {}, withinTurn: 0, outsideTurn: 0 };
+  for (const refusal of refusals) {
+    summary.byReason[refusal.reason] = (summary.byReason[refusal.reason] ?? 0) + 1;
+    summary.byStatus[refusal.status] = (summary.byStatus[refusal.status] ?? 0) + 1;
+    if (refusal.withinTurn) summary.withinTurn++; else summary.outsideTurn++;
+  }
+  return summary;
+};
 
 /** Stateful controller for one manual Attempt. It never operates the app or supplies an answer for Kun. */
 export class ChatGPTAttempt {
-  readonly record: AttemptRecord;
+  readonly record: ChatGPTAttemptRecord;
   readonly dir: string;
   readonly scenario: Scenario;
   readonly servicePort: number;
@@ -81,7 +102,8 @@ export class ChatGPTAttempt {
       run: { startedAt: now(), endedAt: '', completeness: 'cancelled' }, controller: { clientId: `${options.attemptId}.controller` }, baitClientIds: [],
       sessions: [...new Set(options.scenario.turns.map(t => t.session))].map(label => ({ label, nativeId: unknown('not captured'), clientId: `${options.attemptId}.${label}`,
         mcpSessionIds: { known: true, value: [] }, turns: [] })), events: [], maps: [], receipts: [], usage: unknown('ChatGPT does not expose usage here'),
-      raw: { path: `${options.attemptId}/raw`, files: [] }, missing: ['events.message', 'chatgpt.otherToolCalls', 'combination.visibleModel', 'client.version'] };
+      raw: { path: `${options.attemptId}/raw`, files: [] }, missing: ['events.message', 'chatgpt.otherToolCalls', 'combination.visibleModel', 'client.version'],
+      diagnostics: { relayRefusals: summarizeRefusals([]) } };
   }
 
   static async start(options: {
@@ -90,6 +112,7 @@ export class ChatGPTAttempt {
     const a = new ChatGPTAttempt(options, await freePort());
     mkdirSync(a.dir, { mode: 0o700 }); mkdirSync(join(a.dir, 'raw'), { mode: 0o700 });
     try {
+      a.observeRefusals([]);
       const { initializeSQLite } = await import(pathToFileURL(join(checkoutRoot, 'dist/sqlite-storage.js')).href) as { initializeSQLite(path: string): void };
       const existedBefore = existsSync(a.databasePath);
       initializeSQLite(a.databasePath);
@@ -103,7 +126,7 @@ export class ChatGPTAttempt {
       await a.startService(checkoutRoot);
       for (const map of a.scenario.seed.maps) a.seedHeads.set(map.mapId, await a.controller.seed(map));
       a.saveRaw('seed.json', { seed: a.scenario.seed, maps: await a.controller.exportCatalog() });
-      a.relay = await startRelay(a.servicePort, a.tokens.A, e => a.observe(e));
+      a.relay = await startRelay(a.servicePort, a.tokens.A, e => a.observe(e), refusals => a.observeRefusals(refusals));
       a.measureIsolation();
       a.persist();
       return a;
@@ -157,6 +180,17 @@ export class ChatGPTAttempt {
       result: reply?.result?.structuredContent === undefined ? unknown(`no structured result (HTTP ${e.status})`) : { known: true, value: reply.result.structuredContent },
       failed: e.status >= 400 || reply?.result?.isError === true, requestId: { known: true, value: String(e.request.id) } });
     this.persist();
+  }
+
+  private observeRefusals(refusals: readonly RelayRefusal[]) {
+    const name = 'relay-refusals.json';
+    const path = join(this.dir, 'raw', name);
+    // Synchronous flush + atomic replacement: no stop/exit hook is needed to retain earlier refusals.
+    // A process killed during the next write leaves the previous complete JSON snapshot intact.
+    writeFileSync(`${path}.tmp`, redact(JSON.stringify(refusals, null, 2), this.secrets), { mode: 0o600, flush: true });
+    renameSync(`${path}.tmp`, path);
+    if (!this.record.raw.files.includes(name)) this.record.raw.files.push(name);
+    this.record.diagnostics.relayRefusals = summarizeRefusals(refusals);
   }
 
   async begin(proposalConfirmed = false): Promise<string> {
