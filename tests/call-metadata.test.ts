@@ -10,7 +10,9 @@ import { startLocalMcpService } from '../src/mcp-service.js';
 import { serveLocalMcp } from '../src/mcp-http-internal.js';
 import { initializeSQLite, openSQLite } from '../src/sqlite-storage.js';
 import { createMapMcpServer, workflowContract } from '../src/mcp-tools.js';
-import { appendPrivateMetadata } from '../src/call-metadata.js';
+import { appendPrivateMetadata, CallMetadata, credentialFingerprint, requestIdHash } from '../src/call-metadata.js';
+import * as metadataModule from '../src/call-metadata.js';
+import { createHttpTestClient } from './helpers/mcp-http-client.mjs';
 import type { CallMetadataRecord } from '../src/call-metadata.js';
 import { classifyResult } from './behaviour/evidence.js';
 import { freePort } from './behaviour/runner/service.js';
@@ -37,7 +39,7 @@ async function fixture(failStorage = false, toolsOnly = false) {
     : await serveLocalMcp(storage, config);
   cleanups.push(() => service.stop());
   const log = `${path}.calls.jsonl`;
-  const records = () => readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line) as CallMetadataRecord);
+  const records = () => readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line) as CallMetadataRecord).filter(record => record.schema === 'wayfinder-service-call/1');
   return { dir, path, log, config, service, records };
 }
 async function post(port: number, body: unknown, session?: string, bearer = token) {
@@ -71,7 +73,7 @@ test('B07: every tool outcome persists with B01 request/session correlation, eve
     const response = await call(f.config.port, session, index + 1, tool, args);
     const record = f.records().at(-1)!;
     expect(record).toMatchObject({ schema: 'wayfinder-service-call/1', mcpSessionId: session, requestId: String(index + 1),
-      clientId, credentialFingerprint: sha(token), tool, result: classifyResult(JSON.parse(response.body).result.structuredContent) });
+      clientId, credentialFingerprint: credentialFingerprint(token), tool, result: classifyResult(JSON.parse(response.body).result.structuredContent) });
     expect(record.durationMs).toBeGreaterThanOrEqual(0);
   }
   expect(f.records().map(record => record.result)).toEqual(['ok', 'read', 'committed', 'read', 'map-exists',
@@ -81,7 +83,7 @@ test('B07: every tool outcome persists with B01 request/session correlation, eve
     expect(f.records().at(-1)!.result).toBe('transport-failure');
   }
   await call(f.config.port, session, '/private/path', 'PRIVATE-CONTENT', { mapId: token });
-  expect(f.records().at(-1)).toMatchObject({ requestId: null, tool: null, mapId: null, result: 'transport-failure' });
+  expect(f.records().at(-1)).toMatchObject({ requestId: null, requestIdHash: requestIdHash('/private/path'), tool: null, mapId: null, result: 'transport-failure' });
   const text = readFileSync(f.log, 'utf8');
   for (const secret of [token, 'PRIVATE-CONTENT', '/private/path', f.path]) expect(text).not.toContain(secret);
   await call(f.config.port, session, -42, 'map_list');
@@ -113,7 +115,7 @@ test('B07: same Combination, different credentials/sessions, and restart all ret
   expect(calls.map(record => record.clientId)).toEqual([clientId, clientId]);
   expect(calls.map(record => record.mcpSessionId)).toEqual([a.session, b.session]);
   expect(a.session).not.toBe(b.session);
-  expect(calls.map(record => record.credentialFingerprint)).toEqual([sha(token), sha(other)]);
+  expect(calls.map(record => record.credentialFingerprint)).toEqual([credentialFingerprint(token), credentialFingerprint(other)]);
   writeFileSync(credentialsPath, JSON.stringify({ credentials: [{ clientId: 'Changed', tokenSha256: sha(other) }] }));
   const write = await call(f.config.port, b.session, 2, 'map_create', { ...create, includeSnapshot: true }, other);
   expect(JSON.parse(write.body).result.structuredContent.revision.author.clientId).toBe(clientId);
@@ -138,7 +140,8 @@ test('B07: failed metadata appends expose gaps, recover, and leave exact respons
   expect(f.records()).toMatchObject([{ sequence: 5, missingObservations: 2, result: 'read' }]);
 });
 
-test.each([false, true])('B07: observed HTTP results match the uninstrumented tool server byte for byte (toolsOnly=%s)', async toolsOnly => {
+test.each([false, true].flatMap(toolsOnly => ['none', 'missing-store', 'throwing-store', 'classification'].map(fault => ({ toolsOnly, fault }))))(
+  'B07: response bytes match without observation ($toolsOnly, $fault)', async ({ toolsOnly, fault }) => {
   const f = await fixture(false, toolsOnly);
   const baselinePath = join(directory(), 'baseline.sqlite'); initializeSQLite(baselinePath); const storage = openSQLite(baselinePath);
   cleanups.push(() => storage.close());
@@ -150,6 +153,17 @@ test.each([false, true])('B07: observed HTTP results match the uninstrumented to
   serverTransport.send = async (message, options) => { if ('result' in message) messages.push(JSON.stringify(message.result)); await send(message, options); };
   await server.connect(serverTransport); await client.connect(clientTransport);
   cleanups.push(async () => { await client.close(); await server.close(); });
+  if (fault === 'classification') vi.spyOn(metadataModule, 'classifyCallResult').mockImplementation(() => { throw new Error('Synthetic classifier failure'); });
+  if (fault === 'missing-store' || fault === 'throwing-store') {
+    const begin = CallMetadata.prototype.begin;
+    vi.spyOn(CallMetadata.prototype, 'begin').mockImplementation(function(this: CallMetadata, ...args) {
+      vi.spyOn(this.context, 'getStore').mockImplementation(() => {
+        if (fault === 'throwing-store') throw new Error('Synthetic context failure');
+        return undefined;
+      });
+      return begin.apply(this, args);
+    });
+  }
   const initialized = await initialize(f.config.port);
   expect(JSON.stringify(JSON.parse(initialized.body).result)).toBe(messages.at(-1));
   await client.listTools();
@@ -163,6 +177,77 @@ test.each([false, true])('B07: observed HTTP results match the uninstrumented to
     const observed = await call(f.config.port, initialized.session, 2, name, args);
     expect(JSON.stringify(JSON.parse(observed.body).result)).toBe(messages.at(-1));
   }
+  expect(f.service.metadataStatus().missingObservations).toBe(fault === 'classification' ? 5 : fault === 'throwing-store' ? 7 : 0);
+});
+
+test('B07: real SDK GET stream probe is expected, and HTTP/session fields remain available', async () => {
+  const f = await fixture();
+  const { client, transport, streamProbe } = await createHttpTestClient(f.config.port, token);
+  cleanups.push(() => client.close());
+  expect(await streamProbe).toEqual({ status: 405 });
+  await client.callTool({ name: 'map_list', arguments: {} });
+  await transport.terminateSession();
+  const records = f.records();
+  expect(records.filter(record => record.result === 'transport-failure')).toEqual([]);
+  const initialized = records.find(record => record.method === 'initialize')!;
+  expect(records.find(record => record.httpMethod === 'GET')).toMatchObject({ result: 'stream-not-supported',
+    httpStatus: 405, mcpSessionId: initialized.mcpSessionId, presentedMcpSessionId: initialized.mcpSessionId });
+  expect(records.find(record => record.tool === 'map_list')).toMatchObject({ result: 'read', httpMethod: 'POST', httpStatus: 200 });
+  expect(records.find(record => record.httpMethod === 'DELETE')).toMatchObject({ result: 'ok', httpStatus: 200 });
+});
+
+test('B07: stale sessions and non-ID request strings retain safe correlation across restart', async () => {
+  const f = await fixture(); const a = await initialize(f.config.port); await f.service.stop();
+  const service = await startLocalMcpService(f.config); cleanups.push(() => service.stop());
+  const rawId = '/private/synthetic request';
+  const response = await call(f.config.port, a.session, rawId, 'map_list');
+  expect(response.status).toBe(404);
+  expect(f.records().at(-1)).toMatchObject({ mcpSessionId: null, presentedMcpSessionId: a.session,
+    requestId: null, requestIdType: 'string', requestIdHash: requestIdHash(rawId), httpStatus: 404, result: 'transport-failure' });
+  const b = await initialize(f.config.port);
+  await call(f.config.port, b.session, 1, 'map_list'); await call(f.config.port, b.session, '1', 'map_list');
+  expect(f.records().slice(-2).map(record => [record.requestId, record.requestIdType])).toEqual([['1', 'number'], ['1', 'string']]);
+  expect(readFileSync(f.log, 'utf8')).not.toContain(rawId);
+});
+
+test.each([false, true])('B07: the last failed observation stays durable across stop and restart (log stays blocked=%s)', async staysBlocked => {
+  const f = await fixture(); const session = (await initialize(f.config.port)).session;
+  rmSync(f.log); mkdirSync(f.log);
+  await call(f.config.port, session, 1, 'map_list');
+  const gaps = `${f.path}.calls.gaps.jsonl`;
+  expect(JSON.parse(readFileSync(gaps, 'utf8').trim())).toMatchObject({ schema: 'wayfinder-service-call-gap/1', observations: 2, missingObservations: 1 });
+  if (!staysBlocked) rmSync(f.log, { recursive: true });
+  await f.service.stop();
+  const summaryFile = staysBlocked ? gaps : f.log;
+  expect(JSON.parse(readFileSync(summaryFile, 'utf8').trim().split('\n').at(-1)!))
+    .toMatchObject({ schema: 'wayfinder-service-call-summary/1', observations: 2, missingObservations: 1 });
+  if (staysBlocked) rmSync(f.log, { recursive: true });
+  const persistedGaps = readFileSync(gaps, 'utf8');
+  const restarted = await startLocalMcpService(f.config); cleanups.push(() => restarted.stop());
+  await initialize(f.config.port); await restarted.stop();
+  expect(readFileSync(gaps, 'utf8')).toBe(persistedGaps);
+  expect(statSync(gaps).mode & 0o777).toBe(0o600);
+});
+
+test('B07: observations hold no raw credentials and fingerprints are separated from authentication verifiers', () => {
+  const metadata = new CallMetadata('/synthetic', token);
+  const observation = metadata.begin(`Bearer ${token}`, 'POST', token);
+  metadata.identify(observation, clientId, token);
+  metadata.capture(observation, { id: token, method: 'tools/call', params: { name: 'map_read', arguments: { mapId: token } } });
+  expect(JSON.stringify(observation)).not.toContain(token);
+  expect(observation!.fields).toMatchObject({ presentedMcpSessionId: null, mapId: null, requestId: null, requestIdHash: requestIdHash(token) });
+  expect(credentialFingerprint(token)).not.toBe(sha(token));
+});
+
+test('B07: context plumbing never replays business work, including synchronous failure', async () => {
+  const metadata = new CallMetadata('/synthetic', token);
+  const failure = new Error('Business failure');
+  let calls = 0;
+  await expect(metadata.run(undefined, () => { calls++; throw failure; })).rejects.toBe(failure);
+  expect(calls).toBe(1);
+  vi.spyOn(metadata.context, 'run').mockImplementation((_store, callback) => { callback(); throw new Error('Context cleanup failure'); });
+  expect(await metadata.run(undefined, async () => { calls++; return 42; })).toBe(42);
+  expect(calls).toBe(2);
 });
 
 test('B07: metadata refuses symlinks and public files without modifying them', () => {

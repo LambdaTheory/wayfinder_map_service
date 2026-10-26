@@ -7,6 +7,7 @@ Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Rel
 ## 2.1.0 (2026-10-26)
 
 - Record private call metadata by default for every local MCP service entry, including reads, refusals, Conflicts and failures. Failed metadata writes preserve business results and expose cumulative missing observations.
+- Distinguish the SDK's expected GET stream probe from transport failures, retain HTTP and stale-session/request correlation, and persist missing-observation markers plus shutdown summaries. Observation faults preserve client response bytes; the launcher no longer injects service author configuration into the harness environment and marks unstated usage unknown.
 - Record dedicated-agent and ChatGPT launcher correlation using the existing Client ID and per-launch credential fingerprint, with explicit gaps for unavailable native session IDs. MCP instructions, tool metadata, results and workflow rules are unchanged apart from the required Release Version.
 
 ## 2.0.2 (2026-10-25)

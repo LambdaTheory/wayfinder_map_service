@@ -18,7 +18,8 @@ const database = join(dir, 'maps.sqlite');
 const log = `${database}.calls.jsonl`;
 const token = randomBytes(32).toString('hex');
 const other = randomBytes(32).toString('hex');
-const fingerprint = value => createHash('sha256').update(value).digest('hex');
+const verifier = value => createHash('sha256').update(value).digest('hex');
+const fingerprint = value => verifier(`wayfinder-call-credential/1\0${verifier(value)}`);
 let child;
 let exit;
 let diagnostics = '';
@@ -34,7 +35,7 @@ try {
     await new Promise(resolve => listener.close(resolve));
   } while ([18765, 18766].includes(port));
   const credentials = join(dir, 'credentials.json');
-  writeFileSync(credentials, JSON.stringify({ credentials: [{ clientId: 'Codex:synthetic:high', tokenSha256: fingerprint(other) }] }), { mode: 0o600 });
+  writeFileSync(credentials, JSON.stringify({ credentials: [{ clientId: 'Codex:synthetic:high', tokenSha256: verifier(other) }] }), { mode: 0o600 });
   child = spawn(process.execPath, [new URL('../../dist/mcp-start.js', import.meta.url).pathname], { env: {
     PATH: process.env.PATH, WAYFINDER_DATABASE_PATH: database, WAYFINDER_PORT: String(port), WAYFINDER_TOKEN: token,
     WAYFINDER_ACTOR_ID: 'b07-smoke', WAYFINDER_CLIENT_ID: 'Codex:synthetic:high', WAYFINDER_CREDENTIALS_FILE: credentials,
@@ -91,6 +92,9 @@ try {
   rmSync(log, { recursive: true }); renameSync(`${log}.saved`, log);
   await call('map_read', { mapId: 'B07.Gap' }, 'read');
   assert.equal(readRecords().at(-1).missingObservations, 1);
+  const gaps = readFileSync(`${database}.calls.gaps.jsonl`, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(gaps.length, 1);
+  assert.equal(gaps[0].missingObservations, 1);
   assert.equal(statSync(log).mode & 0o777, 0o600);
   const logged = readFileSync(log, 'utf8');
   for (const forbidden of [token, other, database, 'PRIVATE SYNTHETIC', '/private/synthetic/path']) {
@@ -98,6 +102,9 @@ try {
   }
   child.kill('SIGTERM'); assert.deepEqual(await exit, { code: 0, signal: null });
   assert(diagnostics.includes('wayfinder-service-call-gap/1'));
+  assert.equal(readRecords().at(-1).schema, 'wayfinder-service-call-summary/1');
+  assert.equal(readRecords().at(-1).missingObservations, 1);
+  assert.equal(readRecords().at(-1).observations, 12);
   console.log(JSON.stringify({ version, toolCalls, persistedToolCalls: readRecords().filter(r => r.method === 'tools/call').length,
     missingObservations: 1, distinctSessions: 2, privateMode: '0600', stopped: true, result: 'passed' }));
 } finally {

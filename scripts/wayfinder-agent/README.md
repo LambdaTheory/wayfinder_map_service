@@ -68,13 +68,15 @@ wayfinder help
 - 主令牌只给启动器自己探活用，记成 `Wayfinder-Launcher`；谁借了主令牌写图，看得出来。
 - 服务还是旧代码、不认凭据文件时，这次启动退回主令牌并提示，写入记成 `Wayfinder-Launcher`；`restart` 换到新代码后就分开。
 
-## Call correlation (Release Version 2.1.0)
+## 调用关联
 
-The launcher appends private `wayfinder-launch/1` records to `launches.jsonl` in its service directory for ordinary, test and resumed launches, including the Matt entry and ChatGPT relay. The existing Client ID (`harness:model:effort`, or `ChatGPT`) remains unchanged. Its credential's SHA-256 fingerprint joins the service's default call metadata; two launches of the same Combination have different credentials and MCP session IDs. No second client identity is created. The harness also receives the same `WAYFINDER_CLIENT_ID` in its environment.
+启动器在服务目录的 `launches.jsonl` 里追加私有的 `wayfinder-launch/1` 记录，覆盖普通、测试、续接、Matt 原版和 ChatGPT 中继入口。Client ID 仍是原来的 `harness:model:effort` 或 `ChatGPT`；启动器和服务用同一份凭据派生的指纹关联，不创建第二套身份。同一组合的两次启动使用不同凭据，MCP 连接也各有会话 ID。指纹经过用途隔离，不等于凭据文件中的认证校验值。启动器不向 harness 注入服务作者配置变量 `WAYFINDER_CLIENT_ID`。
 
-Records contain the entry, harness, method, model, effort, launch time and process ID, with no prompt, arguments, working directory, token or private file path. A resumed session records its known `nativeSessionId`; a fresh native ID is not yet available and is explicitly listed in `missing`. A later analyser must obtain it from native client evidence or report the gap, rather than infer authorization from metadata. Revoking a credential does not remove its launch record.
+记录只含入口、harness、方法、模型、推理强度、UTC 启动时间（以 `Z` 结尾）和进程 ID，不含提示词、参数、工作目录、令牌或私有路径。续接时写入已知的 `nativeSessionId`；新会话尚未产生原生 ID，会在 `missing` 中明确列出。后续分析必须从客户端记录补齐或保留缺口，不能靠元数据推断人的授权。吊销凭据不会删除启动记录。
 
-`WAYFINDER_AGENT_USAGE=normal|test|research` records an operator-provided usage label (default `normal`; dry runs use `test`; other values become `unknown`). It is evidence to corroborate, not a trusted verdict. Isolated test launchers should set `test` and the existing state/service/output overrides. A failed launch-log write emits a fixed missing-observation diagnostic and allows the launch to proceed. The service logs calls independently, regardless of launcher or usage label; details are in [the operator guide](../../docs/implementation/local-mcp-service.md#default-call-metadata-release-version-210).
+`WAYFINDER_AGENT_USAGE=normal|test|research` 是操作者声明的用途；未声明或无效值记为 `unknown`，dry run 明确记为 `test`。路径覆盖项本身不能证明用途，隔离测试应显式设置 `test`。写记录失败会输出固定的缺失提示，启动继续。服务不依赖这个标签或启动器，始终独立记录 MCP 调用；格式见[操作者说明](../../docs/implementation/local-mcp-service.md#default-call-metadata)。
+
+启动记录和服务记录都不自动轮转，会持续增长。操作者可在停止自己管理的服务后手动归档日志；不要把日志当作 Map 备份。经 ChatGPT 隧道到达中继的公网请求会被中继加上令牌，因此服务将它们记为该凭据的已认证调用；这个标签不证明请求来自本人。
 
 ## ChatGPT 测试
 
