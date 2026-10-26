@@ -66,6 +66,15 @@ const holdsAll = (...ids: string[]): Review[] => ids.flatMap(itemId => (['first'
 const createdMap: AgentWrite = { changes: [{ commandIndex: 0, command: 'map.create', subjectId: 'New.Map' }], edit: s => s };
 
 describe('Attempt verdicts on fixed evidence', () => {
+  test('F11 v1 evidence is not re-judged under its revised scope check', () => {
+    const s = byId('F11');
+    expect(s.version).toBeGreaterThan(1);
+    const old = sample('F11', [], { subject: { kind: 'scenario', id: 'F11', version: 1 } });
+    const verdict = judgeAttempt(s, old);
+    expect(verdict.outcome).toBe('insufficient-evidence');
+    expect(verdict.reasons.join()).toContain('so it is not re-judged');
+  });
+
   test('correct pass: script items hold and reviews decide the model items', () => {
     expect(judgeAttempt(byId('S12'), sample('S12'), { reviews: holdsAll('recommends', 'status-narration') }).outcome).toBe('pass');
   });
