@@ -23,9 +23,10 @@ import { syncCodexLogin } from './subscription.ts';
 import { proxyEnvironment, proxyRouting, proxySecrets, proxySummary } from '../proxy.ts';
 import type { Field } from '../evidence.ts';
 import type { InteractiveClient } from './native.ts';
-import { startProxyChannel } from '../runner/proxy-channel.ts';
+import { proxyChannelSecrets, startProxyChannel } from '../runner/proxy-channel.ts';
 import type { ProxyChannel } from '../runner/proxy-channel.ts';
 import { watchLauncher } from './lifecycle.ts';
+import type { LaunchRecord } from './lifecycle.ts';
 
 const q = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const json = (file: string, value: unknown) => writeFileSync(file, JSON.stringify(value, null, 2), { mode: 0o600 });
@@ -139,8 +140,8 @@ export async function host(args: string[], options: { subscriptionHome: string; 
     const proxyEnv = proxyEnvironment(client === 'claude' ? options.subscriptionHome : null, options.inheritedEnv ?? process.env);
     const proxies = proxyRouting(proxyEnv);
     Object.assign(secrets, proxySecrets(proxyEnv, proxies.environment));
-    proxyChannel = await startProxyChannel(proxyEnv);
-    Object.assign(secrets, Object.fromEntries(Object.entries(proxySecrets(proxies.environment, proxyChannel.environment)).map(([name, value]) => [name.replace('proxy-', 'proxy-channel-'), value])));
+    proxyChannel = await startProxyChannel(proxyEnv, () => lifecycle?.check());
+    Object.assign(secrets, proxyChannelSecrets(proxies.environment, proxyChannel.environment));
     capture.service.commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkoutRoot, encoding: 'utf8' }).trim();
     before = observe([dir, scratch]);
     phase = 'service';
@@ -199,16 +200,16 @@ export async function host(args: string[], options: { subscriptionHome: string; 
     try { await route?.close(); await controller?.close(); } finally {
       const stopped = await service?.stop();
       const retainRaw = (path: string, value: unknown, missing: string) => {
-        try { writePrivate(path, value, secrets); }
+        try { writePrivate(path, value, secrets); return true; }
         catch {
           rmSync(path, { force: true }); // The service protocol file already exists before its privacy check.
           capture.missing.push(missing); capture.run.completeness = 'driver-failed'; capture.run.detail = 'raw evidence withheld after privacy validation';
+          return false;
         }
       };
       retainRaw(join(raw, 'relay.json'), relay, 'raw.relay.json');
       if (proxyChannel) {
-        retainRaw(join(raw, 'proxy-channel.json'), proxyChannel.evidence(), 'raw.proxy-channel.json');
-        capture.raw.files.push('raw/proxy-channel.json');
+        if (retainRaw(join(raw, 'proxy-channel.json'), proxyChannel.evidence(), 'raw.proxy-channel.json')) capture.raw.files.push('raw/proxy-channel.json');
       }
       try { after = observe([dir, ...(scratch ? [scratch] : []), ...(prepared ? [prepared.controlDir] : [])]); } catch { after = unavailable(); }
       if (service) {
@@ -219,7 +220,7 @@ export async function host(args: string[], options: { subscriptionHome: string; 
       const controlFailures: string[] = [];
       const handshake = lifecycle?.evidence();
       controlFailures.push(...(handshake?.failures ?? []));
-      if (proxyChannel?.evidence().blockedConnections) controlFailures.push('Proxy connections observed outside the interactive client lifetime');
+      if (proxyChannel?.evidence().blockedConnections || proxyChannel?.evidence().postExitConnections) controlFailures.push('Proxy connections observed outside the interactive client lifetime');
       let launchFailed = false; let launchStarts = 0; let launchExited = false;
       if (prepared) {
         // Preserve the launch record even if an independent manifest/profile check fails.
@@ -230,7 +231,7 @@ export async function host(args: string[], options: { subscriptionHome: string; 
             writePrivate(join(raw, 'launch.jsonl'), text, secrets);
             capture.raw.files.push('raw/launch.jsonl');
             for (const line of text.trim().split('\n').filter(Boolean)) {
-              const entry = JSON.parse(line) as { isolationFailure?: string; launchFailure?: string; phase?: string; launched?: boolean };
+              const entry = JSON.parse(line) as LaunchRecord;
               if (entry.phase === 'started' && entry.launched) launchStarts++;
               if (entry.phase === 'exited') launchExited = true;
               if (entry.launchFailure) launchFailed = true;
@@ -280,7 +281,8 @@ export async function host(args: string[], options: { subscriptionHome: string; 
         ...(prepared && existsSync(prepared.controlDir) ? { retainedControlDirectory: prepared.controlDir } : {}),
         scratchRemoved: scratch ? !existsSync(scratch) : null, credentialsRemoved: !existsSync(join(dir, 'credentials.json')),
         port: service?.port, database: service?.databasePath, measurements: isolationMeasurements(before, after, opened, service?.databasePath),
-        clientExit: { known: false, reason: clientExitAttested ? 'operator attests exit; wrapper status cannot prove all client descendants exited' : 'client exit not attested; exposed scratch retained' } }, secrets);
+        clientExit: { known: false, reason: !clientExitAttested ? 'client exit not attested; exposed scratch retained' : !handshake?.exited
+          ? 'operator attests exit but wrapper exit is missing; exposed scratch retained' : 'operator attests exit; wrapper status cannot prove all client descendants exited' } }, secrets);
       if (syncFailed) throw new Error(capture.run.detail);
     }
   }

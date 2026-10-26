@@ -76,7 +76,8 @@ attack('a trusted control mutation during an interactive process is recorded on 
     path = f.profile.path;
     expect(await launch(f.manifestPath, f.manifestHash, {})).toBe(1);
     const events = readFileSync(join(f.controlDir, 'launch.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
-    expect(events.at(-1)).toMatchObject({ phase: 'exited', launched: true, code: 0, isolationFailure: expect.stringContaining('changed') });
+    expect(events.find(event => event.phase === 'exited')).toMatchObject({ launched: true, code: 0, exitAtNs: expect.stringMatching(/^\d+$/) });
+    expect(events.at(-1)).toMatchObject({ phase: 'verified', launched: true, isolationFailure: expect.stringContaining('changed') });
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 

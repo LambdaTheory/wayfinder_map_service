@@ -7,6 +7,7 @@ import { startProxyChannel } from '../runner/proxy-channel.ts';
 import { launcher } from './host.ts';
 import { launch } from './launch.ts';
 import { awaitHost, watchLauncher } from './lifecycle.ts';
+import type { LaunchPhase } from './lifecycle.ts';
 
 const attack = test.skipIf(process.platform !== 'darwin');
 async function fixture() {
@@ -17,8 +18,10 @@ async function fixture() {
   const server = createServer(socket => { socket.on('error', () => undefined); socket.on('data', data => { received += data; socket.write(data); }); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as { port: number }).port;
-  const channel = await startProxyChannel({ HTTPS_PROXY: `http://127.0.0.1:${port}` });
+  let checkpoint: (() => void) | undefined;
+  const channel = await startProxyChannel({ HTTPS_PROXY: `http://127.0.0.1:${port}` }, () => checkpoint?.());
   return { root, scratch, channel, received: () => received,
+    checkWith: (check: () => void) => { checkpoint = check; },
     close: async () => { await channel.close(); await new Promise<void>(resolve => server.close(() => resolve())); rmSync(root, { recursive: true, force: true }); } };
 }
 
@@ -41,10 +44,46 @@ attack('wrapper waits for the host before spawning; a closed host refuses the la
   } finally { await f.close(); if (controlDir) rmSync(controlDir, { recursive: true, force: true }); }
 });
 
+test('an accept-time checkpoint consumes an exit without waiting for the polling timer', async () => {
+  const f = await fixture(); const control = join(f.root, 'controls'); mkdirSync(control);
+  const monitor = watchLauncher(control, f.channel); f.checkWith(monitor.check);
+  try {
+    appendFileSync(join(control, 'launch.jsonl'), JSON.stringify({ phase: 'starting' }) + '\n');
+    await awaitHost(control, 'starting');
+    appendFileSync(join(control, 'launch.jsonl'), JSON.stringify({ phase: 'exited', exitAtNs: process.hrtime.bigint().toString() }) + '\n');
+    const socket = connect(Number(new URL(f.channel.environment.HTTPS_PROXY!).port), '127.0.0.1');
+    socket.on('error', () => undefined); socket.write('leftover');
+    await new Promise<void>(resolve => socket.once('close', () => resolve()));
+    expect(f.received()).toBe('');
+    expect(f.channel.evidence()).toMatchObject({ blockedConnections: 1, postExitConnections: 0 });
+    expect(monitor.evidence()).toEqual({ started: true, exited: true, failures: [] });
+  } finally { await monitor.close(); await f.close(); }
+});
+
+test.each(['starting', 'exited'] as const)('shutdown consumes a pending %s without opening forwarding', async phase => {
+  const f = await fixture(); const control = join(f.root, 'controls'); mkdirSync(control);
+  const monitor = watchLauncher(control, f.channel);
+  try {
+    if (phase === 'exited') {
+      appendFileSync(join(control, 'launch.jsonl'), JSON.stringify({ phase: 'starting' }) + '\n');
+      await awaitHost(control, 'starting');
+    }
+    appendFileSync(join(control, 'launch.jsonl'), JSON.stringify({ phase, exitAtNs: process.hrtime.bigint().toString() }) + '\n');
+    await monitor.close();
+    expect(monitor.evidence()).toEqual({ started: phase === 'exited', exited: phase === 'exited', failures: [] });
+    if (phase === 'exited') await expect(awaitHost(control, 'exited')).resolves.toBeUndefined();
+    const socket = connect(Number(new URL(f.channel.environment.HTTPS_PROXY!).port), '127.0.0.1');
+    socket.on('error', () => undefined); socket.write('leftover');
+    await new Promise<void>(resolve => socket.once('close', () => resolve()));
+    expect(f.received()).toBe(''); expect(f.channel.evidence().blockedConnections).toBe(1);
+  } finally { await monitor.close(); await f.close(); }
+});
+
 test.each(['exit', 'shutdown', 'invalid-log'])('trusted lifecycle %s revokes held sockets and prevents reopening', async mode => {
   const f = await fixture(); const control = join(f.root, 'controls'); mkdirSync(control);
   const monitor = watchLauncher(control, f.channel);
-  const signal = (phase: string) => appendFileSync(join(control, 'launch.jsonl'), JSON.stringify({ phase }) + '\n');
+  const signal = (phase: LaunchPhase) => appendFileSync(join(control, 'launch.jsonl'), JSON.stringify({ phase,
+    ...(phase === 'exited' ? { exitAtNs: process.hrtime.bigint().toString() } : {}) }) + '\n');
   try {
     signal('starting'); await awaitHost(control, 'starting');
     const socket = connect(Number(new URL(f.channel.environment.HTTPS_PROXY!).port), '127.0.0.1');
@@ -63,7 +102,7 @@ test.each(['exit', 'shutdown', 'invalid-log'])('trusted lifecycle %s revokes hel
     expect(f.received()).toBe('held'); expect(f.channel.evidence().blockedConnections).toBe(1);
     if (mode === 'exit') {
       signal('starting'); await expect.poll(() => existsSync(join(control, 'host.closed'))).toBe(true);
-      await expect(awaitHost(control, 'exited')).rejects.toThrow('host closed');
+      await expect(awaitHost(control, 'starting')).rejects.toThrow('host closed');
     }
     await monitor.close(); await f.channel.close();
     expect(f.channel.evidence().closed).toBe(true);
