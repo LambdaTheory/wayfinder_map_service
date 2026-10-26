@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { writeCanaryCheckout } from '../../helpers/canary-release.mjs';
 
 export const checkoutRoot = fileURLToPath(new URL('../../../', import.meta.url));
 const observer = fileURLToPath(new URL('./protocol-observer.mjs', import.meta.url));
@@ -38,6 +39,8 @@ export interface IsolatedService {
   /** Initialize results the service sent, one JSON line per MCP session (instructions, version, capabilities). */
   protocolReport: string;
   logs(): string;
+  /** Replace only this owned child, on its own database and allocated port. No external target accepted. */
+  restartCanary(): Promise<{ beforePid: number; afterPid: number }>;
   /** SIGTERM, then SIGKILL if the service has not exited after 10 s. */
   stop(): Promise<{ code: number | null; signal: string | null }>;
 }
@@ -57,33 +60,53 @@ export async function startService(dir: string, controller: Credential, others: 
     tokenSha256: createHash('sha256').update(c.token).digest('hex') })) }), { mode: 0o600 });
   const protocolReport = join(dir, 'protocol.jsonl');
   const port = await freePort(excludedPorts);
+  // Hold ownership across the stop/start gap; the replacement uses this same port.
   const releasePort = protectPorts([port]);
-  const child = spawn(process.execPath, ['--import', observer, fileURLToPath(new URL('./service-process.mjs', import.meta.url))], {
-    env: { PATH: process.env.PATH ?? '', WAYFINDER_DATABASE_PATH: databasePath, WAYFINDER_PORT: String(port),
-      WAYFINDER_ACTOR_ID: 'behaviour-runner', WAYFINDER_CLIENT_ID: 'Behaviour.UnusedPrimary', WAYFINDER_ALLOWED_ORIGINS: '[]',
-      WAYFINDER_CREDENTIALS_FILE: credentialsPath, WAYFINDER_PROTOCOL_REPORT: protocolReport },
-    stdio: ['ignore', 'pipe', 'pipe'], detached: true,
-  });
-  child.once('exit', releasePort); child.once('error', releasePort);
   let logs = '';
-  const exit = new Promise<{ code: number | null; signal: string | null }>(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
-  const stop = async () => {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill('SIGTERM');
-      const timer = setTimeout(() => child.kill('SIGKILL'), 10_000);
-      void exit.then(() => clearTimeout(timer));
-    }
-    return exit;
-  };
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('service did not become ready in 20 s')), 20_000);
-      child.stdout.on('data', (data: Buffer) => { logs += data; if (logs.includes('Wayfinder local MCP ready')) { clearTimeout(timer); resolve(); } });
-      child.stderr.on('data', (data: Buffer) => { logs += data; });
-      void exit.then(({ code }) => { clearTimeout(timer); reject(new Error(`service exited during startup (${code}): ${logs.trim()}`)); });
+  let restarted = false;
+  let disposed = false;
+  async function launch(build: string) {
+    const child = spawn(process.execPath, ['--import', observer, fileURLToPath(new URL('./service-process.mjs', import.meta.url))], {
+      env: { PATH: process.env.PATH ?? '', WAYFINDER_DATABASE_PATH: databasePath, WAYFINDER_PORT: String(port),
+        WAYFINDER_ACTOR_ID: 'behaviour-runner', WAYFINDER_CLIENT_ID: 'Behaviour.UnusedPrimary', WAYFINDER_ALLOWED_ORIGINS: '[]',
+        WAYFINDER_CREDENTIALS_FILE: credentialsPath, WAYFINDER_PROTOCOL_REPORT: protocolReport, WAYFINDER_TEST_BUILD: build },
+      stdio: ['ignore', 'pipe', 'pipe'], detached: true,
     });
-  } catch (error) { await stop(); throw error; }
-  return { port, pid: child.pid!, databasePath, protocolReport, logs: () => logs, stop };
+    let startup = '';
+    const exit = new Promise<{ code: number | null; signal: string | null }>(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
+    const stop = async () => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGTERM');
+        const timer = setTimeout(() => child.kill('SIGKILL'), 10_000);
+        void exit.then(() => clearTimeout(timer));
+      }
+      return exit;
+    };
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('service did not become ready in 20 s')), 20_000);
+        child.stdout.on('data', (data: Buffer) => { logs += data; startup += data; if (startup.includes('Wayfinder local MCP ready')) { clearTimeout(timer); resolve(); } });
+        child.stderr.on('data', (data: Buffer) => { logs += data; });
+        void exit.then(({ code }) => { clearTimeout(timer); reject(new Error(`service exited during startup (${code}): ${logs.trim()}`)); });
+      });
+    } catch (error) { await stop(); throw error; }
+    return { pid: child.pid!, stop };
+  }
+  let current: Awaited<ReturnType<typeof launch>>;
+  try { current = await launch(checkoutRoot); } catch (error) { releasePort(); throw error; }
+  return { port, get pid() { return current.pid; }, databasePath, protocolReport, logs: () => logs,
+    async restartCanary() {
+      if (disposed || restarted) throw new Error('Owned service can restart onto the canary only once, before cleanup');
+      restarted = true;
+      const target = join(dir, 'canary');
+      await writeCanaryCheckout(checkoutRoot, target);
+      const beforePid = current.pid;
+      await current.stop();
+      current = await launch(target);
+      return { beforePid, afterPid: current.pid };
+    },
+    async stop() { disposed = true; try { return await current.stop(); } finally { releasePort(); } },
+  };
 }
 
 /** Preserve the only history copy when export fails; temporary credentials never survive cleanup. */

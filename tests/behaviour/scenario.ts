@@ -18,6 +18,10 @@ export type CheckStatus = 'holds' | 'violated' | 'unknown';
 export interface CheckResult {
   status: CheckStatus;
   reason: string;
+  /** A negative result based only on an expected outcome not yet occurring; needs a complete, exercised run. */
+  absenceOnly?: true;
+  /** Script opt-in: present evidence proves a contradiction, even if the rest of the run is incomplete. */
+  observed?: true;
   /** Evidence locations, e.g. `events[12]`, `maps.feishu-access-20261022.history[3]`, `receipts[0]`. */
   evidence: string[];
   /** Who decides when a script cannot: the reviewer chain of R4, or the human directly. */
@@ -140,7 +144,7 @@ export interface Scenario {
   seed: Seed;
   turns: Turn[];
   controller: ControllerAction[];
-  /** Events that must be proven before any other verdict counts (R4), e.g. a real Conflict. */
+  /** Prerequisites for positive expectations, quality and absence-only checks (R4/R9); independently proved must-nots still fail. */
   requiredEvents: Item[];
   mustNot: Item[];
   expect: ExpectGroup[];
@@ -169,10 +173,10 @@ export const precondition = (id: string, text: string, question: string): Item =
   criterion: `Before the scripted reply was sent, ${question} If not, the precondition was not met.` });
 
 /** Structural errors. Every library Scenario must have none, ready or not. */
-export function validateScenario(s: Scenario): string[] {
+export function validateScenario(s: Scenario, kind: 'scenario' | 'upgrade-check' = 'scenario'): string[] {
   const errors: string[] = [];
   const err = (message: string) => errors.push(`${s.id || '<no id>'}: ${message}`);
-  if (!/^[A-Z][A-Za-z0-9]*$/.test(s.id ?? '')) err('id must be a stable identifier like S0b');
+  if (!(kind === 'upgrade-check' ? /^U-[a-z]+-[a-z-]+$/ : /^[A-Z][A-Za-z0-9]*$/).test(s.id ?? '')) err('id must be a stable Scenario or upgrade check identifier');
   if (!Number.isInteger(s.version) || s.version < 1) err('version must be a positive integer');
   if (!s.title?.trim()) err('title is required');
   if (!s.target?.trim()) err('target behaviour is required');

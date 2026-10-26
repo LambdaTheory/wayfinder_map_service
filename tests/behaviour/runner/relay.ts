@@ -5,7 +5,7 @@ import { createServer, request } from 'node:http';
 import { protectPorts } from './network-ports.ts';
 import { freePort } from './service.ts';
 
-export interface RpcRequest { id?: string | number; method?: string; params?: { name?: string; arguments?: Record<string, unknown> } }
+export interface RpcRequest { id?: string | number; method?: string; params?: { name?: string; uri?: string; arguments?: Record<string, unknown> } }
 export type RelayObservation =
   | { phase: 'request'; at?: string; method?: string | undefined; sessionId: string | string[] | null; rpc: RpcRequest }
   | { phase: 'cut'; sessionId: string | string[] | null; rpc: RpcRequest; scope: 'whole-envelope'; trigger: 'tools/call' }
@@ -22,11 +22,22 @@ export interface Route {
   close(): Promise<void>;
 }
 
-export async function startRoute(target: number, token: string, observe: (record: RelayObservation) => void, excludedPorts: readonly number[] = []): Promise<Route> {
+export async function startRoute(target: number, token: string, observe: (record: RelayObservation) => void, excludedPorts: readonly number[] = [], serializeAndBuffer = false): Promise<Route> {
   const agent = directAgent();
   let cut = false;
+  let previous = Promise.resolve();
   const upstream = new Set<ReturnType<typeof request>>();
   const server = createServer(async (req, res) => {
+    // Upgrade snapshots bracket one request at a time. Native clients may issue parallel calls;
+    // an unrelated concurrent write must never be mistaken for a refused request's side effect.
+    if (serializeAndBuffer) {
+      const wait = previous;
+      let release!: () => void;
+      previous = new Promise<void>(resolve => { release = resolve; });
+      res.once('close', release);
+      await wait;
+      if (res.destroyed) { release(); return; }
+    }
     try {
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(Buffer.from(chunk));
@@ -49,12 +60,17 @@ export async function startRoute(target: number, token: string, observe: (record
         // Stream responses as they arrive (including SSE). Capture each response for hooks and raw evidence.
         const captured: Buffer[] = [];
         response.on('data', (chunk: Buffer) => { captured.push(chunk); });
-        res.writeHead(response.statusCode ?? 502, response.headers);
-        response.pipe(res, { end: false });
+        if (!serializeAndBuffer) {
+          res.writeHead(response.statusCode ?? 502, response.headers);
+          response.pipe(res, { end: false });
+        }
         response.on('end', () => {
           const text = Buffer.concat(captured).toString();
           observe({ phase: 'response', at: new Date().toISOString(), requestId: rpc.id, method: rpc.method, sessionId: id ?? sessionId, status: response.statusCode, body: text });
-          void Promise.resolve(route.after?.(rpc, text)).then(() => res.end(), error => res.destroy(error as Error));
+          void Promise.resolve(route.after?.(rpc, text)).then(() => {
+            if (serializeAndBuffer) res.writeHead(response.statusCode ?? 502, response.headers).end(text);
+            else res.end();
+          }, error => { observe({ phase: 'hook-error', requestId: rpc.id, error: String(error) }); res.destroy(error as Error); });
         });
       });
       upstream.add(proxy);

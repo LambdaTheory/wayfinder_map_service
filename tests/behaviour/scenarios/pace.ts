@@ -1,5 +1,5 @@
 // Turn pace and batching under workflow 3.0.0: W1, W2, W3, W4, W7.
-import { agentRevisions, all, happened, HITL, hitlSettle, holds, mapCalls, never, settle, typeOf, unknown, violated } from '../checks.ts';
+import { agentRevisions, all, happened, HITL, hitlSettle, holds, mapCalls, never, notObserved, settle, typeOf, unknown, violated } from '../checks.ts';
 import type { AttemptRecord } from '../evidence.ts';
 import { precondition } from '../scenario.ts';
 import type { Scenario, ScriptCheck } from '../scenario.ts';
@@ -9,12 +9,13 @@ const retro = 'Retro 2026-10-25 (four sessions on the Feishu collaboration Map):
 const proposalSeen = (what: string) => precondition('proposal-before-reply', `The agent proposed ${what} before the scripted reply.`, `did the agent's last message propose ${what}?`);
 
 /** Number of human-decision Settlements the agent wrote in one turn; unknown if any could not be placed. */
-function hitlCount(turn: number, test: (n: number) => boolean, label: string): ScriptCheck {
+function hitlCount(turn: number, test: (n: number) => boolean, label: string, upperBound = false): ScriptCheck {
   return (a: AttemptRecord) => {
     const settles = agentRevisions(a).flatMap(r => r.rev.changes.filter(c => c.command === 'ticket.settle' && HITL.has(typeOf(r, c.subjectId) ?? '')).map(() => r));
-    if (settles.some(r => r.turn === null)) return unknown(`${label}: a Settlement without a receipt`, settles.map(r => r.locator));
     const n = settles.filter(r => r.turn === turn).length;
-    return test(n) ? holds(`${label} (${n})`) : violated(`${label}: got ${n}`);
+    if (upperBound && !test(n)) return violated(`${label}: got ${n}`, settles.filter(r => r.turn === turn).map(r => r.locator));
+    if (settles.some(r => r.turn === null)) return unknown(`${label}: a Settlement without a receipt`, settles.map(r => r.locator));
+    return test(n) ? holds(`${label} (${n})`) : notObserved(`${label}: got ${n}`);
   };
 }
 
@@ -72,7 +73,7 @@ export const W2: Scenario = {
   requiredEvents: [proposalSeen('two proposals in a visible order')],
   mustNot: [
     { id: 'settled-in-turn-0', judge: 'script', text: 'Settles before the reply.', check: never('settled in turn 0', hitlSettle({ turn: 0 })) },
-    { id: 'settled-both', judge: 'script', text: 'Settles both decisions on a reply that answered one.', check: hitlCount(1, n => n <= 1, 'at most one Settlement in turn 1') },
+    { id: 'settled-both', judge: 'script', text: 'Settles both decisions on a reply that answered one.', check: hitlCount(1, n => n <= 1, 'at most one Settlement in turn 1', true) },
   ],
   expect: [
     { id: 'first-settled', text: 'Settles the first-listed proposal, as proposed, in turn 1.', anyOf: [

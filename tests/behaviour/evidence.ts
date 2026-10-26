@@ -22,6 +22,7 @@ export type Completeness = typeof completeness[number];
 export type RulesSource =
   | { kind: 'unknown'; reason: string }
   | { kind: 'instructions'; versionLine: string }
+  | { kind: 'resource'; uri: string; versionLine: string }
   | { kind: 'tool-parameter'; tool: 'map_create' | 'map_apply'; description: string };
 
 export type Surface = 'available' | 'unavailable' | 'undocumented';
@@ -42,6 +43,10 @@ export interface GivenRules {
   rulesSource: RulesSource;
   instructions: Field<string>;
   toolDescriptions: Field<Record<string, string>>;
+  /** Full definitions on the wire; visibility is separately established by the native log. */
+  toolDefinitions?: Field<unknown[]>;
+  /** Successful Resource reply found in the native model context, never relabelled as initialization instructions. */
+  resourceText?: Field<string>;
   resources: Surface;
   prompts: Surface;
   /** Context the Entry loads besides the server: Skill, launcher instructions. Empty for MCP-only. */
@@ -93,7 +98,17 @@ export interface AttemptRecord {
   missing: string[];
   /** Append-only review rounds; each is bound to the original evidence hash. */
   modelReviews?: ReviewSummary[];
+  /** Codex upgrade-specific evidence; missing on historical Attempts remains a gap. */
+  upgrade?: {
+    mode: 'process' | 'resume';
+    contracts: { before: UpgradeContract; after: UpgradeContract };
+    restart?: { seq: number; beforePid: number; afterPid: number; port: number };
+    writes: { session: string; turn: number; requestId: string; tool: string; arguments: unknown;
+      result: unknown; before: unknown; after: unknown }[];
+  };
 }
+
+export interface UpgradeContract { version: string; instructions: string; toolDescriptions: Record<string, string>; markdown: string }
 
 export interface SessionRecord {
   /** The Scenario's session label, e.g. `A`. */

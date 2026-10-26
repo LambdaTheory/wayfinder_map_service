@@ -134,7 +134,12 @@ for (const client of ['codex', 'claude'] as const) describe(client, () => {
     writeFileSync(join(dir, 'capture.json'), read(`${client}-capture.json`));
     const assessment = JSON.parse(read(`${client}-assessment.json`)) as Assessment;
     const imported = importAttempt(dir, `${client}-supported.jsonl`, assessment);
+    // R9 confirms capability before judging dependent temporal behaviour.
     expect(outcomes(imported)).toEqual(abilities.map(() => 'insufficient-evidence'));
+    if (client === 'claude') {
+      expect(imported.verdicts[0]!.verdict.required[0]!.status).toBe('unknown');
+      expect(imported.verdicts[0]!.verdict.expect[0]!.status).toBe('unknown');
+    }
     main([dir, `${client}-supported.jsonl`, `${client}-assessment.json`, join(dir, 'judged')]);
     const record = JSON.parse(readFileSync(join(dir, 'judged/async-question.attempt.json'), 'utf8')) as AttemptRecord;
     expect(record.subject.id).toBe('B09Async'); expect(record.events).toHaveLength(6);

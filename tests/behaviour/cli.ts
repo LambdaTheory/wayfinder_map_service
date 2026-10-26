@@ -41,7 +41,7 @@ function upgrade() {
 }
 
 function validate() {
-  const errors = library.flatMap(validateScenario);
+  const errors = library.flatMap(s => validateScenario(s));
   for (const e of errors) console.error(e);
   console.log(errors.length ? `${errors.length} errors` : `${library.length} Scenarios valid`);
   if (errors.length) process.exitCode = 1;

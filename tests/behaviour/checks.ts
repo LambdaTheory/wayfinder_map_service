@@ -1,11 +1,13 @@
 // Script checks over one AttemptRecord. A check answers `holds`, `violated` or `unknown`; it never turns
-// missing or unattributable evidence into `holds` (R4). For an expectation, `violated` means "not achieved".
+// missing or unattributable evidence into `holds` (R4). Absence is separate from an observed violation.
 import { classifyResult } from './evidence.ts';
 import type { AttemptRecord, EventRecord, ResultClass, WireRevision, WireState, WireTicket } from './evidence.ts';
 import type { CheckResult, ScriptCheck } from './scenario.ts';
 
 export const holds = (reason: string, evidence: string[] = []): CheckResult => ({ status: 'holds', reason, evidence });
-export const violated = (reason: string, evidence: string[] = []): CheckResult => ({ status: 'violated', reason, evidence });
+export const violated = (reason: string, evidence: string[] = []): CheckResult => ({ status: 'violated', reason, evidence, observed: true });
+/** An outcome not observed by the end; interruption or unmet preconditions cannot prove it failed. */
+export const notObserved = (reason: string, evidence: string[] = []): CheckResult => ({ status: 'violated', reason, evidence, absenceOnly: true });
 export const unknown = (reason: string, evidence: string[] = [], escalate: 'model' | 'human' = 'human'): CheckResult =>
   ({ status: 'unknown', reason, evidence, escalate });
 
@@ -106,7 +108,7 @@ export function happened(label: string, f: ChangeFilter): ScriptCheck {
     const gap = need(a, label, ...scoped(f));
     if (gap) return gap;
     if (unplaced.length) return unknown(`${label}: matching change without a receipt placing it`, where(unplaced));
-    return violated(`not done: ${label}`);
+    return notObserved(`not done: ${label}`);
   };
 }
 
@@ -152,6 +154,16 @@ const evs = <K extends EventRecord['kind']>(a: AttemptRecord, kind: K): Ev<K>[] 
   a.events.filter((e): e is Ev<K> => e.kind === kind && e.actor === 'agent');
 export const at = (a: AttemptRecord, e: EventRecord) => `events[${a.events.indexOf(e)}]`;
 export const mapCalls = (a: AttemptRecord, tool?: string) => evs(a, 'tool-call').filter(e => /wayfinder/i.test(e.server) && (!tool || e.tool === tool));
+/** A declared missing result cannot be used even if a stale value still occupies the field. */
+export const callResultMissing = (a: AttemptRecord, e: Ev<'tool-call'>) => !e.result.known || a.missing.includes(`${at(a, e)}.result`);
+/** Workflow reads only: listing Resources or reading another URI cannot supply these rules. */
+export const workflowResourceCalls = (a: AttemptRecord, legacyUri = false) => mapCalls(a).filter(e => {
+  const uri = (e.arguments as { uri?: string } | null)?.uri;
+  return ['read_mcp_resource', 'read_resource', 'resources/read'].includes(e.tool) && typeof uri === 'string'
+    && (legacyUri ? uri.startsWith('wayfinder://workflow/exploration') : uri === 'wayfinder://workflow/exploration');
+});
+/** Native completion emits tool-call then resource-read synchronously; a derived event/phase cannot restore its missing result. */
+export const resourceResultMissing = (a: AttemptRecord, seq: number) => workflowResourceCalls(a, true).some(e => e.seq + 1 === seq && callResultMissing(a, e));
 /** The agent's write calls in order. */
 export const writeCalls = (a: AttemptRecord) => [...mapCalls(a, 'map_apply'), ...mapCalls(a, 'map_create')].sort((x, y) => x.seq - y.seq);
 /** The call's recorded result falls in this class. */
@@ -167,7 +179,7 @@ export function gotResult(label: string, cls: ResultClass, scope: { session?: st
     const gap = need(a, label, 'events.tool-call');
     if (gap) return gap;
     const unread = mapCalls(a).filter(e => !e.result.known);
-    return unread.length ? unknown(`${label}: some results were not recorded`, unread.map(e => at(a, e))) : violated(`not observed: ${label}`);
+    return unread.length ? unknown(`${label}: some results were not recorded`, unread.map(e => at(a, e))) : notObserved(`not observed: ${label}`);
   };
 }
 
@@ -179,38 +191,48 @@ export function callFailed(label: string, scope: { session?: string; turn?: numb
         && c.session === e.session && c.turn === e.turn && (c.detail as { tool?: string } | undefined)?.tool === e.tool)
       && (scope.session === undefined || e.session === scope.session) && (scope.turn === undefined || e.turn === scope.turn));
     if (hits.length) return holds(label, hits.map(e => at(a, e)));
-    return need(a, label, 'events.tool-call') ?? violated(`not observed: ${label}`);
+    return need(a, label, 'events.tool-call') ?? notObserved(`not observed: ${label}`);
   };
 }
 
 /** Must-not: after a Conflict, the same session commits nothing until the next human turn. */
 export const wroteAfterConflict: ScriptCheck = a => {
-  const gap = need(a, 'write after a Conflict', 'events.tool-call');
-  if (gap) return gap;
   const bad: string[] = [];
+  const unanswered: string[] = [];
   for (const e of mapCalls(a, 'map_apply')) {
     if (!resultIs(e, 'conflict')) continue;
     const later = writeCalls(a).filter(x => x.seq > e.seq && x.session === e.session && x.turn === e.turn);
     for (const x of later) {
-      if (!x.result.known) return unknown('a write after the Conflict has no recorded result', [at(a, e), at(a, x)]);
+      if (!x.result.known) unanswered.push(at(a, e), at(a, x));
       if (resultIs(x, 'committed')) bad.push(at(a, e), at(a, x));
     }
   }
-  return bad.length ? violated('wrote again after a Conflict in the same turn', bad) : holds('no write after a Conflict in the same turn');
+  if (bad.length) return violated('wrote again after a Conflict in the same turn', bad);
+  return need(a, 'write after a Conflict', 'events.tool-call')
+    ?? (unanswered.length ? unknown('a write after the Conflict has no recorded result', unanswered) : holds('no write after a Conflict in the same turn'));
 };
 
 /** Expectation: after each Conflict the session rereads the Map with `map_read` in the same turn. */
 export const rereadAfterConflict: ScriptCheck = a => {
+  const gap = need(a, 'reread after a Conflict', 'events.tool-call');
+  if (gap) return gap;
   const conflicts = mapCalls(a, 'map_apply').filter(e => resultIs(e, 'conflict'));
-  if (!conflicts.length) return need(a, 'reread after a Conflict', 'events.tool-call') ?? violated('no Conflict to react to');
-  const missing = conflicts.filter(c => !mapCalls(a, 'map_read').some(r => r.seq > c.seq && r.session === c.session && r.turn === c.turn));
-  return missing.length ? violated('no reread after a Conflict', missing.map(e => at(a, e))) : holds('reread after every Conflict', conflicts.map(e => at(a, e)));
+  if (!conflicts.length) return need(a, 'reread after a Conflict', 'events.tool-call') ?? notObserved('no Conflict to react to');
+  const missing = conflicts.filter(c => !mapCalls(a, 'map_read').some(r => r.seq > c.seq && r.session === c.session && r.turn === c.turn
+    && !callResultMissing(a, r) && resultIs(r, 'read')));
+  // Unfinished calls are flushed at turn end: neither their result nor their apparent ordering proves a reread.
+  const skipped = missing.filter(c => !mapCalls(a, 'map_read').some(r => r.session === c.session && r.turn === c.turn && callResultMissing(a, r)));
+  if (skipped.length) return notObserved('no reread after a Conflict', skipped.map(e => at(a, e)));
+  return missing.length ? unknown('a possible Conflict reread has no native result', missing.map(e => at(a, e)))
+    : holds('reread after every Conflict', conflicts.map(e => at(a, e)));
 };
 
 /** Expectation: before its first `map_create`, the session paged `map_list` to the end (no `nextAfterMapId` left). */
 export const pagedCatalogBeforeCreate: ScriptCheck = a => {
+  const gap = need(a, 'catalog paged before create', 'events.tool-call');
+  if (gap) return gap;
   const create = mapCalls(a, 'map_create')[0];
-  if (!create) return need(a, 'catalog paged before create', 'events.tool-call') ?? violated('no map_create');
+  if (!create) return need(a, 'catalog paged before create', 'events.tool-call') ?? notObserved('no map_create');
   const lists = mapCalls(a, 'map_list').filter(e => e.seq < create.seq && e.session === create.session);
   if (lists.some(e => !e.result.known)) return unknown('a map_list result was not recorded', lists.map(e => at(a, e)));
   const next = (e: Ev<'tool-call'>) => (e.result as { value: { nextAfterMapId?: string } }).value?.nextAfterMapId;
@@ -230,7 +252,7 @@ export function commandRan(label: string, pattern: RegExp, opts: { exitZero?: bo
   return a => {
     const hits = evs(a, 'command').filter(e => pattern.test(e.command) && (!opts.exitZero || e.exitCode === 0));
     if (hits.length) return holds(label, hits.map(e => at(a, e)));
-    return need(a, label, 'events.command') ?? violated(`not done: ${label}`);
+    return need(a, label, 'events.command') ?? notObserved(`not done: ${label}`);
   };
 }
 
@@ -238,7 +260,7 @@ export function fileChanged(label: string, pattern: RegExp): ScriptCheck {
   return a => {
     const hits = evs(a, 'file-change').filter(e => pattern.test(e.path));
     if (hits.length) return holds(label, hits.map(e => at(a, e)));
-    return need(a, label, 'events.file-change') ?? violated(`not done: ${label}`);
+    return need(a, label, 'events.file-change') ?? notObserved(`not done: ${label}`);
   };
 }
 
@@ -255,11 +277,13 @@ export function noFileChanged(label: string, pattern: RegExp): ScriptCheck {
 export function readBeforeWrite(label: string, read: RegExp, write: RegExp): ScriptCheck {
   return a => {
     const firstWrite = evs(a, 'file-change').find(e => write.test(e.path));
-    if (!firstWrite) return need(a, label, 'events.file-change') ?? violated(`nothing written matching ${write}`);
+    if (!firstWrite) return need(a, label, 'events.file-change') ?? notObserved(`nothing written matching ${write}`);
     const reads = [...evs(a, 'file-read').filter(e => read.test(e.path)), ...evs(a, 'command').filter(e => read.test(e.command))]
       .filter(e => e.seq < firstWrite.seq);
-    if (reads.length) return holds(label, [...reads.map(e => at(a, e)), at(a, firstWrite)]);
-    return a.missing.includes('events.file-read') || a.missing.includes('events') ? unknown(`${label}: reads were not recorded`, [at(a, firstWrite)], 'model')
+    // Missing writes can hide an earlier write, so they block success. They cannot undo this recorded
+    // write-before-read contradiction when the read/command trace is complete.
+    if (reads.length) return need(a, label, 'events.file-change') ?? holds(label, [...reads.map(e => at(a, e)), at(a, firstWrite)]);
+    return need(a, label, 'events.file-read', 'events.command') ? unknown(`${label}: reads were not recorded`, [at(a, firstWrite)], 'model')
       : violated(`wrote ${firstWrite.path} before reading ${read}`, [at(a, firstWrite)]);
   };
 }
@@ -288,9 +312,11 @@ export function finalState(a: AttemptRecord, mapId: string): WireState | null {
 /** Expectation about the final state of one Map. */
 export function atEnd(label: string, mapId: string, pred: (s: WireState) => boolean): ScriptCheck {
   return a => {
+    const gap = need(a, label, 'maps');
+    if (gap) return gap;
     const s = finalState(a, mapId);
     if (!s) return unknown(`${label}: no history for ${mapId}`);
-    return pred(s) ? holds(label, [`maps.${mapId}.history[-1]`]) : violated(`not true at the end: ${label}`, [`maps.${mapId}.history[-1]`]);
+    return pred(s) ? holds(label, [`maps.${mapId}.history[-1]`]) : notObserved(`not true at the end: ${label}`, [`maps.${mapId}.history[-1]`]);
   };
 }
 
@@ -301,14 +327,15 @@ export function mapsCreated(a: AttemptRecord): number {
 
 export const createdExactlyOnce: ScriptCheck = a => {
   const n = mapsCreated(a);
-  return n === 1 ? holds('created one Map') : n === 0 ? violated('created no Map') : violated(`created ${n} Maps`);
+  if (n > 1) return violated(`created ${n} Maps`);
+  return need(a, 'created exactly one Map', 'maps') ?? (n === 1 ? holds('created one Map') : notObserved('created no Map'));
 };
 
 export function all(label: string, ...checks: ScriptCheck[]): ScriptCheck {
   return a => {
     const results = checks.map(c => c(a));
-    const bad = results.find(r => r.status === 'violated');
-    if (bad) return violated(`${label}: ${bad.reason}`, bad.evidence);
+    const bad = results.find(r => r.status === 'violated' && !r.absenceOnly) ?? results.find(r => r.status === 'violated');
+    if (bad) return { ...bad, reason: `${label}: ${bad.reason}` };
     const unsure = results.find(r => r.status === 'unknown');
     if (unsure) return unknown(`${label}: ${unsure.reason}`, unsure.evidence, unsure.escalate);
     return holds(label, results.flatMap(r => r.evidence));

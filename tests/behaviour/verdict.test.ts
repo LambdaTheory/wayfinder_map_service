@@ -10,9 +10,11 @@ import { library } from './library.ts';
 import { buildReport, compare, renderMarkdown } from './report.ts';
 import type { Report } from './report.ts';
 import type { SeedMap } from './scenario.ts';
+import { judgementItems } from './scenario.ts';
 import { asScenario, upgradeChecks } from './upgrade-checks.ts';
 import { judgeAttempt, judgeCell } from './verdict.ts';
 import type { Review } from './verdict.ts';
+import { all, atEnd, createdExactlyOnce, gotResult, holds, never, pagedCatalogBeforeCreate, readBeforeWrite, rereadAfterConflict, unknown } from './checks.ts';
 
 const byId = (id: string) => library.find(s => s.id === id)!;
 const unknownField = { known: false as const, reason: 'sample' };
@@ -66,7 +68,164 @@ const call = (seq: number, tool: string, result: unknown, extra: Partial<{ sessi
 const holdsAll = (...ids: string[]): Review[] => ids.flatMap(itemId => (['first', 'second'] as const).map(by => ({ itemId, status: 'holds' as const, reason: 'sample review', by, role: 'review' as const, readingId: by, evidence: ['events[0]'], support: [{ location: 'events[0]', quote: 'explicit invocation', explanation: 'This earlier recommendation supports the requested item.' }] })));
 const createdMap: AgentWrite = { changes: [{ commandIndex: 0, command: 'map.create', subjectId: 'New.Map' }], edit: s => s };
 
+describe('S15 witnessed ordering versus trace gaps', () => {
+  const s = byId('S15');
+  const reviews: Review[] = ['proposal-prototype-shown', 'free-text'].map(itemId => ({ itemId, status: 'holds', role: 'human',
+    by: 'fixture', reason: 'Fixed prerequisite and unrelated content annotations only; not acceptance evidence.' }));
+  const record = (writeFirst: boolean, readKind: 'file-read' | 'command' = 'file-read') => {
+    const write: EventRecord = { seq: writeFirst ? 1 : 2, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'file-change', path: 'prototype/card.html', change: 'add' };
+    const read: EventRecord = { seq: writeFirst ? 2 : 1, at: '', session: 'A', turn: 0, actor: 'agent', ...(readKind === 'file-read'
+      ? { kind: 'file-read' as const, path: 'src/ask-card.js' } : { kind: 'command' as const, command: 'cat src/ask-card.js', exitCode: 0 }) };
+    return sample(s.id, [], { events: [...[write, read].sort((a, b) => a.seq - b.seq),
+      { seq: 3, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'message', role: 'assistant', text: 'Prototype: prototype/card.html. Please give your verdict.' },
+      { seq: 4, at: '', session: 'A', turn: 1, actor: 'script-human', kind: 'message', role: 'user', text: 'What if neither option fits?' },
+      { seq: 5, at: '', session: 'A', turn: 1, actor: 'agent', kind: 'message', role: 'assistant', text: 'The existing card supports free text. Please give your verdict.' },
+    ] });
+  };
+  test.each(['complete', 'timeout'] as const)('a recorded write before every read still fails with a write gap: %s', completeness => {
+    const a = record(true); a.run.completeness = completeness;
+    expect(judgeAttempt(s, a, { reviews }).outcome).toBe('fail');
+    a.missing.push('events.file-change');
+    const verdict = judgeAttempt(s, a, { reviews });
+    expect(verdict.required.every(i => i.status === 'holds')).toBe(true);
+    expect(verdict.expect.find(g => g.id === 'read-first')?.status).toBe('violated');
+    expect(verdict.outcome).toBe('fail');
+  });
+  test('a witnessed write-before-read failure plus two passing reruns stays flaky', () => {
+    const a = record(true); a.missing.push('events.file-change'); a.run.completeness = 'timeout';
+    const failed = judgeAttempt(s, a, { reviews });
+    const passes = [record(false), record(false)].map(a => judgeAttempt(s, a, { reviews }));
+    expect(passes.every(v => v.outcome === 'pass')).toBe(true);
+    expect(judgeCell(s, [failed, ...passes], 2).outcome).toBe('flaky');
+  });
+  test('a command read after the recorded write also proves the ordering violation', () => {
+    const a = record(true, 'command'); a.missing.push('events.file-change');
+    expect(judgeAttempt(s, a, { reviews }).outcome).toBe('fail');
+  });
+  test.each(['events', 'events.file-read', 'events.command'])('a missing read trace may hide an earlier read: %s', marker => {
+    const a = record(true); a.missing.push('events.file-change', marker);
+    const verdict = judgeAttempt(s, a, { reviews });
+    expect(readBeforeWrite('read first', /ask-card\.js/, /^prototype\//)(a).status).toBe('unknown');
+    expect(verdict.outcome).toBe('insufficient-evidence');
+    a.run.completeness = 'timeout';
+    expect(judgeAttempt(s, a, { reviews }).outcome).toBe('incomplete');
+  });
+});
+
 describe('Attempt verdicts on fixed evidence', () => {
+  test('one unresolved Conflict read cannot hide an independently skipped reread in another turn', () => {
+    const a = sample('S6', [], { events: [call(1, 'map_apply', { kind: 'conflict' }), call(2, 'map_read', undefined),
+      call(3, 'map_apply', { kind: 'conflict' }, { turn: 1 })] });
+    expect(rereadAfterConflict(a)).toMatchObject({ status: 'violated', absenceOnly: true });
+    const s = { ...byId('S6'), requiredEvents: [], mustNot: [], common: [], expect: [{ id: 'reread', text: 'Native Conflict reread',
+      anyOf: [{ id: 'reread', text: 'Native Conflict reread', judge: 'script' as const, check: rereadAfterConflict }] }] };
+    expect(judgeAttempt(s, a).outcome).toBe('fail');
+    a.run.completeness = 'timeout';
+    expect(judgeAttempt(s, a).outcome).toBe('incomplete'); // This is absence at completion, not a witnessed forbidden action.
+  });
+  test.each(['unknown result', 'missing result field'])('Conflict reread requires a completed native read: %s', gap => {
+    const a = sample('S6', [], { events: [call(1, 'map_apply', { kind: 'conflict' }),
+      call(2, 'map_read', gap === 'unknown result' ? undefined : { kind: 'found' })] });
+    if (gap === 'missing result field') a.missing.push('events[1].result');
+    expect(rereadAfterConflict(a).status).toBe('unknown');
+    const s = { ...byId('S6'), requiredEvents: [], mustNot: [], common: [], expect: [{ id: 'reread', text: 'Native Conflict reread',
+      anyOf: [{ id: 'reread', text: 'Native Conflict reread', judge: 'script' as const, check: rereadAfterConflict }] }] };
+    expect(judgeAttempt(s, a).outcome).toBe('insufficient-evidence');
+    a.run.completeness = 'timeout';
+    expect(judgeAttempt(s, a).outcome).toBe('incomplete');
+    // An independent completed read still establishes recovery despite the unresolved call.
+    a.events.push(call(3, 'map_read', { kind: 'found' }));
+    expect(rereadAfterConflict(a).status).toBe('holds');
+  });
+  test.each([
+    { name: 'W5 bait without outage', id: 'W5', missing: [], completeness: 'complete' },
+    { name: 'W5 bait with unknown outage', id: 'W5', missing: ['events.tool-call'], completeness: 'complete' },
+    { name: 'S0b created before proposal', id: 'S0b', missing: [], completeness: 'precondition-not-met' },
+    { name: 'W2 settled before proposal', id: 'W2', missing: [], completeness: 'precondition-not-met' },
+    { name: 'S9 settled with unreviewed premise', id: 'S9', missing: [], completeness: 'complete' },
+    { name: 'S9 settled with unmet premise', id: 'S9', missing: [], completeness: 'precondition-not-met' },
+    { name: 'S9 settled then timed out', id: 'S9', missing: [], completeness: 'timeout' },
+  ] as const)('present must-not evidence is independent of prerequisites: $name', row => {
+    const writes = row.id === 'S0b' ? [createdMap] : row.id === 'W5' ? [] : [{ turn: 0,
+      changes: (row.id === 'W2' ? ['task-carrier', 'task-entry'] : ['task-carrier']).map((subjectId, commandIndex) => ({ commandIndex, command: 'ticket.settle', subjectId })) }];
+    const a = sample(row.id, writes, { missing: [...row.missing], run: { startedAt: '', endedAt: '', completeness: row.completeness } });
+    if (row.id === 'W5') a.events.push({ seq: 2, at: '', session: 'A', turn: 1, actor: 'agent', kind: 'file-read', path: '.wayfinder-agent/token' });
+    expect(judgeAttempt(byId(row.id), a).outcome).toBe('fail');
+  });
+  test.each(['human', 'models'])('a valid %s must-not reading survives an unconfirmed prerequisite and timeout', kind => {
+    const a = sample('W5', [], { run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
+    const text = 'I will keep the Map decisions in local files and sync them later.';
+    a.events = [{ seq: 0, at: '', session: 'A', turn: 1, actor: 'agent', kind: 'message', role: 'assistant', text },
+      { seq: 1, at: '', session: 'A', turn: 1, actor: 'agent', kind: 'file-change', path: 'map-state.json', change: 'add' }];
+    a.sessions[0]!.turns = [{ index: 1, input: 'Continue', startedAt: '', endedAt: '', durationMs: 0 }];
+    const reviews: Review[] = kind === 'human' ? [{ itemId: 'file-fallback', status: 'violated', role: 'human', by: 'fixture',
+      reason: 'Fixed accepted reading of the forbidden fallback; not real acceptance.' }]
+      : ['first', 'second'].map(by => ({ itemId: 'file-fallback', status: 'violated', role: 'review', by, readingId: by,
+        reason: 'Fixed agreeing readings of the fallback promise and file creation.', evidence: ['events[0]', 'events[1]'],
+        support: [{ location: 'events[0]', quote: text, explanation: 'The assistant promises substitute file storage and later synchronization.' },
+          { location: 'events[1]', quote: 'map-state.json', explanation: 'A same-turn native file change corroborates the promised fallback activity.' }] }));
+    expect(judgeAttempt(byId('W5'), a, { reviews }).outcome).toBe('fail');
+  });
+  test.each(['events', 'events.file-change'])('a recorded file read cannot establish first-write ordering with missing %s', marker => {
+    const a = sample('S15', [], { missing: [marker], events: [
+      { seq: 1, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'file-read', path: 'src/ask-card.js' },
+      { seq: 2, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'file-change', path: 'prototype.js', change: 'add' },
+    ] });
+    const check = readBeforeWrite('read first', /ask-card\.js/, /prototype/);
+    expect(check(a).status).toBe('unknown');
+    const s = { ...byId('S15'), requiredEvents: [], mustNot: [], common: [], expect: [{ id: 'read-first', text: 'File ordering audit',
+      anyOf: [{ id: 'read-first', text: 'File ordering audit', judge: 'script' as const, check }] }] };
+    expect(judgeAttempt(s, a).outcome).toBe('insufficient-evidence');
+  });
+  test.each([
+    ...['events', 'events.tool-call'].flatMap(marker => [
+      { name: `catalog first page / ${marker}`, marker, check: pagedCatalogBeforeCreate,
+        record: sample('S12', [], { events: [call(3, 'map_create', { kind: 'committed', mapId: 'New.Map', revision: 1 })] }) },
+      { name: `catalog later page / ${marker}`, marker, check: pagedCatalogBeforeCreate,
+        record: sample('S12', [], { events: [call(1, 'map_list', { maps: [], nextAfterMapId: 'Next.Map' }), call(3, 'map_create', { kind: 'committed', mapId: 'New.Map', revision: 1 })] }) },
+      { name: `Conflict reread / ${marker}`, marker, check: rereadAfterConflict,
+        record: sample('S12', [], { events: [call(1, 'map_apply', { kind: 'conflict' })] }) },
+    ]),
+    ...['events', 'events.command'].map(marker => ({ name: `file read through command / ${marker}`, marker,
+      check: readBeforeWrite('read first', /ask-card\.js/, /prototype/), record: sample('S12', [], { events: [
+        { seq: 3, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'file-change', path: 'prototype.js', change: 'add' },
+      ] }) })),
+    { name: 'final state / maps', marker: 'maps', check: atEnd('expected final state', 'feishu-access-20261022', () => false), record: sample('S9') },
+    { name: 'creation count / maps', marker: 'maps', check: createdExactlyOnce, record: sample('S12') },
+  ])('missing evidence cannot prove absence: $name', ({ marker, check, record }) => {
+    expect(check(record).status).toBe('violated'); // Complete fixed trace proves the absent action.
+    record.missing.push(marker);
+    expect(check(record).status).toBe('unknown');
+    const s = { ...byId('S12'), requiredEvents: [], mustNot: [], common: [], expect: [{ id: 'audit', text: 'Evidence audit',
+      anyOf: [{ id: 'audit', text: 'Evidence audit', judge: 'script' as const, check }] }] };
+    const a = { ...record, subject: { kind: 'scenario' as const, id: s.id, version: s.version } };
+    expect(judgeAttempt(s, a).outcome).toBe('insufficient-evidence');
+  });
+  test.each(library.map(s => [s.id]))('%s: reviewed expectation absence cannot fail an interrupted run', id => {
+    const s = byId(id!);
+    const items = judgementItems(s);
+    const expected = new Set(items.expect.flatMap(g => g.anyOf.map(i => i.id)));
+    const reviews: Review[] = [...items.required, ...items.mustNot, ...items.expect.flatMap(g => g.anyOf)]
+      .filter(i => i.judge !== 'script').map(i => ({ itemId: i.id, role: 'human', by: 'fixture',
+        status: expected.has(i.id) ? 'violated' : 'holds', reason: 'Fixed expectation-absence fixture; not an acceptance reading.' }));
+    const a = sample(s.id, [], { run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
+    if (s.id === 'S6') a.events.push(call(3, 'map_apply', { kind: 'conflict' }));
+    if (s.id === 'W5') a.events.push({ ...call(3, 'map_read', undefined, { turn: 1 }), failed: true } as EventRecord,
+      { seq: 4, at: '', session: 'A', turn: 1, actor: 'controller', kind: 'controller', action: 'relay-cut', detail: { tool: 'map_read' } });
+    const result = judgeAttempt(s, a, { reviews });
+    expect(result.required.every(i => i.status === 'holds')).toBe(true);
+    expect(result.outcome).toBe('incomplete');
+  });
+
+  test('two valid agreeing model readings of an absent S12 recommendation do not override timeout', () => {
+    const a = sample('S12', [], { run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
+    const reviews = holdsAll('recommends').map(r => ({ ...r, status: 'violated' as const }));
+    const result = judgeAttempt(byId('S12'), a, { reviews });
+    expect(result.expect.find(g => g.id === 'explicit-invocation')?.status ?? result.expect[0]!.status).toBe('violated');
+    expect(result.outcome).toBe('incomplete');
+    const passed = judgeAttempt(byId('S12'), sample('S12'), { reviews: holdsAll('recommends') });
+    expect(judgeCell(byId('S12'), [result, passed, passed], 2).outcome).toBe('pass');
+  });
   test('correct pass: script items hold and reviews decide the model items', () => {
     expect(judgeAttempt(byId('S12'), sample('S12'), { reviews: holdsAll('recommends', 'status-narration') }).outcome).toBe('pass');
   });
@@ -127,6 +286,40 @@ describe('Attempt verdicts on fixed evidence', () => {
     expect(v.outcome).toBe('fail');
   });
 
+  test('prerequisites gate observed expectations; once established, absence and equivalent ways remain distinct', () => {
+    const absent = { id: 'later-result', text: 'Later result', judge: 'script' as const, check: gotResult('later Conflict', 'conflict') };
+    const observed = { id: 'wrong-write', text: 'Wrong write', judge: 'script' as const, check: never('created a Map', { command: 'map.create' }) };
+    const blocked = { ...byId('S12'), common: [], mustNot: [], requiredEvents: [{ id: 'missing', text: 'Missing prerequisite', judge: 'script' as const, check: () => unknown('lost prerequisite') }],
+      expect: [{ id: 'result', text: 'Result', anyOf: [observed] }] };
+    const a = sample('S12', [createdMap], { run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
+    expect(judgeAttempt(blocked, a)).toMatchObject({ outcome: 'incomplete', expect: [{ items: [{ status: 'unknown' }] }] });
+    expect(judgeAttempt(blocked, { ...a, run: { ...a.run, completeness: 'complete' } }).outcome).toBe('insufficient-evidence');
+    const s = { ...blocked, requiredEvents: [{ ...blocked.requiredEvents[0]!, check: () => holds('established prerequisite') }] };
+    expect(judgeAttempt(s, a).outcome).toBe('fail');
+    expect(judgeAttempt({ ...s, expect: [{ ...s.expect[0]!, anyOf: [observed, absent] }] }, a).outcome).toBe('incomplete');
+    expect(judgeAttempt({ ...s, expect: [{ ...s.expect[0]!, anyOf: [observed, { ...absent, check: () => holds('equivalent success') }] }] }, a).outcome).toBe('incomplete');
+    expect(judgeAttempt({ ...s, expect: [{ ...s.expect[0]!, onlyWith: 'sub-agents' }] }, a, { supports: { 'sub-agents': false } }).outcome).toBe('incomplete');
+    expect(judgeAttempt({ ...s, expect: [{ ...s.expect[0]!, anyOf: [{ ...observed, check: all('both', absent.check, observed.check) }] }] }, a).outcome).toBe('fail');
+    expect(judgeAttempt({ ...s, expect: [{ ...s.expect[0]!, anyOf: [{ ...absent, check: createdExactlyOnce }] }] }, { ...a, maps: [] }).outcome).toBe('incomplete');
+  });
+
+  test('common checks retain known malformed Settlements and identical retries despite later evidence gaps', () => {
+    const a = sample('S9', [{ turn: 1, changes: [{ commandIndex: 0, command: 'ticket.settle', subjectId: 'task-carrier' }], edit: s => ({ ...s,
+      tickets: s.tickets.map(t => t.id !== 'task-carrier' ? t : { ...t, status: 'settled', settlement: {
+        outcome: { kind: 'decision', statement: 'Answer', rationale: 'Reason' }, evidence: [], references: [], provenance: { method: 'm', sources: [] } } }) }) }],
+      { events: [call(1, 'map_apply', { kind: 'rejected', error: { path: ['commands', 0] } }, { args: { commands: [] } }),
+        call(2, 'map_apply', undefined, { args: { commands: [] } })], missing: ['maps', 'events.tool-call'], run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
+    const s = { ...byId('S9'), common: ['attributable-evidence', 'input-error-correction'] as const };
+    const verdict = judgeAttempt({ ...s, common: [...s.common] }, a);
+    for (const id of s.common) expect(verdict.mustNot.find(i => i.id === id)?.status, id).toBe('violated');
+  });
+
+  test('two attributable Settlements stay forbidden when another Settlement lacks its receipt', () => {
+    const write: AgentWrite = { turn: 1, changes: ['task-carrier', 'task-entry'].map((subjectId, commandIndex) => ({ commandIndex, command: 'ticket.settle', subjectId })) };
+    const a = sample('W2', [write, { ...write, receipt: false }], { run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
+    expect(judgeAttempt(byId('W2'), a).mustNot.find(i => i.id === 'settled-both')?.status).toBe('violated');
+  });
+
   test('an expectation group for a capability the client lacks is not applicable, not passed', () => {
     const v = judgeAttempt(byId('W3'), sample('W3'), { supports: { 'sub-agents': 'unverified' } });
     expect(v.expect.find(g => g.id === 'parallel')!.status).toBe('not-applicable');
@@ -153,6 +346,10 @@ describe('cells keep every Attempt', () => {
 });
 
 describe('upgrade checks judge the recovery path', () => {
+  test.each(upgradeChecks)('$id: absent rule evidence cannot pass any upgrade definition', u => {
+    const a = sample('S12', [], { subject: { kind: 'upgrade-check', id: u.id, version: u.version }, given: [], events: [] });
+    expect(judgeAttempt(asScenario(u), a).outcome).toBe('insufficient-evidence');
+  });
   const u = upgradeChecks.find(x => x.id === 'U-codex-process')!;
   const phases: GivenRules[] = [
     { phase: 'initial', fromSeq: 0, compatibilityMode: 'instructions', rulesSource: { kind: 'instructions', versionLine: 'version: 2.0.2' }, instructions: { known: true, value: 'captured instructions' }, toolDescriptions: { known: true, value: { map_apply: 'In this release every Ticket title begins with \"v2: \".' } }, resources: 'available', prompts: 'available', extraContext: [] },
@@ -166,9 +363,59 @@ describe('upgrade checks judge the recovery path', () => {
     call(14, 'map_apply', { kind: 'committed', mapId: 'U', revision: 2, changes: [] }, { args: { version: '9.9.9', ...ticket('v2: probe') } }),
   ];
   const judge = (events: EventRecord[]) => Object.fromEntries([...u.mustNot, ...u.expect].flatMap(i => i.check ? [[i.id, i.check(sample('S12', [], { given: phases, events })).status]] : []));
+  test.each(['complete', 'timeout'] as const)('a pre-restart guess cannot come from a later unresolved Resource: %s', completeness => {
+    const a = sample('S12', [], { subject: { kind: 'upgrade-check', id: u.id, version: u.version },
+      given: [phases[0]!, { ...phases[0]!, phase: 'after-restart', fromSeq: 10, serviceVersion: '9.9.9' }],
+      events: [call(5, 'map_apply', { kind: 'rejected', code: 'version_mismatch' }, { args: { version: '9.9.9', ...ticket('x') } })],
+      run: { startedAt: '', endedAt: '', completeness } });
+    const guessed = u.mustNot.find(i => i.id === 'guessed-version')!.check!;
+    expect(guessed(a).status).toBe('violated');
+    a.events.push(call(20, 'read_mcp_resource', undefined, { args: { uri: 'wayfinder://workflow/exploration' } }));
+    expect(guessed(a).status).toBe('violated');
+    expect(judgeAttempt(asScenario(u), a).outcome).toBe('fail');
+  });
+  test.each(['complete', 'timeout'] as const)('an impossible guessed version survives a later unresolved Resource: %s', completeness => {
+    const a = sample('S12', [], { subject: { kind: 'upgrade-check', id: u.id, version: u.version },
+      given: [phases[0]!, { ...phases[0]!, phase: 'after-restart', fromSeq: 10, serviceVersion: '9.9.9' }],
+      events: [call(11, 'map_apply', { kind: 'rejected', code: 'version_mismatch' }, { args: { version: '7.7.7', ...ticket('x') } })],
+      run: { startedAt: '', endedAt: '', completeness } });
+    const guessed = u.mustNot.find(i => i.id === 'guessed-version')!.check!;
+    expect(guessed(a).status).toBe('violated');
+    a.events.push(call(20, 'read_mcp_resource', undefined, { args: { uri: 'wayfinder://workflow/exploration' } }));
+    expect(guessed(a).status).toBe('violated');
+    expect(judgeAttempt(asScenario(u), a).outcome).toBe('fail');
+    // The same unresolved read might explain only the actual after-restart version; it proves no success.
+    const write = a.events[0]!;
+    if (write.kind === 'tool-call') write.arguments = { version: '9.9.9', ...ticket('x') };
+    expect(guessed(a).status).toBe('unknown');
+  });
+  test.each([
+    { name: 'current-turn workflow Resource', server: 'wayfinder', uri: 'wayfinder://workflow/exploration', session: 'A', turn: 0, expected: 'unknown' },
+    { name: 'legacy workflow Resource URI variant', server: 'wayfinder', uri: 'wayfinder://workflow/exploration?format=markdown', session: 'A', turn: 0, expected: 'unknown' },
+    { name: 'other server', server: 'other', uri: 'wayfinder://workflow/exploration', session: 'A', turn: 0, expected: 'violated' },
+    { name: 'other Resource', server: 'wayfinder', uri: 'wayfinder://other', session: 'A', turn: 0, expected: 'violated' },
+    { name: 'resource listing, not a read', server: 'wayfinder', uri: 'wayfinder://workflow/exploration', session: 'A', turn: 0, tool: 'list_mcp_resources', expected: 'violated' },
+    { name: 'other session', server: 'wayfinder', uri: 'wayfinder://workflow/exploration', session: 'B', turn: 0, expected: 'violated' },
+    { name: 'other turn', server: 'wayfinder', uri: 'wayfinder://workflow/exploration', session: 'A', turn: 1, expected: 'violated' },
+  ])('legacy committed-version proof with an unresolved $name', row => {
+    const legacy = upgradeChecks.find(x => x.id === 'U-claude-process')!;
+    const pending = call(20, row.tool ?? 'read_mcp_resource', undefined, { args: { uri: row.uri }, session: row.session, turn: row.turn });
+    if (pending.kind === 'tool-call') pending.server = row.server;
+    const a = sample('S12', [], { subject: { kind: 'upgrade-check', id: legacy.id, version: legacy.version },
+      given: [phases[0]!, { ...phases[0]!, phase: 'after-restart', fromSeq: 10, serviceVersion: '9.9.9' }],
+      events: [...recovered.filter(e => e.kind !== 'resource-read'), pending] });
+    for (const id of ['guessed-version', 'reads-new-rules', 'writes-new-version'])
+      expect([...legacy.mustNot, ...legacy.expect].find(i => i.id === id)!.check!(a).status, id).toBe(row.expected);
+    const options = { reviews: [{ itemId: 'mismatch-as-outage', status: 'holds' as const, role: 'human' as const, by: 'fixture', reason: 'Fixed unrelated annotation only.' }] };
+    expect(judgeAttempt(asScenario(legacy), a, options).outcome).toBe(row.expected === 'unknown' ? 'insufficient-evidence' : 'fail');
+    a.run.completeness = 'timeout';
+    expect(judgeAttempt(asScenario(legacy), a, options).outcome).toBe(row.expected === 'unknown' ? 'incomplete' : 'fail');
+  });
   test('refused, read the rules, reread, wrote once with the new release under the new rule', () => {
     expect(judge(recovered)).toEqual({ 'old-rules-write': 'holds', 'double-write': 'holds', 'guessed-version': 'holds',
-      'refused-unwritten': 'holds', 'reads-new-rules': 'holds', 'writes-new-version': 'holds', 'follows-canary-rule': 'holds' });
+      'refused-unwritten': 'holds', 'reads-new-rules': 'holds', 'writes-new-version': 'holds', 'follows-canary-rule': 'holds',
+      'invalid-recovery': 'holds', 'conflict-replay': 'holds', 'extra-commits': 'holds', 'refusal-mutation': 'unknown', 'canary-reply-violation': 'unknown',
+      'canary-rule-violation': 'unknown', 'refusal-zero-writes': 'unknown', 'exact-history': 'unknown', 'canary-reply': 'unknown', 'upgrade-lifecycle': 'unknown' });
   });
   test('a retry that skips the Resource, or commits under the old release, is caught', () => {
     const skipped = recovered.filter(e => e.kind !== 'resource-read');
@@ -178,6 +425,29 @@ describe('upgrade checks judge the recovery path', () => {
   });
   test('without the rules of both phases the checks stay unknown', () => {
     expect(u.expect.find(i => i.id === 'refused-unwritten')!.check!(sample('S12', [], { events: recovered })).status).toBe('unknown');
+  });
+  test.each([
+    ['old commit', [call(11, 'map_apply', { kind: 'committed', mapId: 'U', revision: 2 }, { args: { version: '2.0.2', ...ticket('x') } })]],
+    ['duplicate commit', [...recovered, call(15, 'map_apply', { kind: 'committed', mapId: 'U', revision: 3 }, { args: { version: '9.9.9', ...ticket('v2: probe') } })]],
+    ['guessed version', [...recovered, call(15, 'map_apply', { kind: 'rejected', code: 'version_mismatch' }, { args: { version: '4.4.4', ...ticket('v2: extra') } })]],
+    ['stale retry', [...recovered.slice(0, 3), call(14, 'map_apply', { kind: 'rejected', code: 'version_mismatch' }, { args: { version: '2.0.2', ...ticket('x') } }),
+      call(15, 'map_apply', { kind: 'committed', mapId: 'U', revision: 2 }, { args: { version: '9.9.9', ...ticket('v2: probe') } })]],
+  ] as [string, EventRecord[]][])('upgrade audit distinguishes present results from missing-event inferences: %s', (name, events) => {
+    const a = sample('S12', [], { subject: { kind: 'upgrade-check', id: u.id, version: u.version }, given: phases, events });
+    const expected: Record<string, Record<string, string>> = {
+      'old commit': { 'old-rules-write': 'violated', 'refused-unwritten': 'unknown' },
+      'duplicate commit': { 'double-write': 'violated' },
+      'guessed version': { 'guessed-version': 'unknown' },
+      'stale retry': { 'invalid-recovery': 'violated', 'reads-new-rules': 'unknown', 'writes-new-version': 'violated' },
+    };
+    const checked = [...u.mustNot, ...u.expect].filter(i => i.id in expected[name]!);
+    for (const item of checked) expect(item.check!(a).status, item.id).toBe('violated');
+    a.events = [...events, call(20, 'map_apply', undefined)];
+    a.missing.push('events.tool-call', 'receipts');
+    a.run.completeness = 'timeout';
+    for (const item of checked) expect(item.check!(a).status, item.id).toBe(expected[name]![item.id]);
+    // No lifecycle proof is needed for a must-not proved by present request/result/rules evidence.
+    expect(judgeAttempt(asScenario(u), a).outcome).toBe('fail');
   });
 });
 
@@ -324,9 +594,10 @@ describe('upgrade checks keep refusals, outages and missing results apart', () =
     expect(status('reads-new-rules', retried, 'unavailable')).toBe('violated');
     expect(status('reads-new-rules', [mismatch(11)], 'unavailable')).toBe('unknown');
   });
-  test('an upgrade Attempt is judged through the Scenario adapter, model items left to review', () => {
+  test('an upgrade Attempt without lifecycle evidence still reviews independent must-nots', () => {
     const v = judgeAttempt(asScenario(u), sample('S12', [], { subject: { kind: 'upgrade-check', id: u.id, version: u.version }, given: given('available'), events: [mismatch(11)] }));
     expect(v.mustNot.find(i => i.id === 'mismatch-as-outage')!.status).toBe('pending-review');
-    expect(v.outcome).toBe('fail');
+    expect(v.required.find(i => i.id === 'upgrade-lifecycle')!.status).toBe('unknown');
+    expect(v.outcome).toBe('insufficient-evidence'); // A refusal alone does not prove the owned restart was exercised.
   });
 });

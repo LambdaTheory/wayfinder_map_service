@@ -176,7 +176,8 @@ describe('Controller actions and preconditions', () => {
 
   test.each(['S5', 'S6', 'S10'])('%s stops honestly if its proposal or read/write trigger is absent', async id => {
     const { outcome, record } = await run(scenario(id), 'fake-model');
-    expect(outcome.completeness).toBe('precondition-not-met');
+    expect(outcome.completeness, JSON.stringify({ detail: outcome.detail, failures: record.isolation.failures,
+      processes: record.events.filter(e => e.kind === 'process') })).toBe('precondition-not-met');
     expect(record.events.some(e => e.actor === 'script-human' && e.turn === (id === 'S6' ? 2 : 1))).toBe(false);
   });
 
