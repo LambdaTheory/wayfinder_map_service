@@ -2,7 +2,7 @@
 
 The Scenario library and evidence contract of the [behaviour testing requirements](../../docs/spec/behaviour-testing.md) (B01, Issue #64). Scenarios describe how an agent in a real client must behave on a Wayfinder Map; Drivers (B02 onwards) start clients against an isolated service and record what happened; verdicts (B03) judge the record.
 
-Library inspection starts no service or model. Runner tests start disposable services with fake clients; model runs happen only inside a Batch Kun has approved. Raw conversations and run records stay in a private directory outside the repository.
+Library inspection starts no service or model. Automated tests use disposable services with fake clients; manual runners start isolated services, and runs that spend model quota happen only inside a Batch Kun has approved. Raw conversations and run records stay in a private directory outside the repository.
 
 ## Layout
 
@@ -17,6 +17,7 @@ Library inspection starts no service or model. Runner tests start disposable ser
 | `seeds/` | Seed Maps; `f11.json` is the redacted capture of a real Map |
 | `fixtures/` | Working-directory fixtures copied into the agent's directory |
 | `runner/` | The runner: isolated service, Controller, Codex Driver, normalizer (B02a/B02b) |
+| `chatgpt/` | Manual isolated ChatGPT Batch preparation, relay capture and operator checklist (B09a; real acceptance pending) |
 | `verdict.ts`, `report.ts` | Verdicts of Attempts and cells, and the comparison report (B03a) |
 
 ```sh
@@ -97,6 +98,8 @@ Session and Controller tokens never enter child environments or command lines. E
 `prepareSession` receives `loginSource: { contents: string } | null`; it writes supplied bytes and contains no login-path lookup or file-copy operation. Only the approved-Batch CLI reads the daily login. Tests construct synthetic bytes/configuration in `runner/test-state.ts`; there is **no general fs interception or protection claim**. Import order does not change login injection, as `runner/login.test.ts` imports the runner first and demonstrates injection plus denied access to a synthetic source HOME. Batch snapshots still use an explicit `personalConfigRoot`, synthetic in tests and the actual personal root for approved Batches.
 
 Model-free tests attempt cross-Attempt and private-tree read grants, implicit program/Node parent grants, hard-link and control-file imports, process-environment theft, nested-parent replacement, final-turn tampering, cross-route access and rollout symlinks. A manual sandboxed `codex --version` launch also verifies the installed client's startup without a model; full real-session behaviour remains for the approved Batch.
+
+For ChatGPT, use the separate [isolated Batch command and operating checklist](chatgpt/README.md). `plan` prints approval impacts and messages without starting anything; `run` requires the approval reference and owns a fresh database, service, relay and exclusive tunnel. The initial five and upgrade checks still need a real approved run; App, web and mobile remain separate. `chatgpt/chatgpt.test.ts` runs the fake-tunnel, no-model regression checks in `npm test`; the real Batch command remains manual.
 
 ## Verdicts and the report
 
