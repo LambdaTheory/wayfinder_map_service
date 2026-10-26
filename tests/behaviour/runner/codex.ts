@@ -1,4 +1,4 @@
-// The Codex Driver, MCP-only Entry: one isolated HOME per session, no user config, only this run's Wayfinder
+// The Codex MCP-only Driver and shared native capture: one isolated HOME per session, no user config, only this run's Wayfinder
 // server, inside a sandbox that hides the service source, verdicts, personal configuration and other runs (R2).
 import { spawn } from 'node:child_process';
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
@@ -113,6 +113,12 @@ export function runTurn({ options: o, session: s, port, workdir, prompt, profile
   const [cmd, argv] = o.sandbox ? ['sandbox-exec', ['-f', profile.path, o.bin, ...args]] : [o.bin, args];
   const env = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: s.home, CODEX_HOME: s.codexHome, TMPDIR: join(s.home, 'tmp'),
     LANG: 'en_US.UTF-8' };
+  return executeTurn({ options: o, session: s, workdir, prompt, profile, ...(onChild ? { onChild } : {}), ...(onLine ? { onLine } : {}) }, cmd as string, argv as string[], env);
+}
+
+/** Shared native capture, streaming and post-launch integrity checks for both Entries. */
+export function executeTurn({ options: o, session: s, workdir, prompt, profile, onChild, onLine }: Omit<TurnRequest, 'port'>,
+  cmd: string, argv: string[], env: NodeJS.ProcessEnv): Promise<TurnResult> {
   const started = Date.now();
   return new Promise(resolve => {
     const child = spawn(cmd as string, argv as string[], { cwd: workdir, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });

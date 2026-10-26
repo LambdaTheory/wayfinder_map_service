@@ -3,8 +3,8 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, relative } from 'node:path';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { localNetworkDenials } from './network-policy.ts';
 import { reservedPorts } from './service.ts';
 
@@ -89,10 +89,28 @@ export interface ControlProfile {
   identities: Readonly<Record<string, string>>;
   pinnedRoots: string[];
 }
-function fileHash(path: string): string {
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.nlink !== 1) throw new IsolationError('immutable file must be regular with one link');
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
+/** One filesystem boundary for policy verification and safe native-evidence collection. */
+export function entryIdentity(path: string, kind?: 'file' | 'directory'): string {
+  const stat = lstatSync(path, { bigint: true });
+  if ((!stat.isDirectory() && !stat.isFile()) || (kind === 'directory' && !stat.isDirectory())
+    || (kind === 'file' && (!stat.isFile() || stat.nlink !== 1n)))
+    throw new IsolationError('protected entry must have its expected type; regular files require one link');
+  return `${stat.isDirectory() ? 'directory' : 'file'}:${stat.dev}:${stat.ino}:${stat.mode}`;
+}
+export function readRegularFile(path: string): Buffer {
+  entryIdentity(path, 'file');
+  return readFileSync(path);
+}
+/** Read a runner-written file only after validating its previously pinned containing directories. */
+export function readPinnedFile(path: string, pinned: Readonly<Record<string, string>>): Buffer {
+  for (const parent of parents(path)) {
+    if (pinned[parent] !== entryIdentity(parent, 'directory')) throw new IsolationError('runner evidence parent changed or unpinned');
+  }
+  return readRegularFile(path);
+}
+export const hashContents = (data: string | Buffer) => createHash('sha256').update(data).digest('hex');
+export function fileHash(path: string): string {
+  return hashContents(readRegularFile(path));
 }
 function treeHashes(roots: string[]): Record<string, string> {
   const result: Record<string, string> = {};
@@ -107,18 +125,38 @@ function treeHashes(roots: string[]): Record<string, string> {
 }
 function identities(roots: string[], mutableFiles: string[]): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const file of mutableFiles) {
-    const stat = lstatSync(file, { bigint: true });
-    if (!stat.isFile() || stat.nlink !== 1n) throw new IsolationError('mutable read-only file must be regular with one link');
-  }
+  for (const file of mutableFiles) entryIdentity(file, 'file');
   for (const path of new Set([...roots, ...mutableFiles].flatMap(p => [p, ...parents(p)]))) {
-    const stat = lstatSync(path, { bigint: true });
-    if (!stat.isDirectory() && !stat.isFile()) throw new IsolationError('protected entry replaced or linked');
-    out[path] = `${stat.isDirectory() ? 'directory' : 'file'}:${stat.dev}:${stat.ino}`;
+    out[path] = entryIdentity(path);
   }
   return out;
 }
 const hashes = (p: Pick<ControlProfile, 'path' | 'readOnlyRoots'>) => ({ ...treeHashes(p.readOnlyRoots), [p.path]: fileHash(p.path) });
+
+/** Resolve existing symlinks before appending absent components. Denials never grant read access. */
+function canonicalDenial(path: string): string {
+  if (!isAbsolute(path)) throw new IsolationError('deny-only path must be absolute');
+  let current = '/'; let links = 0;
+  const pending = path.split('/');
+  while (pending.length) {
+    const part = pending.shift()!;
+    if (!part || part === '.') continue;
+    if (part === '..') { current = dirname(current); continue; }
+    const next = join(current, part);
+    const stat = lstatSync(next, { throwIfNoEntry: false });
+    if (stat?.isSymbolicLink()) {
+      if (++links > 40) throw new IsolationError('deny-only path contains a symlink loop');
+      const target = readlinkSync(next);
+      if (isAbsolute(target)) current = '/';
+      pending.unshift(...target.split('/'));
+    } else {
+      if (stat && !stat.isDirectory() && pending.some(p => p !== '' && p !== '.'))
+        throw new IsolationError('deny-only ancestor is not a directory');
+      current = next;
+    }
+  }
+  return current;
+}
 
 interface Policy {
   home: string; workdir: string; readRoots: string[]; readFiles: string[];
@@ -181,14 +219,17 @@ export function writeProfile(controlDir: string, session: { home: string }, work
       throw new IsolationError('mutable files must be outside immutable trees');
     const readRoots = [...new Set([...installationRoots, ...immutable, ...(clientRoot ? [clientRoot] : [])].map(grant))];
     const readOnlyRoots = [...new Set([...immutable, ...(clientRoot ? [clientRoot] : []), ...(!systemBinary && executable !== installedCodex ? [executable] : [])])];
-    const denyRoots = [...readRoots, ...(access.denyWriteRoots ?? []).map(p => realpathSync(p)), ...controls];
-    const entries = [home, workdir, executable, ...readRoots, ...mutable, ...(access.denyWritePaths ?? []).map(p => realpathSync(p)), ...denyRoots];
-    const pinnedRoots = [...new Set(entries)];
+    const denyRoots = [...readRoots, ...(access.denyWriteRoots ?? []).map(canonicalDenial), ...controls];
+    const entries = [home, workdir, executable, ...readRoots, ...mutable, ...(access.denyWritePaths ?? []).map(canonicalDenial), ...denyRoots];
+    // Absent entries remain in the policy. Pin their existing ancestors; creation by trusted setup
+    // is valid, while the client cannot replace any directory entry along the future denied path.
+    const denyEntries = [...new Set(entries.flatMap(p => [p, ...parents(p)]))];
+    const pinnedRoots = denyEntries.filter(p => lstatSync(p, { throwIfNoEntry: false }));
     const expectedIdentities = Object.freeze(identities(pinnedRoots, mutable));
     const immutableHashes = treeHashes(readOnlyRoots); // Validate before reserving the exclusive profile path.
     const path = join(layout.controlDir, `${basename(home)}.sb`);
     writeFileSync(path, sandboxProfile({ home, workdir, readRoots, readFiles: [executable, ...mutable], denyRoots,
-      denyEntries: Object.keys(expectedIdentities), controlDirectories: controls, localPorts: access.localPorts ?? [] }), { flag: 'wx', mode: 0o600 });
+      denyEntries, controlDirectories: controls, localPorts: access.localPorts ?? [] }), { flag: 'wx', mode: 0o600 });
     const profile = { path, readOnlyRoots, mutableReadOnlyFiles: mutable, pinnedRoots, identities: expectedIdentities };
     return { ...profile, hashes: Object.freeze({ ...immutableHashes, [path]: fileHash(path) }) };
   } catch (error) { if (error instanceof IsolationError) throw error; throw new IsolationError(`cannot prepare sandbox: ${String(error)}`); }
