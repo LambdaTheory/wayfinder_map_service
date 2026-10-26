@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AttemptRecord } from '../evidence.ts';
-import { abilities, assess } from './acceptance.ts';
+import { abilities, assess as assessAttempt } from './acceptance.ts';
+import { reviewInput, verifyReviews } from './reviews.ts';
+import type { ReviewArtifact } from './reviews.ts';
 import type { Assessment } from './acceptance.ts';
 import { importAttempt, localFile, main } from './cli.ts';
 import { launcher } from './host.ts';
@@ -19,11 +21,30 @@ afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: tru
 function temporary() { const dir = mkdtempSync(join(tmpdir(), 'b09b-fixture-')); dirs.push(dir); return dir; }
 function fixture(client: InteractiveClient, kind = 'supported') {
   const assessment = JSON.parse(read(`${client}-assessment.json`)) as Assessment;
+  assessment.reviews = abilities.flatMap(a => [1, 2].map(i => ({ itemId: `${a}.content`, role: 'review' as const, by: `synthetic-reader-${i}`, status: 'holds' as const, reason: 'Synthetic review for a unit test.' })));
   const native = normalizeNative(client, read(`${client}-${kind}.jsonl`), `${client}-${kind}.jsonl`, `synthetic-${client}-credential`);
-  const record = { ...JSON.parse(read(`${client}-capture.json`)), events: native.events, sessions: [native.session],
+  const record = { ...JSON.parse(read(`${client}-capture.json`)), combination: { harness: client, requestedModel: 'synthetic-model', visibleModel: native.model, effort: native.effort }, events: native.events, sessions: [native.session],
     client: { version: native.version, surface: { known: true, value: 'interactive-cli' } }, missing: native.missing } as AttemptRecord;
   const probes = new Set([assessment.confirmations['async-question'].probe!.sha256]);
   return { assessment, record, probes, native };
+}
+// Synthetic reviewers are built in tests, never shipped as copyable approved assessments.
+function artifactsFor(record: AttemptRecord, assessment: Assessment): ReviewArtifact[] {
+  return assessment.reviews.map((r, i) => {
+    const ability = abilities.find(a => r.itemId === `${a}.content`);
+    if (!ability || r.role === 'human') throw new Error('untrusted override');
+    const names = ability === 'async-question' ? ['question', 'preparation', 'answer'] : ability === 'prepare-while-waiting'
+      ? ['question', 'preparation', 'answer', 'revisedRecommendation'] : ability === 'adjust-recommendation' ? ['question', 'answer', 'revisedRecommendation'] : ['question', 'answer', 'continuation'];
+    const evidence = names.flatMap(n => { const seq = assessment.selection[n as keyof Assessment['selection']]; const e = record.events.find(e => e.seq === seq);
+      return e ? [{ seq: e.seq, quote: e.kind === 'message' ? e.text.slice(0, 20) : e.kind === 'tool-call' && e.result.known ? (typeof e.result.value === 'string' ? e.result.value : JSON.stringify(e.result.value)).slice(0, 20) : e.kind }] : []; });
+    return { ability, role: r.role, reviewer: r.by, sessionId: r.by, vendor: record.combination.harness === 'claude' ? 'openai' : 'anthropic',
+      model: record.combination.harness === 'claude' ? 'gpt-6.1-sol' : 'claude-sonnet-5-5', input: reviewInput(record, assessment, ability),
+      output: JSON.stringify({ status: r.status, reason: `${r.reason} Independent synthetic reading ${i}.`, evidence }) };
+  });
+}
+function assess(record: AttemptRecord, assessment: Assessment, probes: Set<string>) {
+  try { return assessAttempt(record, assessment, probes, verifyReviews(record, assessment, artifactsFor(record, assessment))); }
+  catch { return assessAttempt(record, assessment, probes); }
 }
 const outcomes = (value: ReturnType<typeof assess>) => value.verdicts.map(v => v.verdict.outcome);
 
@@ -103,7 +124,7 @@ for (const client of ['codex', 'claude'] as const) describe(client, () => {
     writeFileSync(join(dir, 'capture.json'), read(`${client}-capture.json`));
     const assessment = JSON.parse(read(`${client}-assessment.json`)) as Assessment;
     const imported = importAttempt(dir, `${client}-supported.jsonl`, assessment);
-    expect(outcomes(imported)).toEqual(abilities.map(() => 'pass'));
+    expect(outcomes(imported)).toEqual(abilities.map(() => 'insufficient-evidence'));
     main([dir, `${client}-supported.jsonl`, `${client}-assessment.json`, join(dir, 'judged')]);
     const record = JSON.parse(readFileSync(join(dir, 'judged/async-question.attempt.json'), 'utf8')) as AttemptRecord;
     expect(record.subject.id).toBe('B09Async'); expect(record.events).toHaveLength(6);
@@ -135,7 +156,7 @@ it('manual launchers isolate HOME/configuration, use their own credential and co
     expect(script).toContain('env -i'); expect(script).toContain('/usr/bin/sandbox-exec');
     expect(script).toContain(`HOME=${dir}/home`); expect(script).toContain('WAYFINDER_TOKEN=synthetic-token');
     expect(script).not.toContain('18766/mcp');
-    expect(script).toContain(client === 'codex' ? '--ignore-user-config' : '--strict-mcp-config');
+    expect(script).toContain(client === 'codex' ? '--no-daemon' : '--strict-mcp-config');
     expect(readFileSync(join(dir, 'sandbox.sb'), 'utf8')).toContain('localhost:18766');
   }
 });
@@ -146,7 +167,7 @@ it('the manual host seeds and stops only a fresh cached service without executin
   const attempt = `fixture-${process.pid}-${Date.now()}`;
   const dir = join(cacheRoot(), `B09Fixture-${attempt}`); dirs.push(dir);
   const result = await new Promise<{ code: number | null; output: string }>((resolve, reject) => {
-    const child = spawn(process.execPath, [fileURLToPath(new URL('./host.ts', import.meta.url)), 'B09Fixture', attempt,
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../fixtures/interactive/fake-host.mjs', import.meta.url)), 'B09Fixture', attempt,
       'codex', 'synthetic-model', 'high', 'W7', process.execPath], { stdio: ['pipe', 'pipe', 'pipe'] });
     let output = ''; let answered = false;
     const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(output)); }, 20_000);
@@ -156,9 +177,13 @@ it('the manual host seeds and stops only a fresh cached service without executin
   });
   expect(result, result.output).toMatchObject({ code: 0 });
   const isolation = JSON.parse(readFileSync(join(dir, 'isolation.json'), 'utf8'));
-  expect(isolation).toMatchObject({ serviceStopped: true, scratchRemoved: true, credentialsRemoved: true });
+  expect(isolation).toMatchObject({ serviceStopped: { known: true }, scratchRemoved: true, credentialsRemoved: true });
+  expect(isolation.measurements).toHaveProperty('before');
+  expect(isolation.measurements).toHaveProperty('after');
+  expect(isolation.measurements.servedOwnDatabase).toEqual({ known: true, value: true });
+  expect(isolation).not.toHaveProperty('scope');
   expect([18765, 18766]).not.toContain(isolation.port);
-  expect(isolation.database).toContain(`${dir}/db/`);
+  expect(isolation.database).toContain(`/B09Fixture-${attempt}/db/`);
   const capture = JSON.parse(readFileSync(join(dir, 'capture.json'), 'utf8')) as AttemptRecord;
   expect(capture.maps).toHaveLength(1); expect(capture.missing).toContain('events');
 }, 30_000);
@@ -168,6 +193,7 @@ it('all-unsupported preflight produces four gaps without opening any native file
   f.assessment.confirmations['async-question'].status = 'unsupported';
   for (const c of Object.values(f.assessment.confirmations)) { c.status = 'unsupported'; delete c.probe; }
   writeFileSync(join(dir, 'capture.json'), JSON.stringify(f.record));
+  f.assessment.reviews = [];
   const result = importAttempt(dir, '-', f.assessment);
   expect(outcomes(result)).toEqual(abilities.map(() => 'not-applicable'));
   expect(result.verdicts.every(v => v.verdict.gaps.length === 1)).toBe(true);
@@ -176,7 +202,7 @@ it('all-unsupported preflight produces four gaps without opening any native file
 });
 
 it('a different verdict version cannot silently re-judge earlier evidence', () => {
-  const f = fixture('codex'); f.assessment.verdictVersion = 2;
+  const f = fixture('codex'); f.assessment.verdictVersion = 1;
   expect(outcomes(assess(f.record, f.assessment, f.probes))).toEqual(abilities.map(() => 'insufficient-evidence'));
 });
 
@@ -196,4 +222,214 @@ it('invalid support values and missing capture times cannot bypass the capabilit
   expect(outcomes(assess(f.record, f.assessment, f.probes))).not.toContain('pass');
   const valid = fixture('codex'); valid.record.run.startedAt = 'unknown';
   expect(outcomes(assess(valid.record, valid.assessment, valid.probes))).not.toContain('pass');
+});
+
+it('uses subscription authentication and clears API-key billing routes', () => {
+  const dir = temporary();
+  const codex = launcher(dir, 'codex', process.execPath, 23456, 'synthetic-token', 'synthetic-model', 'high');
+  const claude = launcher(temporary(), 'claude', process.execPath, 23456, 'synthetic-token', 'synthetic-model', 'high');
+  expect(codex).not.toContain('CODEX_API_KEY=');
+  expect(claude).not.toContain('ANTHROPIC_API_KEY=');
+  expect(claude).toContain('CLAUDE_CODE_OAUTH_TOKEN');
+  expect(codex).toContain('unset CODEX_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY');
+});
+
+it('launches interactive Codex in its own process with supported flags', () => {
+  const script = launcher(temporary(), 'codex', process.execPath, 23456, 'synthetic-token', 'synthetic-model', 'high');
+  expect(script).toContain('--no-daemon');
+  expect(script).not.toContain('--ignore-user-config');
+});
+
+it.each(['Agent', 'Task', 'close_agent', 'send_input', 'exec_command'])('does not treat %s launch/control/wait as preparation', tool => {
+  const f = fixture('codex'); const event = f.record.events[2]!;
+  Object.assign(event, { tool, arguments: tool === 'exec_command' ? { command: 'sleep 30' } : {},
+    result: { known: true, value: tool === 'exec_command' ? 'Exit code: 0' : 'Agent launched: fake-agent' } });
+  expect(outcomes(assess(f.record, f.assessment, f.probes)).slice(0, 2)).not.toContain('pass');
+});
+
+it('asynchronous asking requires the answer before the native turn ends', () => {
+  const f = fixture('codex');
+  f.record.events.filter(e => e.seq >= f.assessment.selection.answer!).forEach(e => { e.turn = 1; });
+  expect(assess(f.record, f.assessment, f.probes).verdicts[0]!.verdict.outcome).not.toBe('pass');
+});
+
+it.each(['request_user_input', 'AskUserQuestion'])('%s cannot prove a non-blocking question', tool => {
+  const f = fixture('codex');
+  Object.assign(f.record.events[1]!, { kind: 'tool-call', tool, actor: 'agent', arguments: { question: 'Mobile?' },
+    result: { known: true, value: 'User has answered your questions: mobile only' }, failed: false });
+  expect(assess(f.record, f.assessment, f.probes).verdicts[0]!.verdict.outcome).not.toBe('pass');
+});
+
+it('a rejected question tool supplies no human answer', () => {
+  const rows = read('claude-supported.jsonl').trim().split('\n').map(line => JSON.parse(line));
+  rows.find(r => r.message?.content?.[0]?.type === 'tool_use').message.content = [{ type: 'tool_use', id: 'question-1', name: 'AskUserQuestion', input: { questions: ['Mobile?'] } }];
+  rows.find(r => r.message?.content?.[0]?.type === 'tool_result').message.content = [{ type: 'tool_result', tool_use_id: 'question-1', is_error: true, content: 'User rejected tool use' }];
+  const native = normalizeNative('claude', rows.map(r => JSON.stringify(r)).join('\n'), 'rejected.jsonl', 'fake');
+  expect(native.events.flatMap(e => e.kind === 'message' && e.role === 'user' ? [e.text] : [])).not.toContain('User rejected tool use');
+});
+
+it.each(['visibleModel', 'effort'] as const)('unknown %s blocks all passes', field => {
+  const f = fixture('codex'); f.record.combination[field] = { known: false, reason: 'not in native record' };
+  expect(outcomes(assess(f.record, f.assessment, f.probes))).not.toContain('pass');
+});
+
+it('assessment cannot supply human overrides for capability confirmation or a missing answer', () => {
+  for (const target of ['confirmed', 'structure']) {
+    const f = fixture('codex');
+    if (target === 'confirmed') f.assessment.confirmations['async-question'].status = 'unverified';
+    else f.record.events = f.record.events.filter(e => e.seq !== f.assessment.selection.answer);
+    f.assessment.reviews.push({ itemId: `async-question.${target}`, role: 'human', by: 'Kun', status: 'holds', reason: 'Self-authored approval' });
+    expect(assess(f.record, f.assessment, f.probes).verdicts[0]!.verdict.outcome).not.toBe('pass');
+  }
+});
+
+it('two duplicated reviewer records cannot establish independent content review', () => {
+  const f = fixture('codex');
+  f.assessment.reviews.forEach(r => { r.by = 'same-reviewer'; });
+  expect(outcomes(assess(f.record, f.assessment, f.probes))).not.toContain('pass');
+});
+
+it.each(['./codex-supported.jsonl', 'copy.jsonl'])('cannot use acceptance evidence as its own earlier probe: %s', path => {
+  const dir = temporary(); cpSync(fixtures, dir, { recursive: true });
+  writeFileSync(join(dir, 'capture.json'), read('codex-capture.json'));
+  if (path === 'copy.jsonl') writeFileSync(join(dir, path), read('codex-supported.jsonl'));
+  const a = JSON.parse(read('codex-assessment.json')) as Assessment;
+  for (const c of Object.values(a.confirmations)) { c.probe!.path = path; c.probe!.sha256 = createHash('sha256').update(read('codex-supported.jsonl')).digest('hex'); }
+  expect(() => importAttempt(dir, 'codex-supported.jsonl', a)).toThrow(/probe/);
+});
+
+it.each(['version', 'time', 'session', 'malformed'])('reads probe native %s rather than trusting its asserted metadata', field => {
+  const dir = temporary(); cpSync(fixtures, dir, { recursive: true }); writeFileSync(join(dir, 'capture.json'), read('codex-capture.json'));
+  let text = read('codex-probe.jsonl');
+  if (field === 'version') text = text.replaceAll('synthetic-1', 'different-version');
+  if (field === 'time') text = text.replaceAll('T01:', 'T03:');
+  if (field === 'session') text = read('codex-supported.jsonl').replaceAll('T02:', 'T01:');
+  if (field === 'malformed') text = '{broken';
+  writeFileSync(join(dir, 'codex-probe.jsonl'), text);
+  const a = JSON.parse(read('codex-assessment.json')) as Assessment;
+  for (const c of Object.values(a.confirmations)) c.probe!.sha256 = createHash('sha256').update(text).digest('hex');
+  expect(() => importAttempt(dir, 'codex-supported.jsonl', a)).toThrow(/probe/);
+});
+
+it('validates independent retained review inputs, outputs, quotes and Attempt binding', () => {
+  const f = fixture('codex'); const artifacts = artifactsFor(f.record, f.assessment);
+  const verified = verifyReviews(f.record, f.assessment, artifacts);
+  expect(outcomes(assessAttempt(f.record, f.assessment, f.probes, verified))).toEqual(abilities.map(() => 'pass'));
+  for (const mutation of ['same-output', 'same-reviewer', 'same-session', 'wrong-input', 'unrelated-quote', 'human']) {
+    const bad = structuredClone(artifacts);
+    if (mutation === 'same-output') bad[1]!.output = bad[0]!.output;
+    if (mutation === 'same-reviewer') bad[1]!.reviewer = bad[0]!.reviewer;
+    if (mutation === 'same-session') bad[1]!.sessionId = bad[0]!.sessionId;
+    if (mutation === 'wrong-input') bad[0]!.input = bad[0]!.input.replace(f.record.attemptId, 'another-attempt');
+    if (mutation === 'unrelated-quote') { const output = JSON.parse(bad[0]!.output); output.evidence[0].quote = 'unrelated words'; bad[0]!.output = JSON.stringify(output); }
+    if (mutation === 'human') Object.assign(bad[0]!, { role: 'human', reviewer: 'Kun' });
+    expect(() => verifyReviews(f.record, f.assessment, bad), mutation).toThrow();
+  }
+  f.record.events.pop();
+  expect(outcomes(assessAttempt(f.record, f.assessment, f.probes, verified))).not.toContain('pass');
+});
+
+it('accepts reviews only through a separate hashed artifact manifest, never assessment.json', () => {
+  const dir = temporary(); cpSync(fixtures, dir, { recursive: true }); writeFileSync(join(dir, 'capture.json'), read('codex-capture.json'));
+  const a = JSON.parse(read('codex-assessment.json')) as Assessment;
+  const first = importAttempt(dir, 'codex-supported.jsonl', a);
+  const f = fixture('codex'); f.assessment.reviews.forEach(r => { r.reason = 'Independent synthetic interpretation of the quoted evidence.'; });
+  const artifacts = artifactsFor(first.record, { ...a, reviews: f.assessment.reviews });
+  const sources = artifacts.map(({ input, output, ...identity }, index) => {
+    const inputPath = `review-${index}.input.json`; const outputPath = `review-${index}.output.json`;
+    writeFileSync(join(dir, inputPath), input); writeFileSync(join(dir, outputPath), output);
+    return { ...identity, input: { path: inputPath, sha256: createHash('sha256').update(input).digest('hex') }, output: { path: outputPath, sha256: createHash('sha256').update(output).digest('hex') } };
+  });
+  writeFileSync(join(dir, 'reviews.json'), JSON.stringify({ schema: 'wayfinder-interactive-reviews/1', records: sources }));
+  expect(outcomes(importAttempt(dir, 'codex-supported.jsonl', a, 'reviews.json'))).toEqual(abilities.map(() => 'pass'));
+  a.reviews = f.assessment.reviews;
+  expect(() => importAttempt(dir, 'codex-supported.jsonl', a, 'reviews.json')).toThrow('invalid interactive assessment');
+});
+
+it('accepts two independently produced review bundles covering all four items', () => {
+  const f = fixture('claude'); const artifacts = artifactsFor(f.record, f.assessment);
+  for (const reviewer of ['synthetic-reader-1', 'synthetic-reader-2']) {
+    const own = artifacts.filter(a => a.reviewer === reviewer);
+    const bundle = JSON.stringify({ items: own.map(a => ({ ability: a.ability, ...JSON.parse(a.output) })) });
+    own.forEach(a => { a.output = bundle; });
+  }
+  const verified = verifyReviews(f.record, f.assessment, artifacts);
+  expect(outcomes(assessAttempt(f.record, f.assessment, f.probes, verified))).toEqual(abilities.map(() => 'pass'));
+});
+
+it('imports missing native effort as unknown instead of using the requested setting', () => {
+  const dir = temporary(); cpSync(fixtures, dir, { recursive: true });
+  writeFileSync(join(dir, 'capture.json'), read('claude-capture.json'));
+  const rows = read('claude-supported.jsonl').trim().split('\n').map(line => JSON.parse(line));
+  delete rows[0].effort;
+  writeFileSync(join(dir, 'claude-supported.jsonl'), rows.map(row => JSON.stringify(row)).join('\n'));
+  const result = importAttempt(dir, 'claude-supported.jsonl', JSON.parse(read('claude-assessment.json')));
+  expect(result.record.combination.effort.known).toBe(false);
+  expect(outcomes(result)).not.toContain('pass');
+});
+
+it('measures changed configuration and reports missing isolation observations as unknown', async () => {
+  const { mkdirSync } = await import('node:fs');
+  const { isolationSnapshot, isolationMeasurements } = await import('./isolation.ts');
+  const dir = temporary(); mkdirSync(join(dir, '.codex'));
+  const before = isolationSnapshot(['/synthetic/run'], dir, () => ({ known: true, value: '' }));
+  writeFileSync(join(dir, '.codex/config.toml'), 'url="/synthetic/run"');
+  const after = isolationSnapshot(['/synthetic/run'], dir, () => ({ known: true, value: '' }));
+  const result = isolationMeasurements(before, after, { known: false, reason: 'not observed' });
+  expect(result.personalConfigurationUnchanged).toEqual({ known: true, value: false });
+  expect(result.runPathsInPersonalConfiguration).toEqual({ known: true, value: true });
+  expect(result.servedOwnDatabase.known).toBe(false); expect(result.touchedEverydayDatabase.known).toBe(false);
+  const unavailable = isolationSnapshot([], dir, () => ({ known: false, reason: 'query failed' }));
+  expect(isolationMeasurements(before, unavailable, { known: true, value: [] }).everydaySnapshotUnchanged.known).toBe(false);
+});
+
+it('links only the subscription login path, without copying or reading it', async () => {
+  const { lstatSync, readlinkSync } = await import('node:fs');
+  const dir = temporary(); const loginRoot = temporary();
+  launcher(dir, 'codex', process.execPath, 23456, 'synthetic-token', 'synthetic-model', 'high', loginRoot);
+  const path = join(dir, 'home/.codex/auth.json');
+  expect(lstatSync(path).isSymbolicLink()).toBe(true); expect(readlinkSync(path)).toBe(join(loginRoot, '.codex/auth.json'));
+  const profile = readFileSync(join(dir, 'sandbox.sb'), 'utf8');
+  expect(profile).toContain(`(literal "${join(loginRoot, '.codex/auth.json')}")`);
+  expect(profile).not.toContain(`(subpath "${join(loginRoot, '.codex')}")`);
+});
+
+it('redacts summaries and recognizable subscription tokens without loading credentials', async () => {
+  const { privateText } = await import('./privacy.ts');
+  const text = privateText('failure at /synthetic/home/run with controller-secret Bearer sk-ant-oat01-syntheticsecret123456', { controller: 'controller-secret' }, '/synthetic/home');
+  expect(text).not.toContain('controller-secret'); expect(text).not.toContain('syntheticsecret'); expect(text).toContain('~/run');
+});
+
+it('retains a proven temporal violation when the run times out', () => {
+  const f = fixture('codex'); f.record.run.completeness = 'timeout';
+  f.record.events.filter(e => e.seq >= f.assessment.selection.answer!).forEach(e => { e.turn = 1; });
+  expect(assess(f.record, f.assessment, f.probes).verdicts[0]!.verdict.outcome).toBe('fail');
+});
+
+it('accepts a completed read-only command only with actual output used in the later question', () => {
+  const f = fixture('codex'); const event = f.record.events[2]!;
+  Object.assign(event, { tool: 'exec_command', arguments: { cmd: 'cat facts.txt' }, result: { known: true, value: { exit_code: 0, output: 'Base supports mobile entry' } } });
+  expect(assess(f.record, f.assessment, f.probes).verdicts[1]!.verdict.outcome).toBe('pass');
+});
+
+it('only a successful question result with actual answers becomes human input', () => {
+  const base = [
+    { timestamp: '2026-01-01T00:00:00Z', type: 'session_meta', payload: { id: 'synthetic-question', cli_version: 'synthetic-1' } },
+    { timestamp: '2026-01-01T00:00:01Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'one' } },
+    { timestamp: '2026-01-01T00:00:02Z', type: 'response_item', payload: { type: 'function_call', call_id: 'q', name: 'request_user_input', arguments: '{}' } },
+  ];
+  for (const [output, expected] of [[{ answers: { carrier: 'Base' } }, 1], [{ is_error: true, answers: { carrier: 'Base' } }, 0], ['User rejected tool use', 0], ['tool completed', 0]] as const) {
+    const text = [...base, { timestamp: '2026-01-01T00:00:03Z', type: 'response_item', payload: { type: 'function_call_output', call_id: 'q', output: JSON.stringify(output) } },
+      { timestamp: '2026-01-01T00:00:04Z', type: 'event_msg', payload: { type: 'task_complete', turn_id: 'one' } }].map(r => JSON.stringify(r)).join('\n');
+    expect(normalizeNative('codex', text, 'question.jsonl', 'fake').events.filter(e => e.kind === 'message' && e.actor === 'script-human')).toHaveLength(expected);
+  }
+});
+
+it('does not count injected context as a human answer or ignore ambiguous queued input', () => {
+  const codex = read('codex-supported.jsonl').replace('Resume the synthetic collaboration Map.', '<environment_context>injected</environment_context>');
+  expect(normalizeNative('codex', codex, 'meta.jsonl', 'fake').events.filter(e => e.kind === 'message' && e.actor === 'script-human')).toHaveLength(1);
+  const rows = read('claude-supported.jsonl').trim().split('\n').map(l => JSON.parse(l));
+  rows.find(r => r.type === 'user').isMeta = true;
+  const native = normalizeNative('claude', rows.map(r => JSON.stringify(r)).join('\n'), 'meta.jsonl', 'fake');
+  expect(native.events.filter(e => e.kind === 'message' && e.actor === 'script-human')).toHaveLength(1);
 });

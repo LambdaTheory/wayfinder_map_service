@@ -13,12 +13,22 @@
       "reason": "Synthetic support assertion for adapter tests only; not a real client capability claim.",
       "probe": {
         "path": "codex-probe.jsonl",
-        "sha256": "36c1144854e83b1914b4c2472329168ccf676b322a4fca307be9cb2bfe85fdce",
+        "sha256": "2f6ec96b350acc5a0f71cda86fb0eb9685081b193eeda2322e8bd1a77c8f7d5b",
         "endedAt": "2026-01-01T01:01:00.000Z",
         "locations": [
           "codex-probe.jsonl:1"
         ],
-        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface."
+        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface.",
+        "capturePath": "codex-probe-capture.json",
+        "selection": {
+          "question": 1,
+          "preparation": 2,
+          "answer": 3,
+          "revisedRecommendation": 4,
+          "continuation": 5,
+          "preparationFinding": "Base supports mobile entry",
+          "preparationUse": "Base supports mobile entry"
+        }
       }
     },
     "prepare-while-waiting": {
@@ -32,12 +42,22 @@
       "reason": "Synthetic support assertion for adapter tests only; not a real client capability claim.",
       "probe": {
         "path": "codex-probe.jsonl",
-        "sha256": "36c1144854e83b1914b4c2472329168ccf676b322a4fca307be9cb2bfe85fdce",
+        "sha256": "2f6ec96b350acc5a0f71cda86fb0eb9685081b193eeda2322e8bd1a77c8f7d5b",
         "endedAt": "2026-01-01T01:01:00.000Z",
         "locations": [
           "codex-probe.jsonl:1"
         ],
-        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface."
+        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface.",
+        "capturePath": "codex-probe-capture.json",
+        "selection": {
+          "question": 1,
+          "preparation": 2,
+          "answer": 3,
+          "revisedRecommendation": 4,
+          "continuation": 5,
+          "preparationFinding": "Base supports mobile entry",
+          "preparationUse": "Base supports mobile entry"
+        }
       }
     },
     "adjust-recommendation": {
@@ -51,12 +71,22 @@
       "reason": "Synthetic support assertion for adapter tests only; not a real client capability claim.",
       "probe": {
         "path": "codex-probe.jsonl",
-        "sha256": "36c1144854e83b1914b4c2472329168ccf676b322a4fca307be9cb2bfe85fdce",
+        "sha256": "2f6ec96b350acc5a0f71cda86fb0eb9685081b193eeda2322e8bd1a77c8f7d5b",
         "endedAt": "2026-01-01T01:01:00.000Z",
         "locations": [
           "codex-probe.jsonl:1"
         ],
-        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface."
+        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface.",
+        "capturePath": "codex-probe-capture.json",
+        "selection": {
+          "question": 1,
+          "preparation": 2,
+          "answer": 3,
+          "revisedRecommendation": 4,
+          "continuation": 5,
+          "preparationFinding": "Base supports mobile entry",
+          "preparationUse": "Base supports mobile entry"
+        }
       }
     },
     "continue-same-turn": {
@@ -70,12 +100,22 @@
       "reason": "Synthetic support assertion for adapter tests only; not a real client capability claim.",
       "probe": {
         "path": "codex-probe.jsonl",
-        "sha256": "36c1144854e83b1914b4c2472329168ccf676b322a4fca307be9cb2bfe85fdce",
+        "sha256": "2f6ec96b350acc5a0f71cda86fb0eb9685081b193eeda2322e8bd1a77c8f7d5b",
         "endedAt": "2026-01-01T01:01:00.000Z",
         "locations": [
           "codex-probe.jsonl:1"
         ],
-        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface."
+        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface.",
+        "capturePath": "codex-probe-capture.json",
+        "selection": {
+          "question": 1,
+          "preparation": 2,
+          "answer": 3,
+          "revisedRecommendation": 4,
+          "continuation": 5,
+          "preparationFinding": "Base supports mobile entry",
+          "preparationUse": "Base supports mobile entry"
+        }
       }
     }
   },
@@ -84,65 +124,10 @@
     "preparation": 2,
     "answer": 3,
     "revisedRecommendation": 4,
-    "continuation": 5
+    "continuation": 5,
+    "preparationFinding": "Base supports mobile entry",
+    "preparationUse": "Base supports mobile entry"
   },
-  "reviews": [
-    {
-      "itemId": "async-question.content",
-      "status": "holds",
-      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
-      "by": "fixture-review-1",
-      "role": "review"
-    },
-    {
-      "itemId": "async-question.content",
-      "status": "holds",
-      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
-      "by": "fixture-review-2",
-      "role": "review"
-    },
-    {
-      "itemId": "prepare-while-waiting.content",
-      "status": "holds",
-      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
-      "by": "fixture-review-1",
-      "role": "review"
-    },
-    {
-      "itemId": "prepare-while-waiting.content",
-      "status": "holds",
-      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
-      "by": "fixture-review-2",
-      "role": "review"
-    },
-    {
-      "itemId": "adjust-recommendation.content",
-      "status": "holds",
-      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
-      "by": "fixture-review-1",
-      "role": "review"
-    },
-    {
-      "itemId": "adjust-recommendation.content",
-      "status": "holds",
-      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
-      "by": "fixture-review-2",
-      "role": "review"
-    },
-    {
-      "itemId": "continue-same-turn.content",
-      "status": "holds",
-      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
-      "by": "fixture-review-1",
-      "role": "review"
-    },
-    {
-      "itemId": "continue-same-turn.content",
-      "status": "holds",
-      "reason": "Synthetic fixture review of the selected native content; never real acceptance.",
-      "by": "fixture-review-2",
-      "role": "review"
-    }
-  ],
-  "verdictVersion": 1
+  "reviews": [],
+  "verdictVersion": 2
 }

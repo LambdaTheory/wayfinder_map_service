@@ -3,8 +3,12 @@ import type { AttemptRecord, EventRecord } from '../evidence.ts';
 import type { CheckResult, Scenario } from '../scenario.ts';
 import { judgeAttempt } from '../verdict.ts';
 import type { Review } from '../verdict.ts';
+import { verifiedReadings } from './reviews.ts';
+import type { VerifiedReviews } from './reviews.ts';
+import { questionTool } from './tools.ts';
 import { W1, W7 } from '../scenarios/pace.ts';
 
+export const interactiveVerdictVersion = 2;
 export const abilities = ['async-question', 'prepare-while-waiting', 'adjust-recommendation', 'continue-same-turn'] as const;
 export type Ability = typeof abilities[number];
 export interface Confirmation {
@@ -16,11 +20,13 @@ export interface Confirmation {
   documentation: string[];
   reason: string;
   /** A separate, earlier minimal probe, with raw locations and an explicit operator reading. */
-  probe?: { path: string; sha256: string; endedAt: string; locations: string[]; reading: string };
+  probe?: { path: string; capturePath: string; sha256: string; endedAt: string; locations: string[]; reading: string; selection: Selection };
 }
 export interface Selection {
   question?: number;
   preparation?: number;
+  preparationFinding?: string;
+  preparationUse?: string;
   answer?: number;
   revisedRecommendation?: number;
   continuation?: number;
@@ -35,7 +41,7 @@ export interface Assessment {
 }
 const ids: Record<Ability, string> = { 'async-question': 'B09Async', 'prepare-while-waiting': 'B09Prepare',
   'adjust-recommendation': 'B09Adjust', 'continue-same-turn': 'B09Continue' };
-const criteria: Record<Ability, string> = {
+export const criteria: Record<Ability, string> = {
   'async-question': 'Does the selected question visibly ask the human for a concrete choice without ending the active turn? Does meaningful main-session work continue before the answer? A queued reply, blocking question tool, elapsed time or a delegation launch alone is insufficient.',
   'prepare-while-waiting': 'Does completed work between the question and answer prepare another Frontier Ticket, with substantive findings or candidate recommendations? Does the later recommendation use that material? A promise to research, generic output or delegation event alone is insufficient.',
   'adjust-recommendation': 'Compare the question/proposal, human answer and revised recommendation. Does the answer change a relevant assumption, and does the next concrete recommendation reflect that change, naming its reason? Repetition or merely acknowledging the answer does not count.',
@@ -43,27 +49,56 @@ const criteria: Record<Ability, string> = {
 };
 const check = (status: CheckResult['status'], reason: string, evidence: string[] = []): CheckResult => ({ status, reason, evidence });
 const assistant = (e: EventRecord) => e.kind === 'message' && e.actor === 'agent' && e.role === 'assistant' && !!e.text.trim();
-const question = (e: EventRecord) => assistant(e) || (e.kind === 'tool-call' && /request_user_input|AskUserQuestion/.test(e.tool));
+const question = (e: EventRecord) => assistant(e) || (e.kind === 'tool-call' && questionTool(e.tool) !== null);
 const human = (e: EventRecord) => e.kind === 'message' && e.actor === 'script-human' && e.role === 'user' && !!e.text.trim();
-const work = (e: EventRecord) => e.kind === 'tool-call' && e.actor === 'agent' && e.result.known && !e.failed
-  && !/spawn|delegate|collab|request_user_input|AskUserQuestion|sleep|wait/i.test(e.tool)
-  && !(e.arguments && typeof e.arguments === 'object' && 'run_in_background' in e.arguments && e.arguments.run_in_background === true)
-  && e.result.value !== null && e.result.value !== undefined && e.result.value !== '';
-// This checks completion, not usefulness. The content item judges findings, use and launch-only output.
-
-function structure(a: AttemptRecord, ability: Ability, selected: Selection): CheckResult {
-  if (a.missing.some(m => ['events', 'events.message', 'events.tool-call', 'native.integrity', 'native.boundaries', 'native.sidechain', 'native.unhandled', 'sessions.nativeId', 'combination.model-mismatch'].includes(m))) {
-    return check('unknown', 'Native records or turn boundaries are incomplete; no temporal conclusion is safe.', ['missing']);
+function workOutput(e: EventRecord): string | null {
+  if (e.kind !== 'tool-call' || e.actor !== 'agent' || !e.result.known || e.failed) return null;
+  // A closed allowlist: agent lifecycle/control events and arbitrary shell success are not work products.
+  const value = e.result.value;
+  if (['exec_command', 'functions.exec_command', 'Bash'].includes(e.tool)) {
+    const args = e.arguments && typeof e.arguments === 'object' ? e.arguments as Record<string, unknown> : {};
+    const command = args.cmd ?? args.command;
+    if (typeof command !== 'string' || !/^(?:cat|head|tail|rg|grep|sed|wc)\s/.test(command.trim()) || /[\n;&|`$<>]/.test(command)) return null;
+    if (!value || typeof value !== 'object') return null;
+    const result = value as Record<string, unknown>;
+    const output = result.stdout ?? result.output;
+    return (result.exit_code === 0 || result.exitCode === 0) && typeof output === 'string' && output.trim() ? output : null;
   }
-  const names: (keyof Selection)[] = ability === 'async-question' ? ['question', 'preparation', 'answer']
+  if (!['Read', 'read_file', 'functions.read_file', 'map_read'].includes(e.tool)) return null;
+  if (typeof value === 'string') return value.trim() || null;
+  if (value && typeof value === 'object') return JSON.stringify(value);
+  return null;
+}
+
+export const selectedNames = (ability: Ability): (keyof Selection)[] => ability === 'async-question' ? ['question', 'preparation', 'answer']
     : ability === 'prepare-while-waiting' ? ['question', 'preparation', 'answer', 'revisedRecommendation']
     : ability === 'adjust-recommendation' ? ['question', 'answer', 'revisedRecommendation'] : ['question', 'answer', 'continuation'];
+
+export function structure(a: AttemptRecord, ability: Ability, selected: Selection): CheckResult {
+  if (!a.combination.visibleModel.known || !a.combination.effort.known) return check('unknown', 'Visible model and effort must both be evidenced.', ['combination.visibleModel', 'combination.effort']);
+  if (a.missing.some(m => ['events', 'events.message', 'events.tool-call', 'native.integrity', 'native.boundaries', 'native.sidechain', 'native.unhandled', 'sessions.nativeId', 'combination.model-mismatch', 'combination.visibleModel', 'combination.effort'].includes(m))) {
+    return check('unknown', 'Native records or turn boundaries are incomplete; no temporal conclusion is safe.', ['missing']);
+  }
+  const names = selectedNames(ability);
   const events = names.map(name => a.events.find(e => e.seq === selected[name]));
   const locators = events.flatMap(e => e ? [`events[${a.events.indexOf(e)}]`] : []);
   if (events.some(e => !e)) return check('unknown', `Missing native evidence: ${names.filter((_, i) => !events[i]).join(', ')}`, locators);
   const found = events as EventRecord[];
   if (!question(found[0]!) || !human(found[names.indexOf('answer')]!)) return check('unknown', 'The question or answer locator has the wrong native event kind.', locators);
-  if (names.includes('preparation') && !work(found[names.indexOf('preparation')]!)) return check('unknown', 'Preparation needs completed substantive work, not timing or a sub-agent launch.', locators);
+  const asked = found[0]!;
+  if (ability === 'async-question' && asked.kind === 'tool-call' && questionTool(asked.tool) === 'blocking') {
+    return check('violated', 'A blocking question tool cannot establish asynchronous questioning.', locators);
+  }
+  if (names.includes('preparation')) {
+    const output = workOutput(found[names.indexOf('preparation')]!);
+    if (!output || !selected.preparationFinding?.trim() || !output.includes(selected.preparationFinding)) {
+      return check('unknown', 'Preparation needs a cited finding in a completed read result, not a launch, control event or wait.', locators);
+    }
+    const next = found[names.indexOf('revisedRecommendation')];
+    if (ability === 'prepare-while-waiting' && (!selected.preparationUse?.trim() || !next || next.kind !== 'message' || !next.text.includes(selected.preparationUse))) {
+      return check('unknown', 'Cite where the later recommendation uses the prepared finding; relevance still needs review.', locators);
+    }
+  }
   for (const name of ['revisedRecommendation', 'continuation'] as const) {
     if (names.includes(name) && !assistant(found[names.indexOf(name)]!)) return check('unknown', `${name} needs a native assistant message.`, locators);
   }
@@ -72,7 +107,7 @@ function structure(a: AttemptRecord, ability: Ability, selected: Selection): Che
   }
   // W1's continuation is in the turn handling the answer, even when the question ended a previous turn.
   // Preparation and adjustment need their actual order/content; neither implies asynchronous questioning.
-  const together = ability === 'async-question' ? found.slice(0, 2)
+  const together = ability === 'async-question' ? found
     : ability === 'continue-same-turn' ? found.slice(1) : [];
   if (together.length) {
     if (together.some(e => e.turn === null) || !a.sessions[0]?.turns.some(t => t.index === together[0]!.turn)) return check('unknown', 'No completed native turn brackets the selected events.', locators);
@@ -104,28 +139,38 @@ function confirmation(a: AttemptRecord, c: Confirmation | undefined, verifiedPro
 export function interactiveScenario(ability: Ability, assessment: Assessment, probes: Set<string>): Scenario {
   const source = assessment.scenario === 'W1' ? W1 : W7;
   const c = assessment.confirmations[ability];
-  return { ...source, id: ids[ability], version: 1, title: `Interactive ${ability} (${source.id})`,
+  return { ...source, id: ids[ability], version: interactiveVerdictVersion, title: `Interactive ${ability} (${source.id})`,
     source: { kind: 'design-hazard', origin: 'R9 interactive acceptance: scripted turns cannot prove active-turn behaviour.', refs: ['docs/spec/behaviour-testing.md#r9', '#81'] },
     target: criteria[ability], requiredEvents: [{ id: `${ability}.confirmed`, judge: 'script', text: 'Capability confirmed before collection.',
-      check: a => confirmation(a, c, probes) }], mustNot: [], common: [],
+      check: a => confirmation(a, c, probes) }],
+    mustNot: [{ id: `${ability}.temporal-violation`, judge: 'script', text: 'A native temporal contradiction is already proved.', check: a => {
+      if (c?.status !== 'supported') return check('holds', 'No applicable temporal claim.');
+      const result = structure(a, ability, assessment.selection);
+      return result.status === 'violated' ? result : check('holds', 'No temporal contradiction proved; missing positive evidence is judged separately.');
+    } }], common: [],
     expect: [
       { id: `${ability}.structure`, text: 'Native temporal evidence.', ...(c?.status === 'unsupported' ? { onlyWith: 'async-questions' as const } : {}),
         anyOf: [{ id: `${ability}.structure`, judge: 'script', text: 'Native temporal evidence.', check: a => structure(a, ability, assessment.selection) }] },
       { id: `${ability}.content`, text: criteria[ability], ...(c?.status === 'unsupported' ? { onlyWith: 'async-questions' as const } : {}),
-        anyOf: [{ id: `${ability}.content`, judge: 'script', text: criteria[ability], check: a => ({
-          status: 'unknown', reason: criteria[ability], escalate: 'model',
-          evidence: Object.values(assessment.selection).flatMap(seq => { const index = a.events.findIndex(e => e.seq === seq); return index < 0 ? [] : [`events[${index}]`]; }),
-        }) }] },
+        anyOf: [{ id: `${ability}.content`, judge: 'model', text: criteria[ability], criterion: criteria[ability] }] },
     ] };
 }
 
-export function assess(record: AttemptRecord, assessment: Assessment, verifiedProbes: Set<string>) {
+export function assess(record: AttemptRecord, assessment: Assessment, verifiedProbes: Set<string>, reviews?: VerifiedReviews) {
   const verdicts = abilities.map(ability => {
     const scenario = interactiveScenario(ability, assessment, verifiedProbes);
     const attempt = { ...record, subject: { kind: 'scenario' as const, id: scenario.id, version: assessment.verdictVersion } };
-    const verdict = judgeAttempt(scenario, attempt, { reviews: assessment.reviews, supports: { 'async-questions': false } });
+    const verdict = judgeAttempt(scenario, attempt, { reviews: verifiedReadings(record, assessment, reviews), supports: { 'async-questions': false } });
     const c = assessment.confirmations[ability];
-    if (c?.status === 'unsupported') verdict.gaps = [`${ability}: ${c.reason}; interactive coverage absent on ${c.surface} ${c.clientVersion}.`];
+    verdict.gaps = c?.status === 'unsupported' && verdict.outcome === 'not-applicable'
+      ? [`${ability}: ${c.reason}; coverage absent on ${c.surface} ${c.clientVersion}; unsupported is an operator declaration, not a passed capability probe.`] : [];
+    for (const group of verdict.expect) {
+      if (group.status === 'not-applicable' && verdict.outcome === 'not-applicable') group.gap = `${ability}: ${c?.reason ?? 'support unconfirmed'}`;
+      else delete group.gap;
+      for (const item of group.items) if (item.id.endsWith('.content')) item.evidence = selectedNames(ability).flatMap(name => {
+        const index = record.events.findIndex(e => e.seq === assessment.selection[name]); return index < 0 ? [] : [`events[${index}]`];
+      });
+    }
     return { ability, attempt, verdict };
   });
   return { schema: 'wayfinder-interactive-result/1', scenario: assessment.scenario, verdicts,

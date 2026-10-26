@@ -1,4 +1,5 @@
 // Conservative adapters for explicitly supplied native files, never discovery of personal logs.
+import { questionTool } from './tools.ts';
 import { classifyResult } from '../evidence.ts';
 import type { EventRecord, Field, SessionRecord } from '../evidence.ts';
 
@@ -20,6 +21,7 @@ export interface NativeEvidence {
   model: Field<string>;
   version: Field<string>;
   effort: Field<string>;
+  range: Field<{ startedAt: string; endedAt: string }>;
 }
 
 /**
@@ -35,6 +37,10 @@ export function normalizeNative(client: InteractiveClient, text: string, file: s
   let version: Field<string> = absent('client version unavailable');
   let effort: Field<string> = absent('effort unavailable');
   let active: { index: number; startedAt: string; input: string; id: string } | null = null;
+  const models = new Set<string>(); const efforts = new Set<string>();
+  const setModel = (value: unknown) => { if (typeof value === 'string' && value) { models.add(value); model = known(value); if (models.size > 1) missing.add('combination.model-mismatch'); } };
+  const setEffort = (value: unknown) => { if (typeof value === 'string' && value) { efforts.add(value); effort = efforts.size === 1 ? known(value) : absent('native effort changed during the run'); } };
+  const timestamps: string[] = [];
   let nextTurn = 0; let previousTime = -Infinity;
   const calls = new Map<string, Extract<EventRecord, { kind: 'tool-call' }>>();
   const setId = (id: string) => {
@@ -60,7 +66,7 @@ export function normalizeNative(client: InteractiveClient, text: string, file: s
     if (row.isSidechain === true) { missing.add('native.sidechain'); continue; }
     const at = string(row.timestamp); const time = Date.parse(at);
     if (!Number.isFinite(time) || time < previousTime) missing.add('native.integrity');
-    previousTime = time;
+    previousTime = time; timestamps.push(at);
     const add = (event: Omit<EventRecord, 'seq' | 'at' | 'session' | 'turn'>) => {
       const seq = events.length;
       events.push({ ...event, seq, at, session: 'A', turn: active?.index ?? null } as EventRecord);
@@ -85,19 +91,21 @@ export function normalizeNative(client: InteractiveClient, text: string, file: s
         ?? (Array.isArray(decoded) ? parsed(content(decoded)) : obj.content ? parsed(content(obj.content)) : decoded);
       c.result = /wayfinder/i.test(c.server) && ['map_create', 'map_apply'].includes(c.tool) && classifyResult(unwrapped) === 'transport-failure'
         ? absent('write result is not decodable; inspect the raw native result') : known(unwrapped);
-      c.failed = failed;
+      c.failed = failed || obj.is_error === true || /^(?:error: )?user (?:rejected|denied|cancelled|canceled)/i.test(content(value));
       // A question answer is an input at the result's time, not at the earlier call's time.
-      if (/^(?:functions\.)?(?:request_user_input|AskUserQuestion)$/.test(c.tool)) {
-        message('user', content(value) || JSON.stringify(value));
+      if (!c.failed && questionTool(c.tool) === 'blocking') {
+        const answers = object(decoded).answers;
+        if (answers && typeof answers === 'object' && Object.keys(answers).length) message('user', JSON.stringify(answers));
+        else if (/^User has answered your questions:/i.test(content(value))) message('user', content(value));
       }
       // Completed work is timed at the result, so work finishing after an answer cannot prove preparation.
-      if (!/request_user_input|AskUserQuestion/.test(c.tool)) { c.at = at; locations[c.seq] = `${file}:${offset + 1}`; }
+      if (questionTool(c.tool) === null) { c.at = at; locations[c.seq] = `${file}:${offset + 1}`; }
     };
     if (client === 'codex') {
       const p = object(row.payload);
       if (row.type === 'session_meta') { setId(string(p.id)); if (p.cli_version) version = known(string(p.cli_version)); }
       else if (row.type === 'turn_context') {
-        if (p.model) model = known(string(p.model)); if (p.effort) effort = known(string(p.effort));
+        setModel(p.model); setEffort(p.effort);
       } else if (row.type === 'event_msg') {
         if (p.type === 'task_started') start(at, string(p.turn_id));
         else if (p.type === 'task_complete') end(at, string(p.turn_id));
@@ -106,16 +114,23 @@ export function normalizeNative(client: InteractiveClient, text: string, file: s
         // agent_message/user_message duplicate response_items; never double count them.
       } else if (row.type === 'response_item') {
         if (p.type === 'message' && (p.role === 'assistant' || p.role === 'user')) {
-          const body = content(p.content); message(p.role, body);
+          const body = content(p.content);
+          if (p.role === 'user' && /^(?:<environment_context>|<system-reminder>|# AGENTS\.md instructions)/.test(body.trim())) continue;
+          message(p.role, body);
           if (p.role === 'user') rememberInput(body);
         } else if (p.type === 'function_call' || p.type === 'custom_tool_call') call(string(p.call_id), string(p.name), p.arguments ?? p.input);
-        else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') result(string(p.call_id), p.output);
+        else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') result(string(p.call_id), p.output, p.is_error === true);
         else if (p.type !== 'reasoning' && p.type !== 'message') missing.add('native.unhandled');
       } else if (row.type !== 'session_meta') missing.add('native.unhandled');
     } else {
       setId(string(row.sessionId)); if (row.version) version = known(string(row.version));
+      if (row.type === 'system' && row.subtype === 'init') {
+        setEffort(row.effort); setModel(row.model);
+        continue;
+      }
       const m = object(row.message);
-      if (m.model) model = known(string(m.model));
+      setModel(m.model);
+      if (row.isMeta === true || row.isCompactSummary === true || /^\[Request interrupted by user/.test(content(m.content))) continue;
       if (row.type === 'user' || row.type === 'assistant') {
         const blocks = Array.isArray(m.content) ? m.content : [{ type: 'text', text: m.content }];
         const humanText = row.type === 'user' && blocks.some(b => object(b).type === 'text');
@@ -129,7 +144,8 @@ export function normalizeNative(client: InteractiveClient, text: string, file: s
         if (m.stop_reason === 'end_turn') end(at);
       } else if (row.type === 'system' && row.subtype === 'turn_duration') {
         if (active) end(at); // Often accompanies the already recorded end_turn.
-      } else if (row.type !== 'file-history-snapshot' && row.type !== 'queue-operation') missing.add('native.unhandled');
+      } else if (row.type === 'queue-operation') { if (active) missing.add('native.boundaries'); }
+      else if (row.type !== 'file-history-snapshot') missing.add('native.unhandled');
     }
   }
   if (active || !turns.length) missing.add('native.boundaries');
@@ -143,5 +159,6 @@ export function normalizeNative(client: InteractiveClient, text: string, file: s
   const sources = events.map(e => ({ event: e, source: locations[e.seq]! })).sort((a, b) => Date.parse(a.event.at) - Date.parse(b.event.at));
   sources.forEach(({ event, source }, seq) => { event.seq = seq; locations[seq] = source; });
   return { events: sources.map(s => s.event), session: { label: 'A', nativeId, clientId, mcpSessionIds: absent('not correlated with protocol journal'), turns },
-    locations, missing: [...missing], model, version, effort };
+    locations, missing: [...missing], model, version, effort,
+    range: timestamps.length && !missing.has('native.integrity') ? known({ startedAt: timestamps[0]!, endedAt: timestamps.at(-1)! }) : absent('native timestamp range unavailable') };
 }

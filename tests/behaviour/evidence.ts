@@ -45,7 +45,8 @@ export interface GivenRules {
  * class answers `unknown`, never `holds`. Single fields use their path instead, e.g. `combination.visibleModel`.
  */
 export const missingMarkers = ['maps', 'receipts', 'events', 'events.message', 'events.tool-call', 'events.resource-read',
-  'events.file-read', 'events.file-change', 'events.command', 'events.delegation'] as const;
+  'events.file-read', 'events.file-change', 'events.command', 'events.delegation', 'events.process',
+  'native.integrity', 'native.boundaries', 'native.sidechain', 'native.unhandled', 'combination.model-mismatch'] as const;
 
 export interface AttemptRecord {
   schema: typeof attemptSchema;
