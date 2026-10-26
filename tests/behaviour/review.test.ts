@@ -244,6 +244,99 @@ describe('manual review command and report integration', () => {
   });
 });
 
+describe('final replies with independent same-turn evidence', () => {
+  const f11 = library.find(s => s.id === 'F11')!;
+  type Context = 'event' | 'receipt' | 'unchanged-map';
+  function fixture(context: Context, status: 'holds' | 'violated') {
+    const a = sample(); const mapId = 'Fixture.Scope';
+    a.subject = { kind: 'scenario', id: f11.id, version: f11.version };
+    a.attemptId = 'B/F11-1'; a.raw.path = 'B/F11-1/raw';
+    a.sessions[0]!.turns[0]!.input = 'Does this permission belong to the Agent system rather than Feishu?';
+    a.maps = [{ mapId, seedHeadRevision: 1, history: [{ mapId, revision: 1, priorRevision: null, kind: 'create',
+      author: { actorId: 'fixture', clientId: a.controller.clientId, occurredAt: '' }, changes: [],
+      state: { id: mapId, title: 'Permission boundaries', destination: 'Separate Agent policy from Feishu access.', notes: '',
+        currentRevision: 1, fog: [], scopeExclusions: [], tickets: [{ id: 'D03', title: 'Permission scope',
+          question: 'Which permissions belong to the Agent system and which to Feishu?', type: 'grilling', prerequisites: [], status: 'open', claim: null }] } }] }];
+    const text = status === 'holds'
+      ? 'Agent policy governs delegated actions; Feishu enforces access.\nShould we move the Agent-side part out of this Map?'
+      : 'I will continue with the next task.';
+    a.events = [{ seq: 1, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'message', role: 'assistant', text }];
+    if (context !== 'unchanged-map') a.events.unshift({ seq: 0, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'tool-call',
+      callId: 'scope-call', server: 'wayfinder', tool: context === 'event' ? 'map_read' : 'map_apply', arguments: { mapId },
+      result: { known: true, value: context === 'event' ? { question: 'Agent policy and Feishu access' } : { code: 'version_mismatch' } },
+      failed: context === 'receipt', requestId: unknown });
+    if (context === 'receipt') a.receipts = [{ callId: 'scope-call', session: 'A', turn: 0, tool: 'map_apply', mapId,
+      outcome: { kind: 'not-written', because: 'version-mismatch' } }];
+    const reply = `events[${a.events.length - 1}]`;
+    const location = context === 'event' ? 'events[0]' : context === 'receipt' ? 'receipts[0]' : 'maps[0].history';
+    const support = [{ location: reply, quote: text,
+      explanation: status === 'holds' ? 'The reply explains the two permission layers and asks before moving scope.' : 'The reply neither answers the question nor asks whether to move scope.' },
+    { location, quote: context === 'event' ? 'Agent policy and Feishu access' : context === 'receipt' ? 'not-written' : 'Permission boundaries',
+      explanation: context === 'event' ? 'The read in this turn identifies the permission issue that the reply must answer.'
+        : 'The recorded unchanged Map corroborates the asks-scope requirement that the reply precede any Map change.' }];
+    const reviews: Review[] = ['first', 'second'].map(readingId => ({ itemId: 'asks-scope', status, reason: support[0]!.explanation,
+      by: 'fixture', role: 'review', roundId: 'fixed', readingId, evidence: [reply, location], support: structuredClone(support) }));
+    return { a, reviews, reply };
+  }
+
+  test.each(['event', 'receipt', 'unchanged-map'] as const)('F11 final reply plus %s supports both agreement outcomes', context => {
+    for (const status of ['holds', 'violated'] as const) {
+      const { a, reviews } = fixture(context, status);
+      expect(reviewProblem(reviews[0]!, a)).toBeNull();
+      expect(judgeAttempt(f11, a, { reviews }).outcome).toBe(status === 'holds' ? 'pass' : 'fail');
+    }
+  });
+  test.each(['reply-only', 'receipt-padding', 'reply-quote-on-receipt', 'invented-reply-quote', 'dangling-receipt', 'different-turn', 'unknown-reply-turn', 'question-padding'] as const)(
+    '%s is still insufficient for either conclusion', shape => {
+      for (const status of ['holds', 'violated'] as const) {
+        const { a, reviews, reply } = fixture(shape === 'different-turn' || shape === 'reply-only' ? 'event' : 'receipt', status);
+        if (shape === 'dangling-receipt') a.receipts[0]!.callId = 'not-the-recorded-call';
+        if (shape === 'different-turn') a.events[0]!.turn = 1;
+        if (shape === 'unknown-reply-turn') a.events.at(-1)!.turn = null;
+        for (const r of reviews) {
+          if (shape === 'reply-only') { r.evidence = [reply]; r.support = r.support!.slice(0, 1); }
+          if (shape === 'receipt-padding') r.support = r.support!.slice(0, 1);
+          if (shape === 'reply-quote-on-receipt') r.support![1]!.quote = r.support![0]!.quote;
+          if (shape === 'invented-reply-quote') r.support![0]!.quote = 'A sentence that the agent never said.';
+          if (shape === 'question-padding') {
+            r.evidence = [reply, 'sessions[0].turns[0]'];
+            r.support![1] = { location: 'sessions[0].turns[0]', quote: a.sessions[0]!.turns[0]!.input,
+              explanation: 'The human question is context, not an independent record of the agent response or Map outcome.' };
+          }
+        }
+        expect(judgeAttempt(f11, a, { reviews }).outcome).toBe('insufficient-evidence');
+      }
+    });
+  test('absent, incomplete or changed Map history cannot prove that no write occurred', () => {
+    for (const shape of ['absent', 'missing', 'changed', 'contradictory-receipt'] as const) {
+      const { a, reviews } = fixture('unchanged-map', 'violated');
+      if (shape === 'absent') a.maps[0]!.history = [];
+      if (shape === 'missing') a.missing = ['maps[0].history'];
+      if (shape === 'changed') a.maps[0]!.history[0]!.revision = 2;
+      if (shape === 'contradictory-receipt') a.receipts = [{ callId: 'unexpected-write', session: 'A', turn: 0, tool: 'map_apply',
+        mapId: a.maps[0]!.mapId, outcome: { kind: 'committed', revision: 1 } }];
+      expect(reviewProblem(reviews[0]!, a)).not.toBeNull();
+    }
+  });
+  test('Map corroboration cannot clear missing required instructions', () => {
+    const { a, reviews } = fixture('unchanged-map', 'holds'); a.missing = ['given[0].instructions'];
+    expect(judgeAttempt(f11, a, { reviews }).outcome).toBe('insufficient-evidence');
+  });
+  test('the fake-driver review decides a reply without tools using its unchanged Map, with four calls', async () => {
+    const { a, reviews } = fixture('unchanged-map', 'holds');
+    const fake = new Fake((req, out) => {
+      if (req.kind === 'availability') return out;
+      const body = JSON.parse(out.text);
+      body.items = body.items.map((item: Review) => ({ ...reviews[0], itemId: item.itemId }));
+      return { ...out, text: JSON.stringify(body) };
+    });
+    const result = await reviewAttempt(f11, a, fake, directory(a), { itemIds: ['asks-scope'] });
+    expect(result.pending).toEqual([]);
+    expect(judgeAttempt(f11, { ...a, modelReviews: [result] }).outcome).toBe('pass');
+    expect(fake.requests.map(r => r.kind)).toEqual(['availability', 'availability', 'review', 'review']);
+  });
+});
+
 describe('native CLI contract without model calls', () => {
   test.skipIf(process.platform !== 'darwin')('outer sandbox permits runtime bookkeeping but denies workspace writes and unrelated evidence', () => {
     const scratch = realpathSync(mkdtempSync(join(root, 'sandbox-'))); const runtime = join(scratch, 'runtime'); const work = join(scratch, 'work');

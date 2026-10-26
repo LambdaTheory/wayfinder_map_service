@@ -13,7 +13,7 @@ export function evidenceHash(record: AttemptRecord): string {
 export function evidenceLocations(a: AttemptRecord): string[] {
   return [...a.events.flatMap((e, i) => e.actor !== 'controller' ? [`events[${i}]`] : []),
     ...a.sessions.flatMap((s, i) => s.turns.map((_, j) => `sessions[${i}].turns[${j}]`)),
-    ...a.maps.flatMap((m, i) => m.history.map((_, j) => `maps[${i}].history[${j}]`)),
+    ...a.maps.flatMap((m, i) => [`maps[${i}].history`, ...m.history.map((_, j) => `maps[${i}].history[${j}]`)]),
     ...a.receipts.flatMap((r, i) => r.outcome.kind === 'unknown' ? [] : [`receipts[${i}]`])];
 }
 
@@ -44,27 +44,59 @@ export function missingForReview(itemId: string, a: AttemptRecord): string[] {
 }
 
 function finalMessage(a: AttemptRecord, e: EventRecord): boolean {
-  return e.kind === 'message' && e.role === 'assistant' && !a.events.some(later => later.seq > e.seq
-    && later.session === e.session && later.turn === e.turn && later.kind === 'message' && later.role === 'assistant');
+  return e.kind === 'message' && e.role === 'assistant' && (e.session === null || e.turn === null || !a.events.some(later => later.seq > e.seq
+    && later.session === e.session && later.turn === e.turn && later.kind === 'message' && later.role === 'assistant'));
 }
 
-/** A non-final concrete source. Turns contain user inputs, not independent evidence of an agent action.
- * Receipts and revisions need the matching recorded call, so an unrelated/dangling receipt cannot pad a reply.
+interface ReviewSource {
+  value: unknown;
+  kind: 'reply' | 'context' | 'independent';
+  scope: { session: string | null; turn: number | null } | 'attempt';
+  text?: string;
+}
+
+/** Final replies and questions are citable content, but neither supplies its own corroboration.
+ * Receipts/revisions need a recorded call. Complete history still at the seed head proves no Map change,
+ * including in a reply-only turn; an empty or partial history never proves that absence.
  */
-function concreteSource(location: string, a: AttemptRecord): unknown | null {
+function reviewSource(location: string, a: AttemptRecord): ReviewSource | null {
   const event = /^events\[(\d+)\]$/.exec(location);
-  if (event) { const e = a.events[Number(event[1])]; return e?.actor === 'agent' && !(e.kind === 'message' && e.role === 'user') && !finalMessage(a, e) ? e : null; }
+  if (event) {
+    const e = a.events[Number(event[1])];
+    return e && e.actor !== 'controller' ? { value: e, scope: { session: e.session, turn: e.turn },
+      kind: e.actor !== 'agent' || e.kind === 'message' && e.role === 'user' ? 'context' : finalMessage(a, e) ? 'reply' : 'independent',
+      ...(e.kind === 'message' ? { text: e.text } : {}) } : null;
+  }
+  const turn = /^sessions\[(\d+)\]\.turns\[(\d+)\]$/.exec(location);
+  if (turn) {
+    const s = a.sessions[Number(turn[1])]; const t = s?.turns[Number(turn[2])];
+    return t ? { value: t, text: t.input, kind: 'context', scope: { session: s!.label, turn: t.index } } : null;
+  }
   const receipt = /^receipts\[(\d+)\]$/.exec(location);
   if (receipt) {
     const r = a.receipts[Number(receipt[1])];
     return r && r.outcome.kind !== 'unknown' && a.events.some(e => e.actor === 'agent' && e.kind === 'tool-call'
-      && e.callId === r.callId && e.session === r.session && e.turn === r.turn && e.result.known) ? r : null;
+      && e.callId === r.callId && e.session === r.session && e.turn === r.turn && e.result.known)
+      ? { value: r, kind: 'independent', scope: { session: r.session, turn: r.turn } } : null;
+  }
+  const history = /^maps\[(\d+)\]\.history$/.exec(location);
+  if (history) {
+    const i = Number(history[1]); const m = a.maps[i];
+    if (!m || m.seedHeadRevision === null || !m.history.length || a.missing.some(p => p === 'maps'
+      || p.startsWith(`maps[${i}]`) || p.startsWith(`maps.${m.mapId}`))) return null;
+    const head = m.history.at(-1)!;
+    const unchanged = head.revision === m.seedHeadRevision && head.state.currentRevision === m.seedHeadRevision
+      && m.history.every(r => r.mapId === m.mapId && r.revision <= m.seedHeadRevision!)
+      && !a.receipts.some(r => r.mapId === m.mapId && r.outcome.kind === 'committed');
+    return unchanged ? { value: m.history, kind: 'independent', scope: 'attempt' } : null;
   }
   const revision = /^maps\[(\d+)\]\.history\[(\d+)\]$/.exec(location);
   if (revision) {
     const r = a.maps[Number(revision[1])]?.history[Number(revision[2])];
-    return r && a.receipts.some((receipt, i) => receipt.mapId === r.mapId && receipt.outcome.kind === 'committed'
-      && receipt.outcome.revision === r.revision && concreteSource(`receipts[${i}]`, a)) ? r : null;
+    const i = r ? a.receipts.findIndex((receipt, i) => receipt.mapId === r.mapId && receipt.outcome.kind === 'committed'
+      && receipt.outcome.revision === r.revision && reviewSource(`receipts[${i}]`, a)) : -1;
+    const receipt = i < 0 ? null : reviewSource(`receipts[${i}]`, a);
+    return r && receipt ? { ...receipt, value: r } : null;
   }
   return null;
 }
@@ -77,12 +109,21 @@ export function reviewProblem(r: Review, a: AttemptRecord): string | null {
   if (r.status === 'undecided') return null;
   const locations = new Set(evidenceLocations(a));
   if (!r.evidence?.length || r.evidence.some(x => !locations.has(x))) return 'review lacks valid evidence locations';
-  const supported = r.support?.some(s => {
-    if (!r.evidence!.includes(s.location) || !s.quote?.trim() || !s.explanation?.trim()) return false;
-    const source = concreteSource(s.location, a);
-    return source !== null && JSON.stringify(source).includes(s.quote);
+  const supported = (r.support ?? []).map(s => {
+    if (!r.evidence!.includes(s.location) || !s.quote?.trim() || !s.explanation?.trim()) return null;
+    const source = reviewSource(s.location, a);
+    return source && (source.text ?? JSON.stringify(source.value)).includes(s.quote) ? source : null;
   });
-  if (!supported) return 'review needs quoted, item-relevant evidence beyond the final reply (a concrete event, matched receipt or revision)';
+  const independent = supported.filter((s): s is ReviewSource => s?.kind === 'independent');
+  const replies = r.evidence.map(p => reviewSource(p, a)).filter((s): s is ReviewSource => s?.kind === 'reply');
+  const sameTurn = (source: ReviewSource, reply: ReviewSource) => {
+    if (reply.scope === 'attempt') return false;
+    const { session, turn } = reply.scope;
+    return session !== null && turn !== null && a.sessions.some(s => s.label === session && s.turns.some(t => t.index === turn))
+      && (source.scope === 'attempt' || source.scope.session === session && source.scope.turn === turn);
+  };
+  if (supported.some(s => !s) || !independent.length || replies.some(reply => !independent.some(source => sameTurn(source, reply))))
+    return 'review needs quoted, item-relevant independent evidence for the same turn beyond the final reply (a concrete event, matched receipt/revision or unchanged Map history)';
   const missing = r.status === 'holds' ? missingForReview(r.itemId, a) : [];
   return missing.length ? `missing required evidence: ${missing.join(', ')}` : null;
 }
