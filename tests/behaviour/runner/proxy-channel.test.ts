@@ -46,3 +46,23 @@ test('Attempt channels forward only during a client lease, disconnect old socket
     await new Promise<void>(resolve => upstream.close(() => resolve()));
   }
 });
+
+test('a delayed exit signal accounts for already-forwarded connections at or after the original exit time', async () => {
+  const upstream = createServer(socket => { socket.on('error', () => undefined); socket.on('data', bytes => socket.write(bytes)); });
+  await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  const channel = await startProxyChannel({ HTTPS_PROXY: `http://127.0.0.1:${(upstream.address() as { port: number }).port}` });
+  try {
+    const port = Number(new URL(channel.environment.HTTPS_PROXY!).port);
+    channel.activate();
+    await exchange(port, Buffer.from('running'));
+    const exitedAt = process.hrtime.bigint();
+    // The wrapper event has happened, but its signal has not reached the channel yet.
+    await exchange(port, Buffer.from('late'));
+    channel.revokeAt(exitedAt);
+    await rejected(port);
+    expect(channel.evidence()).toMatchObject({ connections: 3, blockedConnections: 1, postExitConnections: 1 });
+    channel.revokeAt(exitedAt);
+    expect(channel.evidence().postExitConnections).toBe(1); // No double counting on cleanup.
+    expect(() => channel.activate()).toThrow('closed');
+  } finally { await channel.close(); await new Promise<void>(resolve => upstream.close(() => resolve())); }
+});

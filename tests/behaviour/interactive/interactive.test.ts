@@ -219,7 +219,7 @@ it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'protocol-refusal'
     expect(capture.missing).toContain('raw.protocol.jsonl');
     expect(existsSync(join(dir, 'protocol.jsonl'))).toBe(false);
   }
-  if (mode === 'native-link') expect(capture.raw.files).toEqual(['raw/launch.jsonl']);
+  if (mode === 'native-link') expect(capture.raw.files).toEqual(['raw/proxy-channel.json', 'raw/launch.jsonl']);
   if (mode.startsWith('no-start') || ['launch-failure', 'exit-without-start'].includes(mode)) expect(capture.run.completeness).toBe('launch-failed');
   if (mode.startsWith('reported-')) expect(capture.run.completeness).toBe(mode.slice('reported-'.length));
   if (['exit-nonzero', 'exit-signal', 'repeat-launch'].includes(mode)) expect(capture.run.completeness).toBe('complete');
@@ -228,7 +228,7 @@ it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'protocol-refusal'
     const log = readFileSync(join(dir, 'raw/launch.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
     if (mode === 'launch-failure') expect(log.at(-1)).toMatchObject({ phase: 'refused', launched: false, launchFailure: 'client launch failed' });
     else {
-      if (mode !== 'exit-without-start') expect(log[0]).toMatchObject({ phase: 'started', launched: true });
+      if (mode !== 'exit-without-start') expect(log.find(row => row.phase === 'started')).toMatchObject({ phase: 'started', launched: true });
       if (mode === 'repeat-launch') expect(log.at(-1)).toMatchObject({ phase: 'refused', launched: false, duplicateLaunch: true });
       if (mode !== 'missing-exit') expect(log.find(row => row.phase === 'exited')).toMatchObject({ phase: 'exited', code: mode === 'exit-signal' ? null : mode === 'exit-nonzero' ? 7 : 0,
         signal: mode === 'exit-signal' ? 'SIGTERM' : null });

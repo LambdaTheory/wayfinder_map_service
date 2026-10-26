@@ -9,7 +9,7 @@ import { dirname, join, resolve } from 'node:path';
 import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { attemptSchema, classifyResult, leaks, redact, requiredFields } from '../evidence.ts';
 import type { AttemptRecord, Completeness, Entry, EventRecord, Field, GivenRules, SessionRecord } from '../evidence.ts';
-import { startProxyChannel } from './proxy-channel.ts';
+import { proxyChannelSecrets, startProxyChannel } from './proxy-channel.ts';
 import { clearClientDirectories } from './process-tree.ts';
 import { ProxyError, proxyEnvironment, proxyRouting, proxySecrets, proxySummary } from '../proxy.ts';
 import { library } from '../library.ts';
@@ -226,7 +226,7 @@ async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: ()
   const nativeSessions = sessions.map(s => s.codex);
   const secrets: Record<string, string> = { 'controller-token': controller.token,
     ...Object.fromEntries(sessions.flatMap(x => [[`token-${x.label}`, x.credential.token], ...loginSecrets(x.codex).map((v, i) => [`codex-login-${x.label}-${i}`, v])])) };
-  Object.assign(secrets, proxySecrets(o.proxyEnv ?? {}, proxies.environment), Object.fromEntries(Object.entries(proxySecrets(proxies.environment, channel.environment)).map(([name,value]) => [name.replace('proxy-', 'proxy-channel-'), value])));
+  Object.assign(secrets, proxySecrets(o.proxyEnv ?? {}, proxies.environment), proxyChannelSecrets(proxies.environment, channel.environment));
   const startedAt = new Date().toISOString();
   const events: EventRecord[] = [];
   const emit = (event: EventRecord) => { events.push({ ...event, seq: events.length }); };
