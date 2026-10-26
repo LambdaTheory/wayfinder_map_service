@@ -635,23 +635,26 @@ describe('PR 93 independent-review regressions', () => {
     const privateFixture = join(root, 'private-context.txt'); writeFileSync(privateFixture, 'private fixture');
     writeFileSync(bin, `#!${process.execPath}
 const fs = require('node:fs'); const net = require('node:net'); const path = require('node:path'); const assert = require('node:assert/strict');
-const temporary = process.env.CLAUDE_CODE_TMPDIR;
-assert.ok(temporary, 'Claude requires its own temporary directory override');
+const isLogin = process.argv.includes('status');
+const temporary = process.env.CLAUDE_CODE_TMPDIR ?? '/tmp';
+const perUid = path.join(temporary, 'claude-' + process.getuid());
+const probe = path.join(perUid, isLogin ? 'login-probe' : 'review-probe');
+try {
+  fs.mkdirSync(perUid, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(probe, 'synthetic temporary data');
+} catch (e) { console.error('temporary storage write failed: ' + e.code); process.exit(29); }
+assert.equal(fs.readFileSync(probe, 'utf8'), 'synthetic temporary data');
 assert.equal(path.dirname(fs.realpathSync(temporary)), fs.realpathSync(process.env.TMPDIR));
 const info = fs.statSync(temporary);
 assert.ok(info.isDirectory()); assert.equal(info.mode & 0o777, 0o700); assert.equal(info.uid, process.getuid());
 fs.closeSync(fs.openSync(temporary, 'r'));
-const probe = path.join(temporary, process.argv.includes('status') ? 'login-probe' : 'review-probe');
-fs.writeFileSync(probe, 'synthetic temporary data'); assert.equal(fs.readFileSync(probe, 'utf8'), 'synthetic temporary data');
-for (const denied of ['/private/tmp', '/tmp/claude-' + process.getuid()]) {
-  assert.throws(() => { const fd = fs.openSync(denied, 'r'); fs.closeSync(fd); }, { code: 'EPERM' });
-}
-if (process.argv.includes('status')) { console.log(JSON.stringify({loggedIn:true, authMethod:'claude.ai'})); process.exit(0); }
+assert.throws(() => { const fd = fs.openSync('/private/tmp', 'r'); fs.closeSync(fd); }, { code: 'EPERM' });
+if (isLogin) { console.log(JSON.stringify({loggedIn:true, authMethod:'claude.ai'})); process.exit(0); }
 try { fs.writeFileSync(process.cwd() + '/must-not-write', 'bad'); console.log('workspace write was allowed'); process.exit(23); } catch (e) { if (e.code !== 'EPERM') throw e; }
 if (!process.env.CLAUDE_CONFIG_DIR || process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR !== '') process.exit(24);
 if (fs.readdirSync(process.env.CLAUDE_CONFIG_DIR).length || process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY !== '1') process.exit(27);
-for(const path of [${JSON.stringify(privateFixture)}]) {
- try { fs.readFileSync(path); process.exit(28); } catch(e) { if(e.code!=='EPERM') throw e; }
+for(const fixturePath of [${JSON.stringify(privateFixture)}]) {
+ try { fs.readFileSync(fixturePath); process.exit(28); } catch(e) { if(e.code!=='EPERM') throw e; }
 }
 const socket = net.connect(18766, '127.0.0.1');
 socket.on('connect', () => { socket.destroy(); process.exit(25); });
@@ -665,7 +668,7 @@ socket.on('error', e => { if (e.code !== 'EPERM') process.exit(26);
       const response = await new CliReviewDriver().invoke({ id: 'fixture', kind: 'availability', target: { cli: 'claude', model: 'claude-sonnet-5-5' }, input: 'No real model.' });
       expect(response.status, response.detail + response.stdout + response.stderr).toBe('complete');
       expect(response.invocation?.command).toBe('/usr/bin/sandbox-exec');
-      const profile = response.invocation!.args[1]!;
+      const args = response.invocation!.args; const profile = args[args.indexOf('-p') + 1]!;
       expect(profile.split('\n').find(line => line.startsWith('(deny file-read*'))).toContain('(subpath "/private/tmp")');
     } finally { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; }
   });
