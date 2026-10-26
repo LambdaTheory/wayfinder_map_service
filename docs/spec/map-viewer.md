@@ -1,8 +1,10 @@
-# Local read-only Map viewer requirements
+# Local Map viewer requirements
 
 Status: requirements accepted by the live user on 2026-10-23 after reviewing a requirement page and a clickable prototype built from real local Map Revisions. The user selected the dependency-graph layout. The same day the user accepted an implementation plan with its three default decisions (section 4). Delivery and acceptance evidence: [docs/implementation/map-viewer.md](../implementation/map-viewer.md).
 
 Use [GLOSSARY.md](../../GLOSSARY.md) for domain language and the [v1 contract](v1.md) for the wider product. This slice delivers part of M4 (visual projection) locally; it does not complete M4.
+
+Sections 1–4 record the delivered read-only slice. [Section 5](#5-answer-desk-amendment) records the answer-only amendment accepted by Kun on 2026-10-26 under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109); it does not claim that the running viewer accepts answers.
 
 ## 1. Decisions
 
@@ -25,7 +27,7 @@ Use [GLOSSARY.md](../../GLOSSARY.md) for domain language and the [v1 contract](v
 
 ## 3. Out of scope
 
-Editing from the viewer, an embedded chat, MCP Apps, zoom and filtering (the largest current Map has five Tickets), browsing older Revisions, share links, public access, authentication, rollback and deletion.
+For the original slice: editing from the viewer, an embedded chat, MCP Apps, zoom and filtering (the largest current Map has five Tickets), browsing older Revisions, share links, public access, authentication, rollback and deletion. The answer-only write and its key are the bounded exception accepted in section 5; general Map editing remains excluded.
 
 ## 4. Design decisions
 
@@ -38,3 +40,11 @@ Accepted with the implementation plan on 2026-10-23.
 - **What changed.** The view classifies the latest Revision's semantic changes. A content change is Fog or a Scope Exclusion according to the section that holds the item: this Revision for an addition or update, the previous Revision for a removal. `map.update` names the Destination only when the Destination text changed, and at most once per Revision because a change does not record which fields it patched.
 - **History.** Polling reads only the latest two Revisions. The Destination's creating Revision and later changes, and the Revision where a Fog item appeared, are read only when the human opens those details.
 - **Browser tests.** No browser-test dependency is added. Projection and HTTP behaviour are tested in the service; the page is checked with screenshots during acceptance.
+
+## 5. Answer Desk amendment
+
+Status: accepted by Kun on 2026-10-26. This amends the original read-only/no-key restrictions after #109 closeout and the respective implementation is delivered; the current implementation record remains evidence for the read-only release.
+
+The [Answer Desk specification](answer-desk.md) owns the detailed rules; [ADR 0006](../adr/0006-answer-desk-in-the-map-viewer.md) explains the second write entry. Implement its [question fields](answer-desk.md#2-questions-and-answers), [display and Reopen Request states](answer-desk.md#3-state-and-transition-ownership), [submission behavior](answer-desk.md#human-submission), [queue order](answer-desk.md#5-queue-ordering) and [keyed browser boundary](answer-desk.md#7-keyed-browser-boundary). The latter is the authority for fragment stripping, access, polling and layout checks.
+
+[Issue ownership](answer-desk.md#9-implementation-and-release-sequence) explicitly includes Reopen Request submission and cancellation in #113. Answer Desk delivery needs its own protocol, storage and browser evidence; the read-only acceptance does not verify these writes.
