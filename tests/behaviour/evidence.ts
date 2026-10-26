@@ -1,5 +1,6 @@
 // The evidence contract for one Attempt (spec R3). Drivers normalize native client output into
-// this record; verdicts read only this record. Raw native files stay in the private run directory.
+// this record; verdicts read its evidence and append separately hashed review annotations. Raw native files stay private.
+import type { ReviewSummary } from './review-types.ts';
 
 export const attemptSchema = 'wayfinder-behaviour-attempt/1';
 
@@ -19,6 +20,7 @@ export type Completeness = typeof completeness[number];
 
 /** Where the agent under test can learn the write `version` (ADR 0005). The runner never supplies it. */
 export type RulesSource =
+  | { kind: 'unknown'; reason: string }
   | { kind: 'instructions'; versionLine: string }
   | { kind: 'tool-parameter'; tool: 'map_create' | 'map_apply'; description: string };
 
@@ -31,6 +33,9 @@ export interface GivenRules {
   /** First event sequence number this phase covers. */
   fromSeq: number;
   compatibilityMode: 'instructions' | 'toolsOnly';
+  /** Release observed by the Controller at this phase; never evidence of model visibility. */
+  serviceVersion?: string;
+  /** Only content actually exposed by the client, or unknown. Controller imports are not a rules source. */
   rulesSource: RulesSource;
   instructions: Field<string>;
   toolDescriptions: Field<Record<string, string>>;
@@ -80,6 +85,8 @@ export interface AttemptRecord {
   raw: { path: string; files: string[] };
   /** Markers from `missingMarkers` and paths of single fields the Driver could not fill. */
   missing: string[];
+  /** Append-only review rounds; each is bound to the original evidence hash. */
+  modelReviews?: ReviewSummary[];
 }
 
 export interface SessionRecord {

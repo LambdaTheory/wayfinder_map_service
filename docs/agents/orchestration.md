@@ -11,7 +11,7 @@ How a coordinator runs implementation Issues in parallel with Orca workers, foll
 ## Parameters
 
 - At most three developers at once. When more Issues are ready, Kun's stated priority order decides; the run state records it as a rule.
-- Two reviews for `src/`, `web/`, `scripts/`, `package.json`, `package-lock.json`, `docs/agents/exploration-mcp.md`, and the behaviour code where a false green is the main risk: `tests/behaviour/runner/`, `verdict.ts`, `report.ts`, `checks.ts`, `common.ts`, `evidence.ts`. One `/code-review` for other documentation, scenario data and test-only tightening; a must-fix finding there adds the second review.
+- Two reviews for `src/`, `web/`, `scripts/`, `package.json`, `package-lock.json`, `docs/agents/exploration-mcp.md`, and the behaviour code where a false green is the main risk: `tests/behaviour/runner/`, `tests/behaviour/chatgpt/`, `verdict.ts`, `report.ts`, `checks.ts`, `common.ts`, `evidence.ts`. One `/code-review` for other documentation, scenario data and test-only tightening; a must-fix finding there adds the second review.
 - Kun authorized the coordinator to merge on 2026-10-25, with a merge commit as this repository does. Before merging: the full `npm test` and `npm run typecheck` on the branch merged with the latest `main`; each must-fix item reproduced as fixed; the Release Version, `CHANGELOG.md` section and tag per `AGENTS.md`; and, for a change to a mandatory rule or to how clients use the tools, the ChatGPT run with Kun (gate 2).
 - An Issue that still waits on a gate is referenced with `Refs #n`, not closed by the PR; it closes once its verification is linked on it.
 
