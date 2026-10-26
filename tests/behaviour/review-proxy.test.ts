@@ -56,7 +56,7 @@ describe('proxy selection and validation', () => {
           '(allow network-outbound (remote tcp4 "localhost:80"))', '(allow network-outbound (remote tcp4 "localhost:443"))'] });
     expect(reviewProxyRouting({ NO_PROXY: '*', no_proxy: '127.0.0.1' }).rules).toEqual([]);
   });
-  test.each(['[::1]', '[::ffff:127.0.0.1]', '127.0.0.2', 'proxy.invalid'])(
+  test.each(['[::1]', '[::ffff:127.0.0.1]', '[::ffff:0.0.0.0]', '127.0.0.2', 'proxy.invalid'])(
     'unsupported proxy host %s is unavailable, not an exception for a broader endpoint', hostname => {
       expect(() => reviewProxyRouting({ HTTPS_PROXY: `http://${hostname}:2345` }))
         .toThrow(new ReviewProxyError('Review proxy must use localhost or 127.0.0.1'));
@@ -120,24 +120,24 @@ socket.on('error', error => { console.error(error.code); process.exitCode = 1; }
       expect(response.invocation).toBeUndefined();
     }
   });
-  test.each(['claude', 'codex'].flatMap(cli => ['127.0.0.1', 'localhost'].map(hostname => ({ cli: cli as 'claude' | 'codex', hostname }))))(
-    '$cli connects only to its $hostname proxy, using settings or terminal routing', async ({ cli, hostname }) => {
-    const proxy = await listener(); const unrelated = await listener();
+  test.each(['claude', 'codex'].flatMap(cli => ['127.0.0.1', 'localhost'].flatMap(hostname =>
+    ['settings', 'terminal', 'none'].map(source => ({ cli: cli as 'claude' | 'codex', hostname, source })))))(
+    '$cli connects only to its $hostname proxy with $source routing', async ({ cli, hostname, source }) => {
+    const proxy = await listener(); const unrelated = await listener(); const wildcard = await listener('0.0.0.0'); const ipv6 = await listener('::1');
     try {
-      for (const source of ['settings', 'terminal', 'none'] as const) {
-        clearProxyEnvironment();
-        const proxyUrl = `http://${hostname}:${proxy.port}`;
-        const configured = source === 'none' ? {} : Object.fromEntries(reviewProxyVariables.map(key => [key, key.toLowerCase() === 'no_proxy' ? 'fixture.invalid' : proxyUrl]));
-        const expected = source === 'none' ? {} : Object.fromEntries(reviewProxyVariables.map(key => [key, key.toLowerCase() === 'no_proxy' ? 'fixture.invalid' : `http://127.0.0.1:${proxy.port}/`]));
-        const subscriptionHome = home({ env: { ...(source === 'settings' ? configured : {}),
-          ...(source === 'terminal' ? { HTTPS_PROXY: 'http://127.0.0.1:18766' } : {}),
-          ALL_PROXY: 'ignored', NODE_OPTIONS: 'ignored', ANTHROPIC_API_KEY: 'synthetic-do-not-forward' } });
-        if (source === 'terminal') for (const [key, value] of Object.entries(configured)) vi.stubEnv(key, value);
-        vi.stubEnv('ALL_PROXY', `http://127.0.0.1:${unrelated.port}`);
-        vi.stubEnv('all_proxy', `http://127.0.0.1:${unrelated.port}`);
-        vi.stubEnv('OPENAI_API_KEY', 'synthetic-do-not-forward');
-        const install = mkdtempSync(join(root, 'install-')); const binDir = join(install, 'bin'); mkdirSync(binDir);
-        writeFileSync(join(binDir, cli), `#!${process.execPath}
+      clearProxyEnvironment();
+      const proxyUrl = `http://${hostname}:${proxy.port}`;
+      const configured = source === 'none' ? {} : Object.fromEntries(reviewProxyVariables.map(key => [key, key.toLowerCase() === 'no_proxy' ? 'fixture.invalid' : proxyUrl]));
+      const expected = source === 'none' ? {} : Object.fromEntries(reviewProxyVariables.map(key => [key, key.toLowerCase() === 'no_proxy' ? 'fixture.invalid' : `http://127.0.0.1:${proxy.port}/`]));
+      const subscriptionHome = home({ env: { ...(source === 'settings' ? configured : {}),
+        ...(source === 'terminal' ? { HTTPS_PROXY: 'http://127.0.0.1:18766' } : {}),
+        ALL_PROXY: 'ignored', NODE_OPTIONS: 'ignored', ANTHROPIC_API_KEY: 'synthetic-do-not-forward' } });
+      if (source === 'terminal') for (const [key, value] of Object.entries(configured)) vi.stubEnv(key, value);
+      vi.stubEnv('ALL_PROXY', `http://127.0.0.1:${unrelated.port}`);
+      vi.stubEnv('all_proxy', `http://127.0.0.1:${unrelated.port}`);
+      vi.stubEnv('OPENAI_API_KEY', 'synthetic-do-not-forward');
+      const install = mkdtempSync(join(root, 'install-')); const binDir = join(install, 'bin'); mkdirSync(binDir);
+      writeFileSync(join(binDir, cli), `#!${process.execPath}
 const assert = require('node:assert/strict'); const net = require('node:net'); const fs = require('node:fs'); const dgram = require('node:dgram');
 async function connect(port, hostname = '127.0.0.1') {
   return new Promise(resolve => {
@@ -159,11 +159,16 @@ async function sendUdp(port) {
   for (const key of ${JSON.stringify(reviewProxyVariables)}) assert.equal(process.env[key], expected[key]);
   for (const key of ['ALL_PROXY', 'all_proxy', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'NODE_OPTIONS']) assert.equal(process.env[key], undefined);
   assert.throws(() => fs.readFileSync(${JSON.stringify(join(subscriptionHome, '.claude/settings.json'))}), {code:'EPERM'});
-  assert.equal(await connect(${proxy.port}), ${JSON.stringify(source === 'none' ? 'EPERM' : 'connected')});
-  assert.equal(await sendUdp(${proxy.port}), 'EPERM');
-  assert.equal(await connect(${proxy.port}, '::1'), 'EPERM');
-  for (const port of [18765, 18766, ${unrelated.port}]) assert.equal(await connect(port), 'EPERM');
-  for (const port of [18765, 18766, ${unrelated.port}]) assert.equal(await connect(port, '::ffff:127.0.0.1'), 'EPERM');
+  assert.equal(await connect(${proxy.port}), ${JSON.stringify(source === 'none' ? 'EPERM' : 'connected')}, 'IPv4 proxy route');
+  assert.equal(await sendUdp(${proxy.port}), 'EPERM', 'proxy UDP');
+  // Only owned ephemeral ports: never probe the real service/relay or a daily proxy.
+  for (const port of [${unrelated.port}, ${wildcard.port}]) {
+    for (const address of ['127.0.0.1', '0.0.0.0', '::ffff:127.0.0.1', '::ffff:0.0.0.0'])
+      assert.equal(await connect(port, address), 'EPERM', address + ' reached an unrelated listener');
+  }
+  for (const address of ['::1', '::ffff:127.0.0.1', '::ffff:0.0.0.0'])
+    assert.equal(await connect(${proxy.port}, address), 'EPERM', address + ' bypassed IPv4-only proxy routing');
+  assert.equal(await connect(${ipv6.port}, '::1'), 'EPERM');
   if (process.argv.includes('status')) {
     console.log(${JSON.stringify(cli === 'claude' ? '{"loggedIn":true,"authMethod":"claude.ai"}' : 'Logged in using ChatGPT')}); return;
   }
@@ -173,15 +178,15 @@ async function sendUdp(port) {
       { type: 'result', subtype: 'success', result: 'AVAILABLE' }]
     : [{ type: 'thread.started', thread_id: 'fixture' }, { type: 'item.completed', item: { id: 'fixture', type: 'agent_message', text: 'AVAILABLE' } }, { type: 'turn.completed' }])};
   for (const event of events) console.log(JSON.stringify(event));
-})().catch(error => { console.error('fake reviewer failed: ' + error.message); process.exitCode = 1; });
+})().catch(error => { console.error('fake reviewer failed: ' + error.message.split(String.fromCharCode(10)).join(' ')); process.exitCode = 1; });
 `, { mode: 0o700 });
-        vi.stubEnv('PATH', `${binDir}:/usr/bin:/bin`);
-        const response = await new CliReviewDriver(5000, subscriptionHome).invoke({ id: 'fixture', kind: 'availability', target: { cli, model: 'fixture' }, input: 'No real model.' });
-        expect(response.status, response.detail + response.stderr).toBe('complete');
-        expect(response.text).toBe('AVAILABLE');
-      }
-      expect(proxy.connections()).toBe(4); // Two routed runs, each with login and review.
+      vi.stubEnv('PATH', `${binDir}:/usr/bin:/bin`);
+      const response = await new CliReviewDriver(5000, subscriptionHome).invoke({ id: 'fixture', kind: 'availability', target: { cli, model: 'fixture' }, input: 'No real model.' });
+      expect(response.status, response.detail + response.stderr).toBe('complete');
+      expect(response.text).toBe('AVAILABLE');
+      expect(proxy.connections()).toBe(source === 'none' ? 0 : 2); // Login and review.
       expect(unrelated.connections()).toBe(0);
-    } finally { await proxy.close(); await unrelated.close(); }
+      expect(wildcard.connections()).toBe(0); expect(ipv6.connections()).toBe(0);
+    } finally { await proxy.close(); await unrelated.close(); await wildcard.close(); await ipv6.close(); }
   });
 });

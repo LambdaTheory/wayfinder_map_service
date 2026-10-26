@@ -2,6 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { afterAll, describe, expect, test, vi } from 'vitest';
 import { attemptSchema } from './evidence.ts';
@@ -748,6 +749,14 @@ describe('PR 93 independent-review regressions', () => {
     expect(missingForReview('status-narration', a)).toContain('sessions[0].turns[0].input');
   });
   test.skipIf(process.platform !== 'darwin')('Claude login and review use private temporary storage inside the real sandbox', async () => {
+    let connections = 0;
+    const listener = createServer(socket => {
+      connections++; socket.on('error', () => {}); // A failed isolation probe can reset immediately; the connection count reports it.
+      socket.end('unrelated fixture');
+    });
+    await new Promise<void>((resolve, reject) => { listener.once('error', reject); listener.listen(0, '127.0.0.1', resolve); });
+    const address = listener.address();
+    if (!address || typeof address === 'string') throw new Error('missing fixture port');
     const install = mkdtempSync(join(root, 'fake-cli-')); const binDir = join(install, 'bin'); mkdirSync(binDir); const bin = join(binDir, 'claude');
     const privateFixture = join(root, 'private-context.txt'); writeFileSync(privateFixture, 'private fixture');
     writeFileSync(bin, `#!${process.execPath}
@@ -773,12 +782,19 @@ if (fs.readdirSync(process.env.CLAUDE_CONFIG_DIR).length || process.env.CLAUDE_C
 for(const fixturePath of [${JSON.stringify(privateFixture)}]) {
  try { fs.readFileSync(fixturePath); process.exit(28); } catch(e) { if(e.code!=='EPERM') throw e; }
 }
-const socket = net.connect(18766, '127.0.0.1');
-socket.on('connect', () => { socket.destroy(); process.exit(25); });
-socket.on('error', e => { if (e.code !== 'EPERM') process.exit(26);
+(async () => {
+ for (const address of ['127.0.0.1', '0.0.0.0', '::ffff:127.0.0.1', '::ffff:0.0.0.0', '::1']) {
+  await new Promise(resolve => {
+   const socket = net.connect(${address.port}, address);
+   socket.setTimeout(1500, () => { socket.destroy(); process.exit(26); });
+   socket.on('connect', () => { console.error(address + ' reached unrelated listener'); socket.destroy(); process.exit(25); });
+   socket.on('error', e => { if (e.code !== 'EPERM') process.exit(26); resolve(); });
+  });
+ }
  console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-sonnet-5-5',tools:[],mcp_servers:[]}));
  console.log(JSON.stringify({type:'assistant',message:{id:'msg-fixture',model:'claude-sonnet-5-5',content:[]}}));
- console.log(JSON.stringify({type:'result',subtype:'success',session_id:'session-fixture',result:'AVAILABLE'})); });
+ console.log(JSON.stringify({type:'result',subtype:'success',session_id:'session-fixture',result:'AVAILABLE'}));
+})();
 `, { mode: 0o700 });
     const previous = process.env.PATH; process.env.PATH = `${binDir}:${previous ?? ''}`;
     for (const key of reviewProxyVariables) vi.stubEnv(key, undefined);
@@ -786,9 +802,13 @@ socket.on('error', e => { if (e.code !== 'EPERM') process.exit(26);
     try {
       const response = await new CliReviewDriver(5000, subscriptionHome).invoke({ id: 'fixture', kind: 'availability', target: { cli: 'claude', model: 'claude-sonnet-5-5' }, input: 'No real model.' });
       expect(response.status, response.detail + response.stdout + response.stderr).toBe('complete');
+      expect(connections).toBe(0);
       expect(response.invocation?.command).toBe('/usr/bin/sandbox-exec');
       const args = response.invocation!.args; const profile = args[args.indexOf('-p') + 1]!;
       expect(profile.split('\n').find(line => line.startsWith('(deny file-read*'))).toContain('(subpath "/private/tmp")');
-    } finally { vi.unstubAllEnvs(); if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; }
+    } finally {
+      vi.unstubAllEnvs(); if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous;
+      await new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()));
+    }
   });
 });
