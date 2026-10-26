@@ -8,6 +8,8 @@ import { IsolationError, verifyProfile } from '../runner/codex.ts';
 import type { ControlProfile } from '../runner/codex.ts';
 import { digest } from './reviews.ts';
 import type { InteractiveClient } from './native.ts';
+import { awaitHost } from './lifecycle.ts';
+import type { LaunchRecord } from './lifecycle.ts';
 
 export interface LaunchManifest {
   client: InteractiveClient;
@@ -17,6 +19,7 @@ export interface LaunchManifest {
   env: Record<string, string>;
   profile: ControlProfile;
   codexLogin?: { source: string; copy: string };
+  hostHandshake?: true;
 }
 export function readManifest(path: string, expected: string): LaunchManifest {
   const stat = lstatSync(path);
@@ -27,8 +30,8 @@ export function readManifest(path: string, expected: string): LaunchManifest {
 }
 
 export async function launch(path: string, expected: string, inherited: NodeJS.ProcessEnv = process.env): Promise<number> {
-  const record = (value: object) => appendFileSync(join(dirname(path), 'launch.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...value }) + '\n', { mode: 0o600 });
-  let launched = false; let duplicateLaunch = false;
+  const record = (value: LaunchRecord) => appendFileSync(join(dirname(path), 'launch.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...value }) + '\n', { mode: 0o600 });
+  let launched = false; let duplicateLaunch = false; let handshake = false; let exitSignalled = false;
   try {
     // Reserve before reading login bytes or spawning. A refusal consumes this Attempt too.
     try { writeFileSync(join(dirname(path), 'launch.once'), '', { flag: 'wx', mode: 0o600 }); }
@@ -56,6 +59,11 @@ export async function launch(path: string, expected: string, inherited: NodeJS.P
     const oauth = manifest.client === 'claude' ? inherited.CLAUDE_CODE_OAUTH_TOKEN : undefined;
     if (manifest.client === 'claude' && !oauth) throw new Error('Kun must approve claude setup-token and supply its subscription token before launch');
     const env = { ...manifest.env, ...(oauth ? { CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: '3' } : {}) };
+    if (manifest.hostHandshake) {
+      handshake = true;
+      record({ phase: 'starting' });
+      await awaitHost(dirname(path), 'starting');
+    }
     const child = spawn('/usr/bin/sandbox-exec', ['-f', manifest.profile.path, manifest.bin, ...manifest.args], {
       cwd: manifest.workdir, env, stdio: oauth ? ['inherit', 'inherit', 'inherit', 'pipe'] : 'inherit',
     });
@@ -73,14 +81,24 @@ export async function launch(path: string, expected: string, inherited: NodeJS.P
             pipe.end(oauth);
           }
         });
-        child.once('exit', (code, signal) => accept({ code, signal }));
+        child.once('exit', (code, signal) => {
+          const exitAtNs = process.hrtime.bigint().toString();
+          try {
+            // Publish the event time before profile verification or any other post-exit work.
+            record({ phase: 'exited', exitAtNs, launched, code, signal }); exitSignalled = true;
+            accept({ code, signal });
+          } catch (error) { reject(error); }
+        });
       });
       const failure = verifyProfile(manifest.profile);
-      record({ phase: 'exited', launched, ...exit, ...(failure ? { isolationFailure: failure } : {}) });
+      record({ phase: 'verified', launched, ...(failure ? { isolationFailure: failure } : {}) });
+      if (handshake) await awaitHost(dirname(path), 'exited');
       return failure ? 1 : exit.code ?? 1;
     } finally { process.off('SIGINT', interrupt); process.off('SIGTERM', terminate); }
   } catch (error) {
-    record({ phase: 'refused', launched, ...(duplicateLaunch ? { duplicateLaunch: true } : error instanceof IsolationError ? { isolationFailure: error.message } : { launchFailure: 'client launch failed' }) });
+    record({ phase: 'refused', launched, ...(duplicateLaunch ? { duplicateLaunch: true } : error instanceof IsolationError ? { isolationFailure: error.message }
+      : exitSignalled ? { isolationFailure: 'Interactive exit acknowledgement failed' } : { launchFailure: 'client launch failed' }) });
+    if (handshake && !exitSignalled) await awaitHost(dirname(path), 'exited').catch(() => undefined);
     throw error;
   }
 }
