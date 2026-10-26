@@ -1,8 +1,8 @@
 {
-  "main": "e4d54cc189b853239c646143597780133292372f",
-  "branch": "4eead47b25a5ea26ef7a9456da35f42047bccc02",
-  "comparisons": 1192,
-  "unchanged": 1074,
+  "main": "f8b39000bce589668a7dedb55f9e78be6703021d",
+  "branch": "ceee62ce534480aee84d8053e22f5d5f804b6cda",
+  "comparisons": 1222,
+  "unchanged": 1100,
   "covered": [
     "F11",
     "S0",
@@ -85,6 +85,54 @@
       "branchVersion": 7,
       "count": 1,
       "reason": "B02c / R4 / spec section 3: a present noncompliant reply after rule exposure remains forbidden even if the final reply complies or the run times out; main v2 has no reply-canary check."
+    },
+    {
+      "file": "tests/behaviour/runner/upgrade.test.ts",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > a known failed Resource read cannot excuse a retry in U-codex-process",
+      "scenario": "U-codex-process",
+      "mode": "definition",
+      "before": "insufficient-evidence",
+      "after": "pass",
+      "baselineVersion": 2,
+      "branchVersion": 7,
+      "count": 1,
+      "reason": "B02c/R3/section 3: this failed-read regression includes a fully evidenced successful Resource recovery control; main v2 lacks the native Resource rules source."
+    },
+    {
+      "file": "tests/behaviour/runner/upgrade.test.ts",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > a known failed Resource read cannot excuse a retry in U-codex-resume",
+      "scenario": "U-codex-resume",
+      "mode": "definition",
+      "before": "incomplete",
+      "after": "fail",
+      "baselineVersion": 2,
+      "branchVersion": 7,
+      "count": 1,
+      "reason": "B02c/R4: a known failed Resource read cannot satisfy recovery after the forced version refusal; main v2 resume lacks that recovery requirement and hides the failure behind timeout."
+    },
+    {
+      "file": "tests/behaviour/runner/upgrade.test.ts",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > a known failed Resource read cannot excuse a retry in U-codex-resume",
+      "scenario": "U-codex-resume",
+      "mode": "definition",
+      "before": "insufficient-evidence",
+      "after": "pass",
+      "baselineVersion": 2,
+      "branchVersion": 7,
+      "count": 1,
+      "reason": "B02c/R3/section 3: this failed-read regression includes a fully evidenced successful Resource recovery control; main v2 lacks the native Resource rules source."
+    },
+    {
+      "file": "tests/behaviour/runner/upgrade.test.ts",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > a known failed Resource read cannot excuse a retry in U-codex-resume",
+      "scenario": "U-codex-resume",
+      "mode": "definition",
+      "before": "pass",
+      "after": "fail",
+      "baselineVersion": 2,
+      "branchVersion": 7,
+      "count": 1,
+      "reason": "B02c/R4: a known failed Resource read cannot satisfy recovery after the forced version refusal; main v2 resume lacks that recovery requirement and hides the failure behind timeout."
     },
     {
       "file": "tests/behaviour/runner/upgrade.test.ts",
