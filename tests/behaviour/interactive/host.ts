@@ -20,7 +20,7 @@ import { isolationSnapshot, isolationMeasurements, openDatabases } from './isola
 import type { IsolationSnapshot } from './isolation.ts';
 import { privateText, writePrivate } from './privacy.ts';
 import { syncCodexLogin } from './subscription.ts';
-import { proxyEnvironment, proxyRouting, proxySummary } from '../proxy.ts';
+import { proxyEnvironment, proxyRouting, proxySecrets, proxySummary } from '../proxy.ts';
 import type { Field } from '../evidence.ts';
 import type { InteractiveClient } from './native.ts';
 
@@ -129,15 +129,13 @@ export async function host(args: string[], options: { subscriptionHome: string; 
   try {
     scratch = mkdtempSync('/private/tmp/wayfinder-interactive-');
     const bin = realpathSync(executable);
-    const proxyEnv = proxyEnvironment(options.subscriptionHome, options.inheritedEnv ?? process.env);
+    const proxyEnv = proxyEnvironment(client === 'claude' ? options.subscriptionHome : null, options.inheritedEnv ?? process.env);
     const proxies = proxyRouting(proxyEnv);
-    // Bypass hosts are public routing data; redacting them would corrupt loopback MCP evidence.
-    for (const [key, value] of Object.entries(proxyEnv)) if (key.toLowerCase() !== 'no_proxy') secrets[`proxy-${key}`] = value;
-    for (const [key, value] of Object.entries(proxies.environment)) if (key.toLowerCase() !== 'no_proxy') secrets[`proxy-normalized-${key}`] = value;
+    Object.assign(secrets, proxySecrets(proxyEnv, proxies.environment));
     capture.service.commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkoutRoot, encoding: 'utf8' }).trim();
     before = observe([dir, scratch]);
     phase = 'service';
-    service = await startService(dir, controllerCredential, [agent]);
+    service = await startService(dir, controllerCredential, [agent], proxies.ports);
     controller = await connectController(service.port, controllerCredential.token);
     capture.service.version = controller.version;
     opened = openDatabases(service.pid);
@@ -146,7 +144,7 @@ export async function host(args: string[], options: { subscriptionHome: string; 
     writePrivate(join(dir, 'seed.json'), await controller.exportCatalog(), secrets);
     writePrivate(join(dir, 'controller-rules.json'), { instructions: controller.instructions, toolDescriptions: controller.toolDescriptions,
       note: 'Observed by the Controller only; this does not claim the client saw them.' }, secrets);
-    route = await startRoute(service.port, agent.token, event => relay.push(event));
+    route = await startRoute(service.port, agent.token, event => relay.push(event), proxies.ports);
     prepared = launcher({ scratch, client, bin, port: route.port, model, effort, subscriptionHome: options.subscriptionHome, proxyEnv });
     launchExposed = true;
     console.log(`Private Attempt: ${dir}\nClient command (approved Batch only): ${prepared.command}\nOpening line: ${scenario.turns[0]!.say}\nStop the client before finishing here. The host has a 60-minute ceiling.`);

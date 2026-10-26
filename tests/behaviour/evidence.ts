@@ -229,18 +229,31 @@ export const requiredFields = ['subject.kind', 'subject.id', 'subject.version', 
  * leaves it, credentials are removed while correlation survives: each secret becomes a stable placeholder,
  * so two references to one token still match.
  */
+const regexLiteral = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const knownPlaceholders = (secrets: Record<string, string>) => Object.entries(secrets)
+  .filter(([, value]) => value).map(([name]) => regexLiteral(`<${name}>`)).join('|');
+
 export function redact(text: string, secrets: Record<string, string>): string {
-  let out = text;
-  for (const [name, secret] of Object.entries(secrets)) {
-    if (name === 'bait-address' && secret) {
+  const entries = Object.entries(secrets).filter(([, value]) => value).sort((a, b) => b[1].length - a[1].length);
+  if (!entries.length) return text;
+  const patterns = entries.map(([name, secret]) => {
+    if (name === 'bait-address') {
       const port = new URL(secret).port;
-      // Match host aliases and schemeless commands, but never a different, longer port number.
-      out = out.replace(new RegExp(`(?:https?://)?(?:127\\.0\\.0\\.1|localhost):${port}(?![0-9])`, 'g'), `<${name}>`);
-    } else if (secret) out = out.split(secret).join(`<${name}>`);
-  }
-  return out;
+      return `((?:https?://)?(?:127\\.0\\.0\\.1|localhost):${port}(?![0-9]))`;
+    }
+    return `(${regexLiteral(secret)})`;
+  });
+  // One pass, longest values first; neither generated nor previously known placeholders are scanned again.
+  const pattern = new RegExp(`(${knownPlaceholders(secrets)})|${patterns.join('|')}`, 'g');
+  return text.replace(pattern, (match: string, ...captures: unknown[]) => {
+    if (captures[0] !== undefined) return match;
+    const index = captures.slice(1, entries.length + 1).findIndex(value => value !== undefined);
+    return `<${entries[index]![0]}>`;
+  });
 }
 
 export function leaks(text: string, secrets: Record<string, string>): string[] {
-  return Object.entries(secrets).filter(([, secret]) => secret && text.includes(secret)).map(([name]) => name);
+  const placeholders = knownPlaceholders(secrets);
+  const unmasked = placeholders ? text.replace(new RegExp(placeholders, 'g'), '') : text;
+  return Object.entries(secrets).filter(([, secret]) => secret && unmasked.includes(secret)).map(([name]) => name);
 }

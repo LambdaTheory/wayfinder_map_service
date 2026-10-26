@@ -1,3 +1,4 @@
+import { reservedPorts } from './network-ports.ts';
 // Optional local capability probe: `node tests/behaviour/runner/codex-proxy-probe.ts`.
 // Calls only `codex mcp login` against a fake endpoint in an empty HOME. Never starts a model,
 // reads a real login/settings file, completes OAuth, or permits outbound traffic beyond its fake proxy.
@@ -26,7 +27,7 @@ for (const [key, protocol, bypass] of cases) {
   try {
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as { port: number }).port;
-    if ([17897, 18765, 18766].includes(port)) throw new Error('Unexpected fixture port');
+    if (reservedPorts.includes(port)) throw new Error('Unexpected fixture port');
     const proxyUrl = `http://127.0.0.1:${port}`;
     const profile = writeProfile(layout.controlDir, { home }, work, 'codex', { proxyEnv: { HTTPS_PROXY: proxyUrl } });
     // Narrow further than the shared sandbox: even non-loopback public egress is impossible here.

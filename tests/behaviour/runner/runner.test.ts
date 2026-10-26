@@ -201,11 +201,13 @@ describe('inside the sandbox', () => {
   }, 60_000);
 });
 
-test.skipIf(!sandboxAvailable)('an entire Batch forwards normalized proxies and records only routing metadata with scrubbed native output', async () => {
+test.skipIf(!sandboxAvailable).each(['plain', 'encoded'])('an entire Batch forwards normalized proxies and scrubs URL and userinfo echo forms (%s)', async style => {
   let connections = 0;
   const proxy = createServer(socket => { connections++; socket.end('fixture'); });
   const port = await freePort();
   await new Promise<void>(resolve => proxy.listen(port, '127.0.0.1', resolve));
+  const user = style === 'plain' ? 'synthetic-user' : 'synthetic%20user';
+  const password = style === 'plain' ? 'synthetic-password' : 'synthetic%20password';
   const bin = join(scratch, 'proxy-client.mjs');
   writeFileSync(bin, readFileSync(fakeCodex, 'utf8').replace('const url =', `
 const proxy = new URL(process.env.HTTPS_PROXY);
@@ -217,12 +219,15 @@ await new Promise((resolve, reject) => {
   });
 });
 console.error(process.env.HTTPS_PROXY);
+console.error(process.env.HTTPS_PROXY.slice(0, -1));
+console.error('CONNECT via ' + process.env.HTTPS_PROXY.slice(0, -1) + ' failed');
+for (const value of [proxy.username + ':' + proxy.password, proxy.username, proxy.password]) { console.error(value); console.error(decodeURIComponent(value)); }
 const url =`), { mode: 0o700 });
-  const out = join(records, 'proxy-batch');
+  const out = join(records, 'proxy-batch-' + style);
   try {
     const result = await runBatch({ batchId: 'T-proxy', scenarios: ['S0b'], count: 1, ceiling: 1, out,
       codex: { model: 'fake-model', effort: 'low', bin, sandbox: true, timeoutMs: 10_000 }, scratchRoot: scratch, ...clientState,
-      proxyEnv: { HTTPS_PROXY: `http://synthetic-user:synthetic-password@localhost:${port}`, NO_PROXY: '127.0.0.1,localhost' } });
+      proxyEnv: { HTTPS_PROXY: `http://${user}:${password}@localhost:${port}`, NO_PROXY: '127.0.0.1,localhost' } });
     expect(result.refusals).toEqual([]); expect(result.outcomes[0]?.completeness).toBe('complete');
     expect(connections).toBe(2);
     const metadata = { enabled: true, variables: ['HTTPS_PROXY', 'NO_PROXY'] };
@@ -230,7 +235,7 @@ const url =`), { mode: 0o700 });
     const attempt = readFileSync(join(out, 'S0b-1/attempt.json'), 'utf8');
     expect(JSON.parse(attempt).events.filter((e: { action: string }) => e.action === 'isolation-check')[0].detail.proxy).toEqual(metadata);
     for (const text of [attempt, ...[0, 1].map(turn => readFileSync(join(out, `S0b-1/raw/turn-${turn}-A.stderr.txt`), 'utf8'))]) {
-      expect(text).not.toContain('synthetic-password');
+      for (const secret of [user, password, decodeURIComponent(user), decodeURIComponent(password)]) expect(text).not.toContain(secret);
     }
   } finally { await new Promise<void>(resolve => proxy.close(() => resolve())); }
 }, 30_000);
@@ -241,4 +246,16 @@ test('a Batch refuses invalid proxy settings before creating output or a service
     codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: true, timeoutMs: 1000 }, proxyEnv: { HTTPS_PROXY: 'http://localhost:18766' } });
   expect(result).toEqual({ outcomes: [], refusals: ['Proxy uses a reserved Wayfinder port'] });
   expect(existsSync(out)).toBe(false);
+});
+
+test.each(['settings-only', 'malformed-settings', 'invalid-terminal'])('Codex CLI selects terminal proxies only and prints safe refusals (%s)', mode => {
+  const home = mkdtempSync(join(scratch, 'cli-home-'));
+  mkdirSync(join(home, '.codex')); writeFileSync(join(home, '.codex/auth.json'), '{}');
+  mkdirSync(join(home, '.claude')); writeFileSync(join(home, '.claude/settings.json'), mode === 'malformed-settings'
+    ? '{synthetic-private' : JSON.stringify({ env: { HTTPS_PROXY: 'http://localhost:18766' } }));
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('./run.ts', import.meta.url)), '--batch', 'source-test',
+    '--scenarios', 'missing', '--ceiling', '1', '--codex', fakeCodex], { encoding: 'utf8',
+    env: { PATH: process.env.PATH, HOME: home, ...(mode === 'invalid-terminal' ? { HTTPS_PROXY: 'http://localhost:18766' } : {}) } });
+  expect(result.status).toBe(1);
+  expect(result.stderr).toBe(mode === 'invalid-terminal' ? 'refused: Proxy uses a reserved Wayfinder port\n' : 'refused: missing: no such Scenario\n');
 });

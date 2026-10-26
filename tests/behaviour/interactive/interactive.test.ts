@@ -172,14 +172,14 @@ it('manual launchers isolate HOME/configuration, use their own credential and co
   }
 });
 
-it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'claude-proxy', 'native-link', 'control-tamper', 'exit-nonzero', 'exit-signal', 'launch-failure', 'no-start', 'exit-without-start', 'missing-exit', 'no-start-precondition-not-met', 'no-start-rate-limited', 'no-start-timeout', 'no-start-cancelled', 'repeat-launch', 'duplicate-start', 'reported-precondition-not-met', 'reported-rate-limited', 'reported-timeout', 'reported-cancelled'])('the manual host stops only its own service and preserves subscription state (%s)', async mode => {
+it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'claude-proxy', 'codex-settings', 'codex-malformed-settings', 'codex-terminal', 'claude-settings', 'claude-terminal', 'native-link', 'control-tamper', 'exit-nonzero', 'exit-signal', 'launch-failure', 'no-start', 'exit-without-start', 'missing-exit', 'no-start-precondition-not-met', 'no-start-rate-limited', 'no-start-timeout', 'no-start-cancelled', 'repeat-launch', 'duplicate-start', 'reported-precondition-not-met', 'reported-rate-limited', 'reported-timeout', 'reported-cancelled'])('the manual host stops only its own service and preserves subscription state (%s)', async mode => {
   const { spawn } = await import('node:child_process');
   const { cacheRoot } = await import('./host.ts');
   const attempt = `fixture-${process.pid}-${Date.now()}`;
   const dir = join(cacheRoot(), `B09Fixture-${attempt}`); dirs.push(dir);
   const result = await new Promise<{ code: number | null; output: string }>((resolve, reject) => {
     const child = spawn(process.execPath, [fileURLToPath(new URL('../fixtures/interactive/fake-host.mjs', import.meta.url)), 'B09Fixture', attempt,
-      ['claude-proxy', 'launch-failure'].includes(mode) ? 'claude' : 'codex', 'synthetic-model', 'high', 'W7', process.execPath], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, B09_SYNTHETIC_REFRESH: mode } });
+      (mode.startsWith('claude-') || mode === 'launch-failure') ? 'claude' : 'codex', 'synthetic-model', 'high', 'W7', process.execPath], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, B09_SYNTHETIC_REFRESH: mode } });
     let output = ''; let answered = false;
     const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(output)); }, 20_000);
     child.stdout.on('data', data => { output += data; if (!answered && output.includes('Client exited; enter')) { answered = true; if (mode === 'cancel') child.stdin.end(); else child.stdin.write((mode.startsWith('no-start-') ? mode.slice('no-start-'.length) : mode.startsWith('reported-') ? mode.slice('reported-'.length) : 'complete') + '\n'); } });
@@ -189,7 +189,7 @@ it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'claude-proxy', 'n
   expect(result, result.output).toMatchObject({ code: ['failure', 'cancel'].includes(mode) ? 1 : 0 });
   const isolation = JSON.parse(readFileSync(join(dir, 'isolation.json'), 'utf8'));
   expect(isolation).toMatchObject({ serviceStopped: { known: true }, scratchRemoved: !['failure', 'cancel'].includes(mode), credentialsRemoved: true });
-  expect(isolation.codexLoginSync.status).toBe(['claude-proxy', 'launch-failure'].includes(mode) ? 'not-applicable' : mode === 'cancel' ? 'deferred' : mode === 'failure' ? 'failed' : mode === 'refresh' ? 'synced' : 'linked');
+  expect(isolation.codexLoginSync.status).toBe((mode.startsWith('claude-') || mode === 'launch-failure') ? 'not-applicable' : mode === 'cancel' ? 'deferred' : mode === 'failure' ? 'failed' : mode === 'refresh' ? 'synced' : 'linked');
   if (mode === 'failure' || mode === 'cancel') {
     const retained = isolation.codexLoginSync.retainedScratch; dirs.push(retained, isolation.retainedControlDirectory);
     expect(readFileSync(join(retained, 'home/.codex/auth.json'), 'utf8')).toBe('synthetic-refreshed-login');
@@ -227,7 +227,7 @@ it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'claude-proxy', 'n
   if (mode === 'claude-proxy') {
     const native = readFileSync(join(dir, 'raw/native-0.jsonl'), 'utf8');
     expect(native).toContain('http://127.0.0.1:23456/mcp'); expect(native).toContain('http://localhost:23456/mcp');
-    expect(native).not.toContain('synthetic-password'); expect(native).toContain('<proxy-HTTPS_PROXY>');
+    expect(native).not.toContain('synthetic-password'); expect(native).not.toContain('synthetic-user'); expect(native).toContain('<proxy-HTTPS_PROXY');
   } else expect(capture.missing).toContain('events');
 }, 30_000);
 
@@ -622,11 +622,11 @@ it('preserves a newer synthetic Codex refresh and backs up the old login before 
 });
 
 it('Claude receives only the six proxy keys, with terminal environment taking precedence', async () => {
-  const { mkdirSync } = await import('node:fs'); const { claudeProxyEnvironment } = await import('./subscription.ts');
+  const { mkdirSync } = await import('node:fs'); const { proxyEnvironment } = await import('../proxy.ts');
   const home = temporary(); mkdirSync(join(home, '.claude'));
   writeFileSync(join(home, '.claude/settings.json'), JSON.stringify({ env: { HTTPS_PROXY: 'http://synthetic-settings:1',
     http_proxy: 'http://synthetic-settings:2', NO_PROXY: 'localhost', ANTHROPIC_API_KEY: 'synthetic-disallowed', OTHER: 'synthetic-disallowed' } }));
-  expect(claudeProxyEnvironment(home, { HTTPS_PROXY: 'http://synthetic-terminal:3', CODEX_API_KEY: 'synthetic-disallowed' }))
+  expect(proxyEnvironment(home, { HTTPS_PROXY: 'http://synthetic-terminal:3', CODEX_API_KEY: 'synthetic-disallowed' }))
     .toEqual({ HTTPS_PROXY: 'http://synthetic-terminal:3', http_proxy: 'http://synthetic-settings:2', NO_PROXY: 'localhost' });
 });
 

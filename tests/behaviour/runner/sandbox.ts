@@ -7,7 +7,7 @@ import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
 import { basename, dirname, join, relative } from 'node:path';
 import { proxyRouting } from '../proxy.ts';
 import { localNetworkDenials } from './network-policy.ts';
-import { reservedPorts } from './service.ts';
+import { reserveProxyPorts, reservedPorts } from './network-ports.ts';
 
 export class IsolationError extends Error {
   constructor(message: string) { super(`isolation failure: ${message}`); this.name = 'IsolationError'; }
@@ -20,6 +20,8 @@ export interface SandboxAccess {
   localPorts?: number[];
   /** Explicit proxy input; never load personal settings inside the sandbox API. */
   proxyEnv?: NodeJS.ProcessEnv;
+  /** Additional protected endpoints known to a caller in another controller process. */
+  protectedPorts?: readonly number[];
 }
 export interface SandboxLayout { readonly scratch: string; readonly controlDir: string; readonly readOnlyDir: string }
 const layouts = new Map<string, SandboxLayout>();
@@ -157,7 +159,7 @@ function sandboxProfile(p: Policy): string {
 /** All grants, including Node and the client, go through the same canonical allowlist. */
 export function writeProfile(controlDir: string, session: { home: string }, workdir: string, bin: string, access: SandboxAccess = {}): ControlProfile {
   try {
-    const proxies = proxyRouting(access.proxyEnv ?? {});
+    const proxies = proxyRouting(access.proxyEnv ?? {}, [...(access.localPorts ?? []), ...(access.protectedPorts ?? [])]);
     const layout = layoutFor(controlDir);
     if (!lstatSync(session.home).isDirectory()) throw new IsolationError('session HOME must be a real directory');
     if (!lstatSync(workdir).isDirectory()) throw new IsolationError('workdir must be a real directory inside this Attempt');
@@ -192,6 +194,7 @@ export function writeProfile(controlDir: string, session: { home: string }, work
     const pinnedRoots = [...new Set(entries)];
     const expectedIdentities = Object.freeze(identities(pinnedRoots, mutable));
     const immutableHashes = treeHashes(readOnlyRoots); // Validate before reserving the exclusive profile path.
+    reserveProxyPorts(layout.controlDir, proxies.ports);
     const path = join(layout.controlDir, `${basename(home)}.sb`);
     writeFileSync(path, sandboxProfile({ home, workdir, readRoots, readFiles: [executable, ...mutable], denyRoots,
       denyEntries: Object.keys(expectedIdentities), controlDirectories: controls, localPorts: access.localPorts ?? [], proxyRules: proxies.rules }), { flag: 'wx', mode: 0o600 });

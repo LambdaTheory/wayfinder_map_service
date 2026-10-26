@@ -14,16 +14,25 @@ if (mode === 'no-open-files') {
 const daily = join(subscriptionHome, '.codex/auth.json');
 mkdirSync(join(subscriptionHome, '.codex'));
 writeFileSync(daily, 'synthetic-old-login'); utimesSync(daily, 1, 1);
+if (mode?.includes('settings') || mode?.endsWith('-terminal')) {
+  mkdirSync(join(subscriptionHome, '.claude'));
+  writeFileSync(join(subscriptionHome, '.claude/settings.json'), mode === 'codex-malformed-settings' ? '{synthetic-invalid' : JSON.stringify({ env: { HTTPS_PROXY: 'http://localhost:23457' } }));
+}
+const expectedProxy = mode?.endsWith('-terminal') ? 'http://127.0.0.1:23458/' : mode === 'claude-settings' ? 'http://127.0.0.1:23457/' : undefined;
+const sourceProbe = mode === 'claude-proxy' ? `
+import { mkdirSync, writeFileSync } from 'node:fs';
+const dir = process.env.CLAUDE_CONFIG_DIR + '/projects'; mkdirSync(dir, {recursive:true});
+const u = new URL(process.env.HTTPS_PROXY);
+const values = [process.env.HTTPS_PROXY, process.env.HTTPS_PROXY.replace(/\\/$/, ''), 'CONNECT via ' + process.env.HTTPS_PROXY.replace(/\\/$/, '') + ' failed', u.username + ':' + u.password, u.username, u.password];
+writeFileSync(dir + '/synthetic.jsonl', JSON.stringify({text: 'http://127.0.0.1:23456/mcp http://localhost:23456/mcp ' + [...values, ...values.map(decodeURIComponent)].join(' ')}));
+` : (mode?.includes('settings') || mode?.endsWith('-terminal'))
+  ? `import assert from 'node:assert/strict'; assert.equal(process.env.HTTPS_PROXY, ${JSON.stringify(expectedProxy) ?? 'undefined'});` : '';
 const driver = join(subscriptionHome, 'fake-client.mjs');
-writeFileSync(driver, `#!${process.execPath}\n${mode === 'exit-nonzero' ? 'process.exit(7);' : mode === 'exit-signal' ? "process.kill(process.pid, 'SIGTERM');" : ''}\n`, { mode: 0o700 });
+writeFileSync(driver, `#!${process.execPath}\n${sourceProbe}\n${mode === 'exit-nonzero' ? 'process.exit(7);' : mode === 'exit-signal' ? "process.kill(process.pid, 'SIGTERM');" : ''}\n`, { mode: 0o700 });
 let observed = 0;
 let scratch;
 const output = process.stdout.write.bind(process.stdout);
 process.stdout.write = (text, ...args) => {
-  if (mode === 'claude-proxy' && String(text).includes('Client command')) {
-    const native = join(scratch, 'home/.claude/projects'); mkdirSync(native, { recursive: true });
-    writeFileSync(join(native, 'synthetic.jsonl'), JSON.stringify({ text: 'http://127.0.0.1:23456/mcp http://localhost:23456/mcp http://synthetic-user:synthetic-password@localhost:23457' }));
-  }
   if (mode === 'native-link' && String(text).includes('Client command')) {
     const privateLogs = join(subscriptionHome, 'private-logs'); mkdirSync(privateLogs);
     writeFileSync(join(privateLogs, 'secret.jsonl'), 'synthetic-private-native-marker');
@@ -32,7 +41,7 @@ process.stdout.write = (text, ...args) => {
   if (!mode?.startsWith('no-start') && String(text).includes('Client command')) {
     const command = String(text).match(/Client command \(approved Batch only\): ([^\n]+)/)[1];
     const launched = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8', timeout: 10_000,
-      env: { PATH: process.env.PATH, ...(mode === 'claude-proxy' ? { CLAUDE_CODE_OAUTH_TOKEN: 'synthetic-oauth' } : {}) } });
+      env: { PATH: process.env.PATH, ...(mode?.startsWith('claude-') ? { CLAUDE_CODE_OAUTH_TOKEN: 'synthetic-oauth' } : {}) } });
     if (mode === 'repeat-launch') spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8', timeout: 10_000, env: { PATH: process.env.PATH } });
     if (!['exit-nonzero', 'exit-signal', 'launch-failure'].includes(mode) && launched.status !== 0)
       throw new Error('Synthetic launcher failed: ' + launched.stderr);
@@ -41,7 +50,7 @@ process.stdout.write = (text, ...args) => {
 };
 try {
   await host([...process.argv.slice(2, -1), driver], { subscriptionHome,
-    inheritedEnv: mode === 'claude-proxy' ? { NO_PROXY: '127.0.0.1', no_proxy: 'localhost', HTTPS_PROXY: 'http://synthetic-user:synthetic-password@localhost:23457' } : {},
+    inheritedEnv: mode?.endsWith('-terminal') ? { HTTPS_PROXY: 'http://localhost:23458' } : mode === 'claude-proxy' ? { NO_PROXY: '127.0.0.1', no_proxy: 'localhost', HTTPS_PROXY: 'http://synthetic-user:synthetic-password@localhost:23457' } : {},
     observe: paths => {
       ++observed;
       if (observed === 1) scratch = paths[1];

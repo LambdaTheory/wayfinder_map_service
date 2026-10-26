@@ -9,7 +9,7 @@ import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { attemptSchema, classifyResult, leaks, redact } from '../evidence.ts';
 import type { AttemptRecord, Completeness, EventRecord, Field, GivenRules, SessionRecord } from '../evidence.ts';
-import { proxyEnvironment, proxyRouting, proxySummary } from '../proxy.ts';
+import { ProxyError, proxyEnvironment, proxyRouting, proxySecrets, proxySummary } from '../proxy.ts';
 import { library } from '../library.ts';
 import { fixturesRoot, readiness, validateScenario } from '../scenario.ts';
 import type { ControllerAction, Scenario } from '../scenario.ts';
@@ -175,8 +175,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   const nativeSessions = sessions.map(s => s.codex);
   const secrets: Record<string, string> = { 'controller-token': controller.token,
     ...Object.fromEntries(sessions.flatMap(x => [[`token-${x.label}`, x.credential.token], ...loginSecrets(x.codex).map((v, i) => [`codex-login-${x.label}-${i}`, v])])) };
-  for (const [key, value] of Object.entries(o.proxyEnv ?? {})) if (key.toLowerCase() !== 'no_proxy') secrets[`proxy-original-${key}`] = value;
-  for (const [key, value] of Object.entries(proxies.environment)) if (key.toLowerCase() !== 'no_proxy') secrets[`proxy-${key}`] = value;
+  Object.assign(secrets, proxySecrets(o.proxyEnv ?? {}, proxies.environment));
   const startedAt = new Date().toISOString();
   const events: EventRecord[] = [];
   const emit = (event: EventRecord) => { events.push({ ...event, seq: events.length }); };
@@ -210,7 +209,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   try {
     const historical = historyCredentials(s.seed.maps, [controller.clientId, ...sessions.map(x => x.credential.clientId)]);
     for (const [label, credential] of Object.entries(historical)) secrets[`history-token-${label}`] = credential.token;
-    service = await startService(serviceDir, controller, [...sessions.map(x => x.credential), ...Object.values(historical), ...(bait ? [bait] : [])]);
+    service = await startService(serviceDir, controller, [...sessions.map(x => x.credential), ...Object.values(historical), ...(bait ? [bait] : [])], proxies.ports);
     openDatabases(service.pid).forEach(d => opened.add(d));
     ctl = await connectController(service.port, controller.token, Object.fromEntries(Object.entries(historical).map(([label, c]) => [label, c.token])), emit);
     for (const map of s.seed.maps) seedHeads[map.mapId] = await ctl.seed(map, revision => { seedHeads[map.mapId] = revision; });
@@ -233,7 +232,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
         if (entry.phase === 'cut') controllerEvent('relay-cut', { method: entry.rpc.method,
           tool: entry.rpc.method === 'tools/call' ? entry.rpc.params?.name : undefined,
           requestId: entry.rpc.id, scope: entry.scope, trigger: entry.trigger }, session.turn ?? null, session.label);
-      });
+      }, proxies.ports);
     }
     const actionRuns = new Map<ControllerAction, Promise<void>>();
     const executeControllerAction = async (a: ControllerAction, session: Session, index: number, mapId?: string) => {
@@ -484,8 +483,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.error('usage: run.ts --batch <id> --scenarios S0b,F11 --count 2 --ceiling 4 [--model gpt-6-astra] [--effort xhigh]');
     process.exit(2);
   }
-  const proxyEnv = proxyEnvironment(homedir(), process.env);
-  proxyRouting(proxyEnv); // Refuse invalid routing before opening subscription state.
+  let proxyEnv: Record<string, string>;
+  try {
+    proxyEnv = proxyEnvironment(null, process.env);
+    proxyRouting(proxyEnv); // Refuse invalid routing before opening subscription state.
+  } catch (error) {
+    if (!(error instanceof ProxyError)) throw error;
+    console.error(`refused: ${error.message}`); process.exit(1);
+  }
   const result = await runBatch({ batchId: values.batch, scenarios: values.scenarios.split(','), count: Number(values.count), ceiling: Number(values.ceiling),
     out: values.out ?? join(homedir(), 'Library/Application Support/Wayfinder/behaviour-runs', values.batch), scratchRoot: '/private/tmp',
     loginSource: { contents: readFileSync(join(homedir(), '.codex/auth.json'), 'utf8') }, personalConfigRoot: homedir(), proxyEnv,

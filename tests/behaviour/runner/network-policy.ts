@@ -3,6 +3,5 @@
 export const localNetworkDenials = [
   '(deny network-outbound (remote ip "localhost:*"))',
   '(deny network-outbound (remote tcp6 "*:*"))',
-  '(deny network-outbound (remote udp4 "*:*"))',
   '(deny network-outbound (remote udp6 "*:*"))',
 ] as const;

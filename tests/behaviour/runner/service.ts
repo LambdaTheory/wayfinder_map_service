@@ -1,5 +1,7 @@
 // One isolated Wayfinder service per Attempt: a new database, a free port, the Controller's credential and one
 // credential per session, run from this checkout's build. Never the everyday service or its database (R2).
+import { portUnavailable, protectPorts } from './network-ports.ts';
+export { reservedPorts } from './network-ports.ts';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -11,12 +13,11 @@ export const checkoutRoot = fileURLToPath(new URL('../../../', import.meta.url))
 const observer = fileURLToPath(new URL('./protocol-observer.mjs', import.meta.url));
 /** The everyday service and the ChatGPT relay in front of it. */
 export const everydayPort = 18766;
-export const reservedPorts = [18765, everydayPort];
 
 export interface Credential { clientId: string; token: string }
 export const newToken = () => randomBytes(32).toString('hex');
 
-export async function freePort(): Promise<number> {
+export async function freePort(excludedPorts: readonly number[] = []): Promise<number> {
   for (;;) {
     const port = await new Promise<number>((resolve, reject) => {
       const server = createServer();
@@ -26,7 +27,7 @@ export async function freePort(): Promise<number> {
         server.close(() => resolve(typeof address === 'object' && address ? address.port : 0));
       });
     });
-    if (port && !reservedPorts.includes(port)) return port;
+    if (port && !portUnavailable(port) && !excludedPorts.includes(port)) return port;
   }
 }
 
@@ -46,7 +47,7 @@ export interface IsolatedService {
  * the credentials file as a digest, so each Revision names its writer. The service runs in its own process group, so a Ctrl-C to the runner reaches it only through `stop()`, after the
  * evidence has been read.
  */
-export async function startService(dir: string, controller: Credential, others: Credential[]): Promise<IsolatedService> {
+export async function startService(dir: string, controller: Credential, others: Credential[], excludedPorts: readonly number[] = []): Promise<IsolatedService> {
   mkdirSync(join(dir, 'db'), { recursive: true, mode: 0o700 });
   const databasePath = join(dir, 'db', 'maps.sqlite');
   const { initializeSQLite } = await import(pathToFileURL(join(checkoutRoot, 'dist/sqlite-storage.js')).href) as { initializeSQLite(path: string): unknown };
@@ -55,13 +56,15 @@ export async function startService(dir: string, controller: Credential, others: 
   writeFileSync(credentialsPath, JSON.stringify({ credentials: [controller, ...others].map(c => ({ clientId: c.clientId,
     tokenSha256: createHash('sha256').update(c.token).digest('hex') })) }), { mode: 0o600 });
   const protocolReport = join(dir, 'protocol.jsonl');
-  const port = await freePort();
+  const port = await freePort(excludedPorts);
+  const releasePort = protectPorts([port]);
   const child = spawn(process.execPath, ['--import', observer, fileURLToPath(new URL('./service-process.mjs', import.meta.url))], {
     env: { PATH: process.env.PATH ?? '', WAYFINDER_DATABASE_PATH: databasePath, WAYFINDER_PORT: String(port),
       WAYFINDER_ACTOR_ID: 'behaviour-runner', WAYFINDER_CLIENT_ID: 'Behaviour.UnusedPrimary', WAYFINDER_ALLOWED_ORIGINS: '[]',
       WAYFINDER_CREDENTIALS_FILE: credentialsPath, WAYFINDER_PROTOCOL_REPORT: protocolReport },
     stdio: ['ignore', 'pipe', 'pipe'], detached: true,
   });
+  child.once('exit', releasePort); child.once('error', releasePort);
   let logs = '';
   const exit = new Promise<{ code: number | null; signal: string | null }>(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
   const stop = async () => {

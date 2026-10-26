@@ -1,3 +1,4 @@
+import { reservedPorts } from './network-ports.ts';
 // Real Seatbelt, owned ephemeral listeners and synthetic settings only; no model or daily endpoint.
 import { spawn } from 'node:child_process';
 import { createServer, connect } from 'node:net';
@@ -20,7 +21,7 @@ async function listener(host = '127.0.0.1') {
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen({ port: 0, host, ipv6Only: host === '::1' }, resolve); });
   const port = (server.address() as { port: number }).port;
   // No probing a reserved endpoint, even if a local port allocator ever changes its range.
-  if ([17897, 18765, 18766].includes(port)) { server.close(); throw new Error('unexpected fixture port'); }
+  if (reservedPorts.includes(port)) { server.close(); throw new Error('unexpected fixture port'); }
   return { port, count: () => count, close: () => new Promise<void>(resolve => server.close(() => resolve())) };
 }
 async function reachable(port: number, host: string) {
@@ -44,7 +45,9 @@ attack.each(modes.flatMap(mode => ['settings', 'terminal', 'none'].map(source =>
     ...(source === 'settings' ? selected : source === 'terminal' ? { HTTPS_PROXY: 'http://localhost:18766' } : {}),
     ALL_PROXY: 'ignored', NODE_OPTIONS: 'ignored', ANTHROPIC_API_KEY: 'synthetic-do-not-forward',
   }, hooks: { ignored: true } }));
-  const input = proxyEnvironment(subscription, source === 'terminal' ? selected : {});
+  const codex = mode === 'runner' || mode === 'interactive-codex';
+  const enabled = source !== 'none' && !(codex && source === 'settings');
+  const input = proxyEnvironment(codex ? null : subscription, source === 'terminal' ? selected : {});
   const expected = proxyRouting(input).environment;
   const scratch = mkdtempSync(join(root, 'attempt-'));
   const fake = join(root, `client-${mode}-${source}.mjs`);
@@ -68,7 +71,7 @@ for (const key of ${JSON.stringify(proxyVariables)}) assert.equal(process.env[ke
 for (const key of ['ALL_PROXY', 'all_proxy', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'NODE_OPTIONS']) assert.equal(process.env[key], undefined);
 assert.throws(() => readFileSync(${JSON.stringify(join(subscription, '.claude/settings.json'))}), {code: 'EPERM'});
 assert.equal(await tcp(${relay.port}), 'connected');
-assert.equal(await tcp(${proxy.port}), ${JSON.stringify(source === 'none' ? 'EPERM' : 'connected')});
+assert.equal(await tcp(${proxy.port}), ${JSON.stringify(!enabled ? 'EPERM' : 'connected')});
 for (const port of [${other.port}, ${wildcard.port}]) {
   for (const host of ['127.0.0.1', '127.1', 'localhost', '0.0.0.0', '::ffff:127.0.0.1', '::ffff:0.0.0.0'])
     assert.equal(await tcp(port, host), 'EPERM', host + ':' + port);
@@ -118,7 +121,7 @@ writeFileSync('result', 'passed');
     expect(readFileSync(join(work, 'result'), 'utf8')).toBe('passed');
     const policy = readFileSync(profilePath, 'utf8');
     for (const port of [18765, 18766]) expect(policy).toContain(`(deny network-outbound (remote ip "localhost:${port}"))`);
-    expect(proxy.count()).toBe(source === 'none' ? 0 : 1); expect(relay.count()).toBe(1);
+    expect(proxy.count()).toBe(!enabled ? 0 : 1); expect(relay.count()).toBe(1);
     expect([other.count(), wildcard.count(), ipv6.count()]).toEqual(blockedCounts);
   } finally { await Promise.all([proxy.close(), relay.close(), other.close(), wildcard.close(), ipv6.close()]); }
 }, 15_000);
@@ -146,4 +149,89 @@ attack('UDP positive controls reach owned IPv4 and IPv6 listeners without the sa
       expect(await received).toBe('fixture');
     } finally { client.close(); server.close(); }
   }
+});
+
+attack.each(['own relay', 'peer relay', 'service'])('a proxy cannot nominate %s, while the own relay remains usable', async target => {
+  const { createServer } = await import('node:http');
+  const { startRoute } = await import('./relay.ts');
+  const seen: string[] = [];
+  const service = createServer((req, res) => { seen.push(req.headers.authorization ?? ''); res.end('ok'); });
+  await new Promise<void>(resolve => service.listen(0, '127.0.0.1', resolve));
+  const port = (service.address() as { port: number }).port;
+  const a = await startRoute(port, 'synthetic-A', () => undefined);
+  const b = await startRoute(port, 'synthetic-B', () => undefined);
+  try {
+    for (const proxyPort of [target === 'own relay' ? a.port : target === 'peer relay' ? b.port : port]) {
+      const scratch = mkdtempSync(join(root, 'collision-'));
+      const session = prepareSession(scratch, 'A', 'synthetic', null);
+      const work = join(scratch, 'work'); mkdirSync(work);
+      const layout = prepareSandbox(scratch); controls.push(layout.controlDir);
+      const clientDir = join(layout.readOnlyDir, 'client'); mkdirSync(clientDir);
+      const bin = join(clientDir, 'client.mjs');
+      writeFileSync(bin, `#!${process.execPath}\nconst response = await fetch('http://127.0.0.1:${b.port}/mcp'); console.log(await response.text());\n`, { mode: 0o700 });
+      let refused = '';
+      let unsafe: ReturnType<typeof writeProfile> | undefined;
+      try { unsafe = writeProfile(layout.controlDir, session, work, bin, { localPorts: [a.port],
+        proxyEnv: { HTTPS_PROXY: `http://localhost:${proxyPort}`, NO_PROXY: '*' } }); }
+      catch (error) { refused = String(error); }
+      if (unsafe) await runTurn({ options: { model: 'fixture', effort: 'low', bin, sandbox: true, timeoutMs: 3000 },
+        session, port: a.port, workdir: work, profile: unsafe, prompt: '' });
+      expect(refused, JSON.stringify(seen)).toMatch(/protected harness endpoint/);
+    }
+    expect(seen).toEqual([]);
+    const scratch = mkdtempSync(join(root, 'own-relay-'));
+    const session = prepareSession(scratch, 'A', 'synthetic', null);
+    const work = join(scratch, 'work'); mkdirSync(work);
+    const layout = prepareSandbox(scratch); controls.push(layout.controlDir);
+    const profile = writeProfile(layout.controlDir, session, work, '/bin/sh', { localPorts: [a.port] });
+    const output = await new Promise<string>(resolve => {
+      let out = '';
+      const child = spawn('/usr/bin/sandbox-exec', ['-f', profile.path, process.execPath, '-e',
+        `fetch('http://127.0.0.1:${a.port}/mcp').then(r=>r.text()).then(console.log)`], { cwd: work, env: {}, stdio: ['ignore', 'pipe', 'pipe'] });
+      child.stdout.on('data', data => { out += data; }); child.once('close', () => resolve(out));
+    });
+    expect(output.trim()).toBe('ok'); expect(seen).toEqual(['Bearer synthetic-A']);
+  } finally { await a.close(); await b.close(); service.closeAllConnections(); await new Promise<void>(resolve => service.close(() => resolve())); }
+});
+
+attack('four proxy endpoints and canonical IPv4 aliases add no grants from wildcard bypass lists', async () => {
+  const proxies = await Promise.all([listener(), listener(), listener(), listener()]); const other = await listener();
+  const scratch = mkdtempSync(join(root, 'four-proxies-'));
+  const session = prepareSession(scratch, 'A', 'synthetic', null);
+  const work = join(scratch, 'work'); mkdirSync(work);
+  const { controlDir } = prepareSandbox(scratch); controls.push(controlDir);
+  const aliases = ['2130706433', '0x7f000001', '0177.0.0.1', '127.1'];
+  const proxyEnv = Object.fromEntries(['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'].map((key, i) =>
+    [key, `http://synthetic-user:synthetic-password@${aliases[i]}:${proxies[i]!.port}`]));
+  proxyEnv.NO_PROXY = `*,localhost:${other.port}`;
+  try {
+    const profile = writeProfile(controlDir, session, work, '/bin/sh', { proxyEnv });
+    const code = `const net = require('node:net'); const assert = require('node:assert/strict');
+const tcp = (port, host) => new Promise(resolve => { const s=net.connect(port,host); s.on('data',()=>{});
+s.once('end',()=>resolve('connected')); s.once('error',e=>resolve(e.code)); });
+(async()=>{for(const port of ${JSON.stringify(proxies.map(p => p.port))}) {
+ assert.equal(await tcp(port,'127.0.0.1'),'connected'); assert.equal(await tcp(port,'::ffff:127.0.0.1'),'EPERM'); }
+ assert.equal(await tcp(${other.port},'127.0.0.1'),'EPERM'); })().catch(()=>{process.exitCode=1;});`;
+    const exit = await new Promise<number | null>(resolve => {
+      const child = spawn('/usr/bin/sandbox-exec', ['-f', profile.path, process.execPath, '-e', code],
+        { cwd: work, env: { ...profile.proxyEnvironment }, stdio: 'ignore' }); child.once('close', resolve);
+    });
+    expect(exit).toBe(0); expect(proxies.map(p => p.count())).toEqual([1, 1, 1, 1]); expect(other.count()).toBe(0);
+  } finally { await Promise.all([...proxies, other].map(p => p.close())); }
+});
+
+test('a live proxy grant prevents a later harness endpoint from adopting its port until controls are removed', async () => {
+  const { startRoute } = await import('./relay.ts');
+  const proxy = await listener();
+  const scratch = mkdtempSync(join(root, 'proxy-reservation-'));
+  const session = prepareSession(scratch, 'A', 'synthetic', null);
+  const work = join(scratch, 'work'); mkdirSync(work);
+  const { controlDir } = prepareSandbox(scratch); controls.push(controlDir);
+  try {
+    writeProfile(controlDir, session, work, '/bin/sh', { proxyEnv: { HTTPS_PROXY: `http://localhost:${proxy.port}` } });
+    await expect(startRoute(proxy.port, 'synthetic', () => undefined)).rejects.toThrow(/collides with a proxy/);
+    rmSync(controlDir, { recursive: true });
+    const route = await startRoute(proxy.port, 'synthetic', () => undefined); await route.close();
+    expect(proxy.count()).toBe(0);
+  } finally { await proxy.close(); }
 });

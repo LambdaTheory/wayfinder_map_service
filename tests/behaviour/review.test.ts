@@ -10,7 +10,7 @@ import type { AttemptRecord } from './evidence.ts';
 import { library } from './library.ts';
 import { buildReport, renderMarkdown } from './report.ts';
 import { CliReviewDriver, codexReviewSandbox, decodeResponse, reviewArgs } from './review-cli.ts';
-import { reviewProxyVariables } from './review-proxy.ts';
+import { proxyVariables } from './proxy.ts';
 import { reviewDirectories, reviewPlan } from './review-run.ts';
 import { reviewAttempt, reviewItems } from './model-review.ts';
 import { reviewersFor } from './review-plan.ts';
@@ -798,7 +798,7 @@ for(const fixturePath of [${JSON.stringify(privateFixture)}]) {
 })();
 `, { mode: 0o700 });
     const previous = process.env.PATH; process.env.PATH = `${binDir}:${previous ?? ''}`;
-    for (const key of reviewProxyVariables) vi.stubEnv(key, undefined);
+    for (const key of proxyVariables) vi.stubEnv(key, undefined);
     const subscriptionHome = mkdtempSync(join(root, 'subscription-'));
     try {
       const response = await new CliReviewDriver(5000, subscriptionHome).invoke({ id: 'fixture', kind: 'availability', target: { cli: 'claude', model: 'claude-sonnet-5-5' }, input: 'No real model.' });

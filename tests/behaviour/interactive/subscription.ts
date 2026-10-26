@@ -3,9 +3,6 @@ import { chmodSync, constants, copyFileSync, lstatSync, realpathSync, renameSync
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
-// Compatibility export; proxy parsing and routing belong to the shared module.
-export { proxyVariables, proxyEnvironment as claudeProxyEnvironment } from '../proxy.ts';
-
 export interface LoginSync { status: 'missing' | 'linked' | 'daily-newer' | 'synced'; backup?: string }
 /** A refresh replaces the symlink. Preserve newer bytes with a backup, without parsing or printing them. */
 export function syncCodexLogin(scratch: string, subscriptionHome: string): LoginSync {
