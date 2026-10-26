@@ -14,7 +14,8 @@ Listing and validation start no service or model. Manual runners start isolated 
 | `checks.ts`, `common.ts` | Script checks over an Attempt record, and the common checks attached to many Scenarios |
 | `library.ts`, `scenarios/` | The 26 candidates of spec §3 |
 | `upgrade-checks.ts` | Upgrade compatibility checks, listed apart from the 26 |
-| `seeds/` | Seed Maps; `f11.json` is the redacted capture of a real Map |
+| `seeds/` | Seed Maps and the shared capture/Controller write plan (`steps.ts`); `f11.json` is the redacted capture of a real Map |
+| `capture/`, `captures/` | Read-only problem capture tool, synthetic verification and admitted/paused capture traces (B04) |
 | `fixtures/` | Working-directory fixtures copied into the agent's directory |
 | `interactive/` | Manual Codex/Claude interactive acceptance, native import and fixed fixtures (B09b); see its [runbook](interactive/README.md) |
 | `runner/` | The runner: isolated service, Controller, Codex Driver, normalizer (B02a) |
@@ -23,10 +24,10 @@ Listing and validation start no service or model. Manual runners start isolated 
 | `model-review.ts`, `review-verdict.ts`, `review-no-writes.ts`, `review-types.ts`, `review-cli.ts`, `review-run.ts` | Other-vendor model readings, their evidence boundary, isolated CLI Driver and manual command (B03b) |
 
 ```sh
-node tests/behaviour/cli.ts list       # candidates, readiness, item counts
+node tests/behaviour/cli.ts list       # candidates, readiness, item counts, capture inventory
 node tests/behaviour/cli.ts matrix     # applicability per client and Entry
 node tests/behaviour/cli.ts upgrade    # upgrade compatibility checks
-node tests/behaviour/cli.ts validate   # structural validation
+node tests/behaviour/cli.ts validate   # structural validation and capture inventory (including paused drafts)
 ```
 
 Use Node 26.3.0. `library.test.ts` runs in `npm test`; it validates the library and pins check semantics on small fixed evidence.
@@ -47,7 +48,7 @@ Script checks answer `holds`, `violated` or `unknown`. Missing records (the `mis
 1. Write it in the matching file under `scenarios/` and add it to `library.ts`; a new real problem also gets its ID in `candidateIds`.
 2. Write must-not items as the wrong action itself and expectations as the right action, each with the evidence that proves it.
 3. Run `node tests/behaviour/cli.ts validate` and `npm test`.
-4. A real problem starts from the Revision before the incident and the human's own words (R6); record the conversion in `seed.derivedFrom` and redact private paths and credentials.
+4. A real problem starts from the Revision before the incident and the human's own words (R6). Follow the [capture maintainer guide](../../docs/implementation/behaviour-capture.md) to generate and review the seed, conversion/redaction record and Scenario skeleton. Two non-reproductions retain the Scenario; missing words or an unresolved verdict retain a paused intake draft without invented text.
 
 ## Running a Batch
 
@@ -60,7 +61,9 @@ Run only a Batch Kun approved: it spends model quota. Every Attempt gets a new d
 
 Codex runs with a private `HOME` and `CODEX_HOME` under `/private/tmp`, `--ignore-user-config` and only this run's Wayfinder server, inside `sandbox-exec` with an allowlist: it reads nothing under the home directory except the Node that runs it, nothing under `/private/tmp` except its own scratch, writes only to that scratch and the system temp, and cannot connect to ports 18765 and 18766. The daily Codex login is copied into the scratch and deleted with it; its values are redacted from records like the Wayfinder tokens.
 
-Before anything runs, the runner refuses what it cannot do (Controller actions, several or concurrent sessions, history seeds: B02b and B04) and an existing output directory. A plan larger than `--ceiling` runs up to it and lists the rest as not run; Ctrl-C stops the client and service and marks what is left cancelled. Each Attempt writes `attempt.json` (the evidence record plus isolation facts: whether the sandbox was on, whether the service opened only its own database and never the everyday one, scratch removed, built-in client skills, and whether every committed receipt matches a Revision its session's credential authored) and `raw/` (Codex JSON per turn, the session log, the service log and initialize report, the final working directory), with credentials replaced by placeholders. `batch.json` lists every planned Attempt's outcome and compares personal configuration and the everyday service before and after.
+History seeds replay each recorded step under a separate historical author credential; these writes remain inside the seed boundary, including when a write commits but its reply is lost.
+
+Before anything runs, the runner refuses what it cannot do (Controller actions and several or concurrent sessions: B02b) and an existing output directory. A plan larger than `--ceiling` runs up to it and lists the rest as not run; Ctrl-C stops the client and service and marks what is left cancelled. Each Attempt writes `attempt.json` (the evidence record plus isolation facts: whether the sandbox was on, whether the service opened only its own database and never the everyday one, scratch removed, built-in client skills, and whether every committed receipt matches a Revision its session's credential authored) and `raw/` (Codex JSON per turn, the session log, the service log and initialize report, the final working directory), with credentials replaced by placeholders. `batch.json` lists every planned Attempt's outcome and compares personal configuration and the everyday service before and after.
 
 `runner/runner.test.ts` covers the runner without a model: refusals, every library seed against the real service, the sandbox profile, and one S0b Attempt played by `runner/fake-codex.mjs`, which makes real MCP calls.
 

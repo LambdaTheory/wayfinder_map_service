@@ -8,6 +8,7 @@ import { itemsOf, readiness, validateScenario } from './scenario.ts';
 import { judgeAttempt } from './verdict.ts';
 import type { ItemResult } from './verdict.ts';
 import { asScenario, upgradeChecks } from './upgrade-checks.ts';
+import { captureInventory } from './capture/inventory.ts';
 
 const columns: [Harness, Entry][] = [['codex', 'mcp-only'], ['codex', 'dedicated'], ['claude', 'mcp-only'], ['claude', 'dedicated'],
   ['chatgpt', 'chatgpt'], ['pi', 'mcp-only'], ['grok', 'mcp-only']];
@@ -23,6 +24,7 @@ function list() {
   }
   const ready = library.filter(s => !readiness(s).length).length;
   console.log(`\n${library.length} candidates, ${ready} ready, ${library.length - ready} not ready`);
+  listCaptures();
 }
 
 function matrix() {
@@ -43,6 +45,13 @@ function validate() {
   for (const e of errors) console.error(e);
   console.log(errors.length ? `${errors.length} errors` : `${library.length} Scenarios valid`);
   if (errors.length) process.exitCode = 1;
+  listCaptures();
+}
+
+function listCaptures() {
+  const records = captureInventory();
+  for (const record of records) console.log(`capture ${record.id}: ${record.status} (${record.path})`);
+  console.log(`${records.length} capture records, ${records.filter(r => r.status === 'paused-draft').length} paused intake drafts`);
 }
 
 /** The verdict of each Attempt record, item by item; model and human items stay pending until reviewed (B03b). */
