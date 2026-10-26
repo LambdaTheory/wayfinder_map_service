@@ -8,7 +8,8 @@ export function privateText(text: string, secrets: Record<string, string>, home 
     .replace(/(Bearer\s+)(?!<)[^\s"\\]+/gi, '$1<credential>')
     .replace(/\bsk-(?:ant-oat01-|ant-api03-|proj-)?[A-Za-z0-9_-]{12,}\b/g, '<credential>')
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '<credential>')
-    .replace(/((?:access_token|refresh_token|id_token|api_key)["\\:\s=]+)[^"\\\s,}]+/gi, '$1<credential>')
+    .replace(/((?:access_token|refresh_token|id_token|api_key)["\\:\s=]+)([^"\\\s,}]+)/gi,
+      (match, prefix: string, value: string) => value.startsWith('<') ? match : `${prefix}<credential>`)
     .split(home).join('~');
   if (leaks(scrubbed, secrets).length) throw new Error('credential survived redaction; record withheld');
   return scrubbed;

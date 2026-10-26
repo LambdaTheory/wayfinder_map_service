@@ -614,3 +614,9 @@ it.each(['model', 'effort'])('retains native %s mismatch as an insufficient-evid
   writeFileSync(join(dir, 'codex-supported.jsonl'), text);
   expect(outcomes(importAttempt(dir, 'codex-supported.jsonl', JSON.parse(read('codex-assessment.json'))))).toEqual(abilities.map(() => 'insufficient-evidence'));
 });
+
+it('keeps stable placeholders in token fields as well as Bearer headers', async () => {
+  const { privateText } = await import('./privacy.ts');
+  expect(privateText('{"access_token":"synthetic-secret"} Bearer synthetic-secret synthetic-secret', { agent: 'synthetic-secret' }))
+    .toBe('{"access_token":"<agent>"} Bearer <agent> <agent>');
+});
