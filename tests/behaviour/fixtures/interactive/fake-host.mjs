@@ -50,7 +50,7 @@ process.stdout.write = (text, ...args) => {
 };
 try {
   await host([...process.argv.slice(2, -1), driver], { subscriptionHome,
-    inheritedEnv: mode?.endsWith('-terminal') ? { HTTPS_PROXY: 'http://localhost:23458' } : mode === 'claude-proxy' ? { NO_PROXY: '127.0.0.1', no_proxy: 'localhost', HTTPS_PROXY: 'http://synthetic-user:synthetic-password@localhost:23457' } : {},
+    inheritedEnv: mode?.endsWith('-terminal') ? { HTTPS_PROXY: 'http://localhost:23458' } : ['claude-proxy', 'protocol-refusal'].includes(mode) ? { NO_PROXY: '127.0.0.1', no_proxy: 'localhost', HTTPS_PROXY: 'http://synthetic-user:synthetic-password@localhost:23457' } : {},
     observe: paths => {
       ++observed;
       if (observed === 1) scratch = paths[1];
@@ -63,6 +63,7 @@ try {
         const log = join(paths[2], 'launch.jsonl'); const text = readFileSync(log, 'utf8');
         writeFileSync(log, text + text.split('\n')[0] + '\n');
       }
+      if (observed === 2 && mode === 'protocol-refusal') writeFileSync(join(paths[0], 'protocol.jsonl'), JSON.stringify({ kind: 'http://synthetic-user:synthetic-password@localhost:23457' }));
       if (observed === 2 && mode === 'control-tamper') writeFileSync(join(paths[2], 'launch.json'), 'forged');
       if (observed === 2 && ['refresh', 'failure', 'cancel'].includes(mode)) {
         const own = join(paths[1], 'home/.codex/auth.json');

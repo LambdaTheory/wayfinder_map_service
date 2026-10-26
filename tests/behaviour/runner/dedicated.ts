@@ -5,7 +5,7 @@ import { dirname, join, relative } from 'node:path';
 import { clientSkills, executeTurn, findRollout, loginSecrets } from './codex.ts';
 import type { CodexOptions, CodexSession, TurnRequest } from './codex.ts';
 import { readRollout, shown } from './normalize.ts';
-import { checkoutRoot, reservedPorts } from './service.ts';
+import { checkoutRoot, newToken, reservedPorts } from './service.ts';
 import { entryIdentity, hashContents, IsolationError, readPinnedFile, readRegularFile, verifyProfile, writeProfile } from './sandbox.ts';
 import type { ControlProfile, SandboxLayout } from './sandbox.ts';
 import type { Credential, IsolatedService } from './service.ts';
@@ -42,6 +42,7 @@ export interface DedicatedSetup {
   shimDir: string;
   codexHome: string;
   sourceAuth: string;
+  probeToken: string;
   verify(): void;
   /** Runtime-independent copies survive failures and cleanup; never contain tokens. */
   controlEvidence: { profile: string; shim: string; manifest: string };
@@ -69,12 +70,16 @@ export function prepareDedicated(session: CodexSession, service: IsolatedService
   for (const method of ['mcp', 'matt']) mkdirSync(join(outputs, method), { recursive: true, mode: 0o700 });
   // The projection has no dist/, and the client cannot add one. Lost service => refusal, never a daemon.
   cpSync(join(checkoutRoot, '.agents/skills/wayfinder'), skill, { recursive: true, dereference: true });
-  writeFileSync(join(serviceDir, 'wayfinder-token'), controller.token + '\n', { mode: 0o600 });
+  // The launcher gets a separate probe identity; the Controller token stays in runner memory.
+  const probeToken = newToken();
+  writeFileSync(join(serviceDir, 'wayfinder-token'), probeToken + '\n', { mode: 0o600 });
   // The shared service stores every credential in its reloadable file, including the Controller.
   // Register these runner-owned lifetimes so the real launcher's pruning preserves them on resume.
   const existing = JSON.parse(readFileSync(join(serviceDir, 'credentials.json'), 'utf8')) as {
     credentials: { clientId: string; tokenSha256: string }[];
   };
+  existing.credentials.push({ clientId: 'Behaviour-LauncherProbe', tokenSha256: hashContents(probeToken) });
+  writeFileSync(join(serviceDir, 'credentials.json'), JSON.stringify(existing), { mode: 0o600 });
   writeFileSync(join(serviceDir, 'credential-owners.json'), JSON.stringify(Object.fromEntries(
     existing.credentials.map(c => [c.tokenSha256, { clientId: c.clientId, pid: process.pid }]))), { mode: 0o600, flag: 'wx' });
   const capturePath = join(serviceDir, 'codex-launch.json');
@@ -91,7 +96,7 @@ export function prepareDedicated(session: CodexSession, service: IsolatedService
   const profilePath = join(control, `${session.home.split('/').at(-1)}.sb`);
   const command = ['/usr/bin/sandbox-exec', '-f', profilePath, binary];
   const expected = { home: stateHome, codexHome: state, url: `mcp_servers.wayfinder.url="http://127.0.0.1:${service.port}/mcp"` };
-  const constants = JSON.stringify({ command, capturePath, serviceDir, expected, controllerHash: hashContents(controller.token), path: process.env.PATH ?? '/usr/bin:/bin' });
+  const constants = JSON.stringify({ command, capturePath, serviceDir, expected, primaryHashes: [hashContents(controller.token), hashContents(probeToken)], path: process.env.PATH ?? '/usr/bin:/bin' });
   const shim = `#!${python} -I
 import hashlib, json, os, sys
 from pathlib import Path
@@ -104,7 +109,7 @@ if token:
         sys.exit("isolation failure: unexpected launcher HOME, CODEX_HOME or MCP URL")
     sha = hashlib.sha256(token.encode()).hexdigest()
     owners = json.loads((Path(settings["serviceDir"]) / "credential-owners.json").read_text())
-    if sha == settings["controllerHash"] or sha not in owners:
+    if sha in settings["primaryHashes"] or sha not in owners:
         sys.exit("isolation failure: Dedicated Entry refused a fallback primary credential")
     record = {"token": token, "clientId": owners[sha]["clientId"], "argv": sys.argv[1:],
               "home": env["HOME"], "codexHome": env["CODEX_HOME"],
@@ -113,6 +118,10 @@ if token:
     with os.fdopen(fd, "w") as handle:
         json.dump(record, handle)
 env = {k: v for k, v in env.items() if not k.startswith("WAYFINDER_AGENT_")}
+proxies = json.loads(env.pop("WAYFINDER_NATIVE_PROXY_ENV", "{}"))
+for key in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
+    env.pop(key, None)
+env.update(proxies)
 env["PATH"] = settings["path"]
 command = settings["command"] + sys.argv[1:]
 os.execvpe(command[0], command, env)
@@ -149,10 +158,11 @@ os.execvpe(command[0], command, env)
       if (readlinkSync(ownAuth) !== sourceAuth) throw new IsolationError('changed native auth link target');
     } else if (info) entryIdentity(ownAuth, 'file'); // A native atomic refresh may replace the link with a regular file.
   };
-  return { state, skill, outputs, capturePath, control, launcherHome, profile, launcher, checkout, shimDir, codexHome: state, sourceAuth, verify,
+  return { state, skill, outputs, capturePath, control, launcherHome, profile, launcher, checkout, shimDir, codexHome: state, sourceAuth, probeToken, verify,
     controlEvidence: { profile: readFileSync(profile.path, 'utf8'), shim, manifest: JSON.stringify(profile) }, env: {
       PATH: `${shimDir}:${process.env.PATH ?? '/usr/bin:/bin'}`, HOME: launcherHome, TMPDIR: join(session.home, 'tmp'), LANG: 'en_US.UTF-8',
-      ...profile.proxyEnvironment,
+      // Trusted loopback probes must never follow HTTP/system proxies. The shim restores the exact native route.
+      NO_PROXY: '*', no_proxy: '*', WAYFINDER_NATIVE_PROXY_ENV: JSON.stringify(profile.proxyEnvironment),
       WAYFINDER_AGENT_STATE_ROOT: root, WAYFINDER_AGENT_SERVICE_DIR: serviceDir, WAYFINDER_AGENT_OUTPUTS: outputs,
       WAYFINDER_AGENT_PORT: String(service.port), WAYFINDER_AGENT_DATABASE: service.databasePath,
       WAYFINDER_AGENT_CHECKOUT: checkout, WAYFINDER_AGENT_USAGE: 'test',

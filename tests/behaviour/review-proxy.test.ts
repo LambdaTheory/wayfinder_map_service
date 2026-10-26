@@ -257,13 +257,42 @@ test('scrubbing refuses a protocol-value collision instead of publishing unusabl
     .toThrow('redaction would change a protocol value; record withheld');
 });
 
-test('structured scrubbing preserves protocol strings and still removes unknown login fields', async () => {
+test('opaque protocol collisions refuse while unknown login fields are removed', async () => {
   const { proxySecrets } = await import('./proxy.ts');
   const { privateText } = await import('./interactive/privacy.ts');
   const original = { HTTPS_PROXY: 'http://toolsOnly:complete@localhost:23457' };
   const secrets = proxySecrets(original, proxyRouting(original).environment);
-  const safe = JSON.parse(privateText(JSON.stringify({ compatibilityMode: 'toolsOnly', run: { completeness: 'complete' },
-    access_token: 'synthetic-unregistered-login', username: 'toolsOnly', password: 'complete' }), secrets));
-  expect(safe).toMatchObject({ compatibilityMode: 'toolsOnly', run: { completeness: 'complete' }, access_token: '<credential>' });
+  expect(() => privateText(JSON.stringify({ compatibilityMode: 'toolsOnly', run: { completeness: 'complete' } }), secrets)).toThrow(/protocol value/);
+  const safe = JSON.parse(privateText(JSON.stringify({ access_token: 'synthetic-unregistered-login', username: 'toolsOnly', password: 'complete' }), secrets));
+  expect(safe.access_token).toBe('<credential>');
   expect(safe.username).toMatch(/^<proxy-/); expect(safe.password).toMatch(/^<proxy-/);
+});
+
+test('known secrets in keys and every nested string are detected independently of field names', async () => {
+  const { leaks, redact } = await import('./evidence.ts');
+  const { proxySecrets } = await import('./proxy.ts');
+  const input = { HTTPS_PROXY: 'http://run:synthetic-opaque-password@localhost:23457' };
+  const secrets = { ...proxySecrets(input, proxyRouting(input).environment), controller: 'synthetic-controller-secret' };
+  for (const value of [{ [input.HTTPS_PROXY]: true }, { 'synthetic-controller-secret': true },
+    { aggregated_output: 'result synthetic-opaque-password' }, { body: 'synthetic-opaque-password' },
+    { arguments: { title: 'synthetic-opaque-password' } }]) {
+    const text = JSON.stringify(value);
+    expect(leaks(text, secrets).length).toBeGreaterThan(0);
+    expect(leaks(redact(text, secrets), secrets)).toEqual([]);
+  }
+});
+
+test('JSON scrubbing edits only changed string tokens, preserving raw numbers and whitespace', async () => {
+  const { redact } = await import('./evidence.ts');
+  const source = ' { "n":12345678901234567890, "f":1.50, "unicode":"\\u00e9", "text":"synthetic-secret" }\n[ 1, 2 ]\n';
+  expect(redact(source, { token: 'absent-secret' })).toBe(source);
+  expect(redact(source, { token: 'synthetic-secret' })).toBe(source.replace('synthetic-secret', '<token>'));
+});
+
+test('key scrubbing hides home paths and refuses replacement collisions', async () => {
+  const { privateText } = await import('./interactive/privacy.ts');
+  const { redact } = await import('./evidence.ts');
+  expect(privateText('{"/synthetic/home/a":{"path":"/synthetic/home/b"}}', {}, '/synthetic/home'))
+    .toBe('{"~/a":{"path":"~/b"}}');
+  expect(() => redact('{"synthetic-secret":1,"<token>":2}', { token: 'synthetic-secret' })).toThrow(/key collision/);
 });

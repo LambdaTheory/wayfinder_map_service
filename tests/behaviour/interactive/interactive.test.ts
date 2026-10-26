@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -172,7 +172,7 @@ it('manual launchers isolate HOME/configuration, use their own credential and co
   }
 });
 
-it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'claude-proxy', 'codex-settings', 'codex-malformed-settings', 'codex-terminal', 'claude-settings', 'claude-terminal', 'native-link', 'control-tamper', 'exit-nonzero', 'exit-signal', 'launch-failure', 'no-start', 'exit-without-start', 'missing-exit', 'no-start-precondition-not-met', 'no-start-rate-limited', 'no-start-timeout', 'no-start-cancelled', 'repeat-launch', 'duplicate-start', 'reported-precondition-not-met', 'reported-rate-limited', 'reported-timeout', 'reported-cancelled'])('the manual host stops only its own service and preserves subscription state (%s)', async mode => {
+it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'protocol-refusal', 'claude-proxy', 'codex-settings', 'codex-malformed-settings', 'codex-terminal', 'claude-settings', 'claude-terminal', 'native-link', 'control-tamper', 'exit-nonzero', 'exit-signal', 'launch-failure', 'no-start', 'exit-without-start', 'missing-exit', 'no-start-precondition-not-met', 'no-start-rate-limited', 'no-start-timeout', 'no-start-cancelled', 'repeat-launch', 'duplicate-start', 'reported-precondition-not-met', 'reported-rate-limited', 'reported-timeout', 'reported-cancelled'])('the manual host stops only its own service and preserves subscription state (%s)', async mode => {
   const { spawn } = await import('node:child_process');
   const { cacheRoot } = await import('./host.ts');
   const attempt = `fixture-${process.pid}-${Date.now()}`;
@@ -209,6 +209,11 @@ it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'claude-proxy', 'c
   const capture = JSON.parse(readFileSync(join(dir, 'capture.json'), 'utf8')) as AttemptRecord;
   expect(capture.maps).toHaveLength(1);
   if (['native-link', 'control-tamper', 'missing-exit', 'duplicate-start'].includes(mode)) expect(capture.run.completeness).toBe('driver-failed');
+  if (mode === 'protocol-refusal') {
+    expect(capture.run.completeness).toBe('driver-failed');
+    expect(capture.missing).toContain('raw.protocol.jsonl');
+    expect(existsSync(join(dir, 'protocol.jsonl'))).toBe(false);
+  }
   if (mode === 'native-link') expect(capture.raw.files).toEqual(['raw/launch.jsonl']);
   if (mode.startsWith('no-start') || ['launch-failure', 'exit-without-start'].includes(mode)) expect(capture.run.completeness).toBe('launch-failed');
   if (mode.startsWith('reported-')) expect(capture.run.completeness).toBe(mode.slice('reported-'.length));

@@ -233,31 +233,51 @@ const regexLiteral = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\
 const knownPlaceholders = (secrets: Record<string, string>) => Object.entries(secrets)
   .filter(([, value]) => value).map(([name]) => regexLiteral(`<${name}>`)).join('|');
 const protocolKeys = new Set(['schema', 'role', 'kind', 'actor', 'completeness', 'entry', 'harness', 'type', 'status', 'series', 'phase', 'surface']);
-interface TextContext { structured: boolean; key?: string }
+interface TextContext { structured: boolean; key?: string; isKey?: boolean }
 
-/** JSON/JSONL is parsed first: keys, numbers and booleans never enter a text scrubber. */
+/** Validate JSON, then edit only changed string tokens: number lexemes, whitespace and untouched escapes survive. */
 export function mapTextValues(text: string, scrub: (value: string, context: TextContext) => string): string {
-  const visit = (value: unknown, key?: string): unknown => {
-    if (typeof value === 'string') {
-      const changed = scrub(value, { structured: true, ...(key === undefined ? {} : { key }) });
-      if (key && protocolKeys.has(key) && changed !== value) throw new Error('redaction would change a protocol value; record withheld');
-      return changed;
-    }
-    if (Array.isArray(value)) return value.map(item => visit(item, key));
-    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, visit(v, k)]));
-    return value;
-  };
-  const parse = (source: string): { value: unknown } | null => {
+  const document = (source: string): string | null => {
     if (!/^[\s]*[\[{]/.test(source)) return null;
-    try { return { value: JSON.parse(source) }; } catch { return null; }
+    try { JSON.parse(source); } catch { return null; }
+    const tokens = [...source.matchAll(/"(?:\\[\s\S]|[^"\\])*"|[{}\[\]:,]|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null/g)];
+    const edits: { start: number; end: number; value: string }[] = []; let cursor = 0;
+    const string = (token: RegExpMatchArray, context: TextContext) => {
+      const value = JSON.parse(token[0]) as string; const changed = scrub(value, context);
+      if (!context.isKey && context.key && protocolKeys.has(context.key) && changed !== value)
+        throw new Error('redaction would change a protocol value; record withheld');
+      if (changed !== value) edits.push({ start: token.index!, end: token.index! + token[0].length, value: JSON.stringify(changed) });
+      return changed;
+    };
+    const visit = (key?: string): void => {
+      const token = tokens[cursor++]!;
+      if (token[0] === '{') {
+        const names = new Map<string, string>();
+        while (tokens[cursor]![0] !== '}') {
+          const name = tokens[cursor++]!; const original = JSON.parse(name[0]) as string;
+          const changed = string(name, { structured: true, isKey: true, key: original });
+          if (names.has(changed) && names.get(changed) !== original) throw new Error('redaction key collision; record withheld');
+          names.set(changed, original); cursor++; // colon
+          visit(original);
+          if (tokens[cursor]![0] !== ',') break;
+          cursor++;
+        }
+        cursor++; // closing brace
+      } else if (token[0] === '[') {
+        while (tokens[cursor]![0] !== ']') {
+          visit(key); if (tokens[cursor]![0] !== ',') break; cursor++;
+        }
+        cursor++;
+      } else if (token[0].startsWith('"')) string(token, { structured: true, ...(key === undefined ? {} : { key }) });
+    };
+    visit();
+    for (const edit of edits.reverse()) source = source.slice(0, edit.start) + edit.value + source.slice(edit.end);
+    return source;
   };
-  const document = parse(text);
-  if (document) return JSON.stringify(visit(document.value), null, text.trim().includes('\n') ? 2 : undefined) + (text.endsWith('\n') ? '\n' : '');
-  return text.split('\n').map(line => {
-    const json = parse(line);
-    return json ? JSON.stringify(visit(json.value)) : scrub(line, { structured: false });
-  }).join('\n');
+  const whole = document(text); if (whole !== null) return whole;
+  return text.split('\n').map(line => document(line) ?? scrub(line, { structured: false })).join('\n');
 }
+const proxyComponent = (name: string) => /^proxy-.*-(?:username|password)(?:-|$)/.test(name);
 
 function scrubCredentials(text: string, secrets: Record<string, string>, found: Set<string>, parseJson = true): string {
   const entries = Object.entries(secrets).filter(([, value]) => value).sort((a, b) => b[1].length - a[1].length);
@@ -276,7 +296,8 @@ function scrubCredentials(text: string, secrets: Record<string, string>, found: 
     if (captures[0] !== undefined) return match;
     const index = captures.slice(1, entries.length + 1).findIndex(part => part !== undefined);
     const [name, secret] = entries[index]!;
-    if (/^proxy-.*-(?:username|password)(?:-|$)/.test(name)) {
+    if (proxyComponent(name) && secret.length < 8) {
+      if (context.isKey) return match;
       const offset = captures[entries.length + 1] as number;
       const key = context.key ?? '';
       const credentialField = /^(?:proxy[_-]?)?(?:username|password|userinfo|user|pass)$/i.test(key);
@@ -285,7 +306,7 @@ function scrubCredentials(text: string, secrets: Record<string, string>, found: 
       const isolatedEcho = prose && !line.replace(credentialOnly, '').trim();
       const labelled = /(?:proxy[-_ ]?)?(?:username|password|userinfo|user|pass)\s*[:=]\s*["']?$/i.test(value.slice(0, offset));
       // Common words in prose and protocol values are not evidence of a credential echo.
-      if (!credentialField && !labelled && !isolatedEcho && !(prose && secret.length >= 8)) return match;
+      if (!credentialField && !labelled && !isolatedEcho) return match;
     }
     found.add(name);
     return `<${name}>`;
@@ -300,12 +321,29 @@ export function redact(text: string, secrets: Record<string, string>): string {
 /** Text artifacts use UTF-8/structured scrubbing; opaque binary bytes never pass through JSON decoding. */
 export function redactBytes(bytes: Buffer, secrets: Record<string, string>): Buffer {
   const text = bytes.toString('utf8');
-  if (Buffer.from(text).equals(bytes)) return Buffer.from(redact(text, secrets));
+  if (Buffer.from(text).equals(bytes)) {
+    const safe = redact(text, secrets);
+    if (leaks(safe, secrets).length) throw new Error('artifact credential survived redaction; record withheld');
+    return Buffer.from(safe);
+  }
   const byteSecrets = Object.fromEntries(Object.entries(secrets).map(([name, value]) => [name, Buffer.from(value).toString('latin1')]));
-  return Buffer.from(scrubCredentials(bytes.toString('latin1'), byteSecrets, new Set(), false), 'latin1');
+  const safe = scrubCredentials(bytes.toString('latin1'), byteSecrets, new Set(), false);
+  if (leaks(safe, byteSecrets).length) throw new Error('artifact credential survived redaction; record withheld');
+  return Buffer.from(safe, 'latin1');
 }
 
-/** Uses the same credential contexts as redaction; ordinary keys/words are not leak evidence. */
+/** Independent substring scan for complete/opaque secrets, across keys and every nested field. */
 export function leaks(text: string, secrets: Record<string, string>): string[] {
-  const found = new Set<string>(); scrubCredentials(text, secrets, found); return [...found];
+  const placeholders = knownPlaceholders(secrets);
+  const unmasked = (value: string) => placeholders ? value.replace(new RegExp(placeholders, 'g'), '') : value;
+  // Decoding individual JSON string tokens also catches escaped keys/values without rounding numeric evidence.
+  const strings = [text, ...[...text.matchAll(/"(?:\\[\s\S]|[^"\\])*"/g)].flatMap(token => {
+    try { return [JSON.parse(token[0]) as string]; } catch { return []; }
+  })].map(unmasked);
+  const found = new Set(Object.entries(secrets).filter(([name, secret]) => secret && (!proxyComponent(name) || secret.length >= 8)
+    && strings.some(value => value.includes(secret))).map(([name]) => name));
+  // Short common components remain contextual; a bare "1" or "run" is also ordinary protocol data.
+  const short = Object.fromEntries(Object.entries(secrets).filter(([name, secret]) => proxyComponent(name) && secret.length < 8));
+  scrubCredentials(text, short, found);
+  return [...found];
 }

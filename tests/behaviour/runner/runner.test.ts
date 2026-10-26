@@ -206,7 +206,7 @@ test.skipIf(!sandboxAvailable).each(['plain', 'encoded', 'run', 'id', 'user', 's
   const proxy = createServer(socket => { connections++; socket.end('fixture'); });
   const port = await freePort();
   await new Promise<void>(resolve => proxy.listen(port, '127.0.0.1', resolve));
-  const user = style === 'plain' ? 'synthetic-user' : style === 'encoded' ? 'synthetic%20user' : style;
+  const user = style === 'plain' ? 'synthetic-user' : style === 'encoded' ? 'synthetic%20user' : style === 'dedicated' ? 'run' : style;
   const password = style === 'plain' ? 'synthetic-password' : style === 'encoded' ? 'synthetic%20password' : '1';
   const bin = join(scratch, 'proxy-client.mjs');
   writeFileSync(bin, readFileSync(fakeCodex, 'utf8').replace('const url =', `

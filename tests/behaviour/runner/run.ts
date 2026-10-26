@@ -151,6 +151,21 @@ export interface AttemptIsolation {
 }
 
 export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: () => boolean, register: (kill: () => void) => void): Promise<AttemptOutcome> {
+  const cleanup: (() => Promise<unknown>)[] = []; let kill = () => {};
+  const defer = <T>(action: () => T | Promise<T>): (() => Promise<T>) => {
+    let pending: Promise<T> | undefined;
+    const once = () => pending ??= Promise.resolve().then(action); cleanup.push(once); return once;
+  };
+  try { return await runOwnedAttempt(o, p, cancelled, action => { kill = action; register(action); }, defer); }
+  finally {
+    let failed = false; try { kill(); } catch { failed = true; }
+    for (const action of cleanup.reverse()) try { await action(); } catch { failed = true; }
+    if (failed) throw new Error('owned Attempt cleanup failed');
+  }
+}
+
+async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: () => boolean, register: (kill: () => void) => void,
+  defer: <T>(action: () => T | Promise<T>) => () => Promise<T>): Promise<AttemptOutcome> {
   const proxies = proxyRouting(o.proxyEnv ?? {});
   const s = p.scenario;
   const entry = o.entry ?? 'mcp-only';
@@ -164,8 +179,10 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   if (existsSync(dir)) return { attemptId: p.attemptId, scenario: s.id, completeness: 'not-run', detail: 'Attempt output directory already exists' };
   mkdirSync(join(dir, 'raw'), { recursive: true, mode: 0o700 });
   const scratch = mkdtempSync(join(o.scratchRoot, `wf-behave-${p.attemptId}-`));
+  defer(() => rmSync(scratch, { recursive: true, force: true }));
   const layout = prepareSandbox(scratch);
   const { controlDir } = layout;
+  defer(() => rmSync(controlDir, { recursive: true, force: true }));
   const profiles = new Map<string, ControlProfile>();
   const isolationFailures: string[] = [];
   const controller: Credential = { clientId: 'Behaviour-Controller', token: newToken() };
@@ -196,9 +213,19 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   const cache = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests');
   mkdirSync(cache, { recursive: true, mode: 0o700 });
   const serviceDir = mkdtempSync(join(cache, entry === 'dedicated' ? 'dedicated-' : 'attempt-'));
+  defer(() => rmSync(serviceDir, { recursive: true, force: true }));
 
   const rawFiles: string[] = [];
-  const writeRaw = (name: string, text: string) => { writeFileSync(join(dir, 'raw', name), tilde(redact(text, secrets)), { mode: 0o600 }); rawFiles.push(name); };
+  const writeRaw = (name: string, text: string) => {
+    try {
+      const safe = tilde(redact(text, secrets));
+      if (leaks(safe, secrets).length) throw new Error('credential survived redaction');
+      writeFileSync(join(dir, 'raw', name), safe, { mode: 0o600 }); rawFiles.push(name);
+    } catch {
+      rmSync(join(dir, 'raw', name), { force: true });
+      missing.push(`raw.${name}`); completeness = 'driver-failed'; detail = 'raw evidence withheld after privacy validation';
+    }
+  };
   const usage = { inputTokens: 0, outputTokens: 0 };
   let completeness: Completeness = 'complete';
   let detail: string | undefined;
@@ -216,14 +243,17 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
     const historical = historyCredentials(s.seed.maps, [controller.clientId, ...sessions.map(x => x.credential.clientId)]);
     for (const [label, credential] of Object.entries(historical)) secrets[`history-token-${label}`] = credential.token;
     service = await startService(serviceDir, controller, [...sessions.map(x => x.credential), ...Object.values(historical), ...(bait ? [bait] : [])], proxies.ports);
+    service.stop = defer(service.stop);
     openDatabases(service.pid).forEach(d => opened.add(d));
     ctl = await connectController(service.port, controller.token, Object.fromEntries(Object.entries(historical).map(([label, c]) => [label, c.token])), emit);
+    ctl.close = defer(ctl.close);
     for (const map of s.seed.maps) seedHeads[map.mapId] = await ctl.seed(map, revision => { seedHeads[map.mapId] = revision; });
     seedingComplete = true;
     const workdir = prepareWorkdir(scratch, s.seed.fixtures, fixturesRoot);
     const nativeOptions = { ...o.codex, bin: prepareClient(controlDir, o.codex.bin) };
     if (entry === 'dedicated') {
       dedicated = prepareDedicated(sessions[0]!.codex, service, controller, nativeOptions, layout, workdir, proxies.environment);
+      secrets['launcher-probe-token'] = dedicated.probeToken;
       sessions[0]!.codex.codexHome = dedicated.codexHome;
       profiles.set(sessions[0]!.codex.home, dedicated.profile);
     }
@@ -244,6 +274,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
           tool: entry.rpc.method === 'tools/call' ? entry.rpc.params?.name : undefined,
           requestId: entry.rpc.id, scope: entry.scope, trigger: entry.trigger }, session.turn ?? null, session.label);
       }, proxies.ports);
+      session.route.close = defer(session.route.close);
     }
     const actionRuns = new Map<ControllerAction, Promise<void>>();
     const executeControllerAction = async (a: ControllerAction, session: Session, index: number, mapId?: string) => {
@@ -460,7 +491,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   // Raw SQLite can retain credentials in Map text, history, free pages and journals. Keep only
   // the redacted structured export; never patch database bytes or retain it after export failure.
   if (entry === 'dedicated') missing.push('raw.database');
-  const databaseCleanup = cleanupServiceDirectory(serviceDir, entry === 'dedicated' || !missing.includes('maps'));
+  const databaseCleanup = cleanupServiceDirectory(serviceDir, true);
   rmSync(scratch, { recursive: true, force: true });
   rmSync(controlDir, { recursive: true, force: true });
   const consensus = (key: 'visibleModel' | 'effort' | 'cliVersion'): Field<string> => {

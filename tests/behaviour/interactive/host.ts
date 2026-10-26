@@ -185,11 +185,18 @@ export async function host(args: string[], options: { subscriptionHome: string; 
     } catch { capture.missing.push('events'); if (capture.run.completeness === 'complete') capture.run.completeness = 'driver-failed'; }
     try { await route?.close(); await controller?.close(); } finally {
       const stopped = await service?.stop();
-      writePrivate(join(raw, 'relay.json'), relay, secrets);
+      const retainRaw = (path: string, value: unknown, missing: string) => {
+        try { writePrivate(path, value, secrets); }
+        catch {
+          rmSync(path, { force: true }); // The service protocol file already exists before its privacy check.
+          capture.missing.push(missing); capture.run.completeness = 'driver-failed'; capture.run.detail = 'raw evidence withheld after privacy validation';
+        }
+      };
+      retainRaw(join(raw, 'relay.json'), relay, 'raw.relay.json');
       try { after = observe([dir, ...(scratch ? [scratch] : []), ...(prepared ? [prepared.controlDir] : [])]); } catch { after = unavailable(); }
       if (service) {
-        writePrivate(join(raw, 'service.log'), service.logs(), secrets);
-        if (existsSync(service.protocolReport)) writePrivate(service.protocolReport, readFileSync(service.protocolReport, 'utf8'), secrets);
+        retainRaw(join(raw, 'service.log'), service.logs(), 'raw.service.log');
+        if (existsSync(service.protocolReport)) retainRaw(service.protocolReport, readFileSync(service.protocolReport, 'utf8'), 'raw.protocol.jsonl');
       }
       let controlIntegrity: Field<boolean> = absent('launcher was not prepared');
       const controlFailures: string[] = [];

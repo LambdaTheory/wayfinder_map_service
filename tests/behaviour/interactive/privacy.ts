@@ -7,7 +7,7 @@ export function privateText(text: string, secrets: Record<string, string>, home 
   const scrubValue = (match: string, prefix: string, value: string) => /^<[A-Za-z0-9_-]+>[.,;:]?$/.test(value)
     ? match : `${prefix}<credential>`;
   const scrubbed = mapTextValues(redact(text, secrets), (value, context) => {
-    if (/^(?:access_token|refresh_token|id_token|api_key)$/i.test(context.key ?? '') && !/^<[A-Za-z0-9_-]+>$/.test(value)) return '<credential>';
+    if (!context.isKey && /^(?:access_token|refresh_token|id_token|api_key)$/i.test(context.key ?? '') && !/^<[A-Za-z0-9_-]+>$/.test(value)) return '<credential>';
     return value
     .replace(/(Bearer\s+)([^\s"\\,;}]+)/gi, scrubValue)
     .replace(/\bsk-(?:ant-oat01-|ant-api03-|proj-)?[A-Za-z0-9_-]{12,}\b/g, '<credential>')
