@@ -1,6 +1,6 @@
 {
-  "main": "f8b39000bce589668a7dedb55f9e78be6703021d",
-  "branch": "ceee62ce534480aee84d8053e22f5d5f804b6cda",
+  "main": "318e97daa1d0dd487b70abda991066f884756cd1",
+  "branch": "224a399e891a3a2a0bdebb4484d7316fdf33dc27",
   "comparisons": 1222,
   "unchanged": 1100,
   "covered": [
@@ -760,7 +760,7 @@
     },
     {
       "file": "tests/behaviour/runner/upgrade.test.ts",
-      "test": "owned upgrade through the real shared sandbox, fake native driver only > verdict order: U-codex-process Conflict replay / unkno…",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > verdict order: U-codex-process Conflict replay / unkno\u2026",
       "scenario": "U-codex-process",
       "mode": "definition",
       "before": "incomplete",
@@ -772,7 +772,7 @@
     },
     {
       "file": "tests/behaviour/runner/upgrade.test.ts",
-      "test": "owned upgrade through the real shared sandbox, fake native driver only > verdict order: U-codex-process Conflict replay / unkno…",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > verdict order: U-codex-process Conflict replay / unkno\u2026",
       "scenario": "U-codex-process",
       "mode": "definition",
       "before": "insufficient-evidence",
@@ -856,7 +856,7 @@
     },
     {
       "file": "tests/behaviour/runner/upgrade.test.ts",
-      "test": "owned upgrade through the real shared sandbox, fake native driver only > verdict order: U-codex-resume Conflict replay / unknow…",
+      "test": "owned upgrade through the real shared sandbox, fake native driver only > verdict order: U-codex-resume Conflict replay / unknow\u2026",
       "scenario": "U-codex-resume",
       "mode": "definition",
       "before": "incomplete",
@@ -1072,7 +1072,7 @@
     },
     {
       "file": "tests/behaviour/verdict.test.ts",
-      "test": "Attempt verdicts on fixed evidence > missing evidence cannot prove absence: file read through command / events.comm…",
+      "test": "Attempt verdicts on fixed evidence > missing evidence cannot prove absence: file read through command / events.comm\u2026",
       "scenario": "S12",
       "mode": "helpers",
       "before": "fail",
