@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, expect, test } from 'vitest';
-import { findRollout, prepareSession, runTurn, verifyProfile, writeProfile } from './codex.ts';
+import { findRollout, prepareSandbox, prepareSession, runTurn, verifyProfile, writeProfile } from './codex.ts';
 import { isolationSnapshot, personalConfigNamesRun } from './run.ts';
 import { cleanupServiceDirectory } from './service.ts';
 import { startRoute } from './relay.ts';
@@ -21,7 +21,7 @@ attack('a session cannot read or overwrite another native HOME, including its pr
   const transcript = join(a.codexHome, 'rollout.jsonl');
   writeFileSync(transcript, 'original');
   const work = join(scratch, 'work'); mkdirSync(work);
-  const control = mkdtempSync(join(root, 'runner-'));
+  const { controlDir: control, readOnlyDir } = prepareSandbox(scratch);
   const profile = writeProfile(control, b, work, '/bin/sh').path;
   expect(shell(profile, `cat '${transcript}'`).status).not.toBe(0);
   expect(shell(profile, `echo forged > '${transcript}'`).status).not.toBe(0);
@@ -42,7 +42,7 @@ attack('a client cannot replace the sandbox control file between turns', () => {
   const scratch = mkdtempSync(join(root, 'control-'));
   const session = prepareSession(scratch, 'A', 'synthetic', clientState.loginSource);
   const work = join(scratch, 'work'); mkdirSync(work);
-  const control = mkdtempSync(join(root, 'runner-'));
+  const { controlDir: control, readOnlyDir } = prepareSandbox(scratch);
   const profile = writeProfile(control, session, work, '/bin/sh').path;
   const original = readFileSync(profile, 'utf8');
   expect(shell(profile, `printf '(version 1) (allow default)' > '${profile}'`).status).not.toBe(0);
@@ -74,7 +74,7 @@ test('a changed control hash prevents the next client launch', async () => {
   const scratch = mkdtempSync(join(root, 'hash-'));
   const session = prepareSession(scratch, 'A', 'synthetic', clientState.loginSource);
   const work = join(scratch, 'work'); mkdirSync(work);
-  const control = mkdtempSync(join(root, 'runner-'));
+  const { controlDir: control, readOnlyDir } = prepareSandbox(scratch);
   const profile = writeProfile(control, session, work, '/bin/echo');
   expect(verifyProfile(profile)).toBeNull();
   writeFileSync(profile.path, '(version 1) (allow default)');
@@ -89,7 +89,7 @@ attack('shared profile API allows read-only roots and appends root and literal w
   const scratch = mkdtempSync(join(root, 'api-'));
   const session = prepareSession(scratch, 'A', 'synthetic', clientState.loginSource);
   const work = join(scratch, 'work'); mkdirSync(work);
-  const control = mkdtempSync(join(root, 'runner-'));
+  const { controlDir: control, readOnlyDir } = prepareSandbox(scratch);
   const skill = join(work, 'skill'); mkdirSync(skill); writeFileSync(join(skill, 'SKILL.md'), 'fixed');
   const state = join(session.home, 'state'); mkdirSync(state);
   const denied = join(work, 'denied'); mkdirSync(denied);
@@ -130,7 +130,7 @@ test('session preparation and Batch snapshots use synthetic login state without 
   const scratch = mkdtempSync(join(root, 'login-source-'));
   const state = syntheticClientState(scratch);
   const session = prepareSession(scratch, 'A', 'synthetic', state.loginSource);
-  expect(readFileSync(join(session.codexHome, 'auth.json'), 'utf8')).toBe(readFileSync(state.loginSource, 'utf8'));
+  expect(readFileSync(join(session.codexHome, 'auth.json'), 'utf8')).toBe(state.loginSource.contents);
   const snapshot = isolationSnapshot(state.personalConfigRoot);
   expect(Object.keys(snapshot.files).every(path => path.startsWith(state.personalConfigRoot))).toBe(true);
 });
@@ -139,8 +139,8 @@ attack('a mutable read-only file permits trusted content refresh but no client w
   const scratch = mkdtempSync(join(root, 'mutable-'));
   const session = prepareSession(scratch, 'A', 'synthetic', clientState.loginSource);
   const work = join(scratch, 'work'); mkdirSync(work);
-  const control = mkdtempSync(join(root, 'runner-'));
-  const source = join(scratch, 'source'); mkdirSync(source);
+  const { controlDir: control, readOnlyDir } = prepareSandbox(scratch);
+  const source = join(readOnlyDir, 'source'); mkdirSync(source);
   const auth = join(source, 'auth.json'); writeFileSync(auth, 'synthetic-first');
   const sibling = join(source, 'private'); writeFileSync(sibling, 'synthetic-private');
   const profile = writeProfile(control, session, work, '/bin/sh', { mutableReadOnlyFiles: [auth] });
@@ -160,9 +160,43 @@ attack('mutable read-only entries reject directories and another session file th
   const a = prepareSession(scratch, 'A', 'synthetic', clientState.loginSource);
   const b = prepareSession(scratch, 'B', 'synthetic', clientState.loginSource);
   const work = join(scratch, 'work'); mkdirSync(work);
-  const control = mkdtempSync(join(root, 'runner-'));
+  const { controlDir: control, readOnlyDir } = prepareSandbox(scratch);
   const other = join(b.home, 'token'); writeFileSync(other, 'synthetic');
   const alias = join(work, 'alias'); symlinkSync(other, alias);
   for (const file of [scratch, alias]) expect(() => writeProfile(control, a, work, '/bin/sh', { mutableReadOnlyFiles: [file] })).toThrow();
   expect(shell(writeProfile(control, a, work, '/bin/sh').path, `cat '${alias}'`).status).not.toBe(0);
+});
+
+attack('nested protected roots cannot be swapped through a writable parent directory', () => {
+  const scratch = mkdtempSync(join(root, 'parents-'));
+  const session = prepareSession(scratch, 'A', 'synthetic', clientState.loginSource);
+  const { controlDir } = prepareSandbox(scratch);
+  const work = join(scratch, 'work'); mkdirSync(work);
+  for (const name of ['pack/skills', 'state/locked']) {
+    const dir = join(work, name); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'marker'), 'fixed');
+  }
+  const profile = writeProfile(controlDir, session, work, '/bin/sh', {
+    readOnlyRoots: [join(work, 'pack/skills')], denyWriteRoots: [join(work, 'state/locked')],
+  });
+  for (const name of ['pack', 'state']) expect(shell(profile.path, `mv '${work}/${name}' '${work}/${name}-moved'`).status).not.toBe(0);
+  expect(verifyProfile(profile)).toBeNull();
+});
+
+attack('a final-turn integrity failure is detected after the child exits', async () => {
+  const scratch = mkdtempSync(join(root, 'final-check-'));
+  const session = prepareSession(scratch, 'A', 'synthetic', clientState.loginSource);
+  const { controlDir, readOnlyDir } = prepareSandbox(scratch);
+  const work = join(scratch, 'work'); mkdirSync(work);
+  const client = join(readOnlyDir, 'client'); mkdirSync(client);
+  const bin = join(client, 'fake.mjs');
+  writeFileSync(bin, '#!/usr/bin/env node\nconsole.log(JSON.stringify({type:"turn.started"})); await new Promise(r=>setTimeout(r,200));\n', { mode: 0o700 });
+  const skill = join(readOnlyDir, 'skill'); mkdirSync(skill); const instructions = join(skill, 'SKILL.md'); writeFileSync(instructions, 'original');
+  const profile = writeProfile(controlDir, session, work, bin, { readOnlyRoots: [skill] });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await runTurn({ options: { model: 'fake', effort: 'low', bin, sandbox: true, timeoutMs: 2000 }, session, port: 1, workdir: work, prompt: '', profile,
+      onLaunch: () => { timer = setTimeout(() => writeFileSync(instructions, 'trusted-test-mutation'), 100); } });
+    expect(result.turnStarted).toBe(true);
+    expect(result.postIsolationFailure).toMatch(/control files changed/);
+  } finally { clearTimeout(timer); }
 });

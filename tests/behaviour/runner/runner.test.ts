@@ -11,7 +11,7 @@ import { requiredFields } from '../evidence.ts';
 import type { AttemptRecord } from '../evidence.ts';
 import { library } from '../library.ts';
 import { itemsOf } from '../scenario.ts';
-import { sandboxProfile } from './codex.ts';
+import { prepareSandbox, prepareSession, writeProfile } from './codex.ts';
 import { connectController } from './controller.ts';
 import { normalizeTurn, readsIn, receiptsFrom, relativePath } from './normalize.ts';
 import { preflight, runAttempt, runBatch } from './run.ts';
@@ -82,8 +82,10 @@ describe('sandbox', () => {
     const listener = createServer(socket => socket.end('hi'));
     const port = await freePort();
     await new Promise<void>(resolve => listener.listen(port, '127.0.0.1', resolve));
-    const profile = join(own, 'probe.sb');
-    writeFileSync(profile, sandboxProfile(own, own, [port]));
+    const { controlDir } = prepareSandbox(own);
+    const session = prepareSession(own, 'A', 'synthetic', clientState.loginSource);
+    const work = join(own, 'work'); mkdirSync(work);
+    const profile = writeProfile(controlDir, session, work, '/bin/sh').path;
     const q = JSON.stringify;
     const run = (cmd: string) => spawnSync('sandbox-exec', ['-f', profile, '/bin/sh', '-c', cmd], { encoding: 'utf8' }).status;
     try {
@@ -94,7 +96,7 @@ describe('sandbox', () => {
       expect(run(`touch ${q(join(homedir(), '.wf-behave-probe'))}`)).not.toBe(0);
       expect(run('touch /opt/homebrew/.wf-behave-probe || touch /usr/local/.wf-behave-probe')).not.toBe(0);
       expect(existsSync(join(homedir(), '.wf-behave-probe'))).toBe(false);
-      expect(run(`echo ok > ${q(join(own, 'probe.txt'))} && cat ${q(join(own, 'probe.txt'))}`)).toBe(0);
+      expect(run(`echo ok > ${q(join(work, 'probe.txt'))} && cat ${q(join(work, 'probe.txt'))}`)).toBe(0);
       expect(run(`node -e 1`)).toBe(0);
       expect(run(`node -e "require('net').connect(${port}, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"`)).not.toBe(0);
     } finally { listener.close(); rmSync(other, { recursive: true, force: true }); }

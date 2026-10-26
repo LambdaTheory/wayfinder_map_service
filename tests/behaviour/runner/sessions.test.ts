@@ -73,7 +73,7 @@ describe('session scheduling and attribution', () => {
     expect(probes.every(e => e.kind === 'command' && e.exitCode !== 0)).toBe(true);
     const profiles = record.events.flatMap(e => e.kind === 'controller' && e.action === 'isolation-check'
       ? (e.detail as { paths: string[] }).paths : []);
-    expect(new Set(profiles).size).toBe(2);
+    expect(new Set(profiles.filter(p => p.endsWith('.sb'))).size).toBe(2);
   });
 
   test('a committed write whose native receipt is lost stays unknown despite relay and author evidence', async () => {

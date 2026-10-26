@@ -1,11 +1,11 @@
 import { syntheticClientState } from './test-state.ts';
 // Real Seatbelt attacks against disposable files, processes and services; no model is started.
-import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { chmodSync, copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, expect, test } from 'vitest';
-import { prepareSession, runTurn, writeProfile } from './codex.ts';
+import { prepareSandbox, prepareSession, runTurn, writeProfile } from './codex.ts';
 import { newToken, startService } from './service.ts';
 
 const available = spawnSync('which', ['sandbox-exec']).status === 0;
@@ -19,8 +19,8 @@ function setup() {
   const a = prepareSession(scratch, 'A', newToken(), clientState.loginSource);
   const b = prepareSession(scratch, 'B', newToken(), clientState.loginSource);
   const work = join(scratch, 'work'); mkdirSync(work);
-  const control = mkdtempSync(join(root, 'control-'));
-  return { scratch, a, b, work, control };
+  const { controlDir: control, readOnlyDir } = prepareSandbox(scratch);
+  return { scratch, a, b, work, control, readOnlyDir };
 }
 
 attack('a client cannot list or read runner controls, including another session profile and a synthetic token', () => {
@@ -28,6 +28,7 @@ attack('a client cannot list or read runner controls, including another session 
   const profileA = writeProfile(control, a, work, '/bin/sh');
   const profileB = writeProfile(control, b, work, '/bin/sh');
   const secret = join(control, 'controller-token'); writeFileSync(secret, 'synthetic-only');
+  expect(shell(profileB.path, `ls -ld '${control}'`).status).toBe(0); // Metadata is intentionally public.
   expect(shell(profileB.path, `ls '${control}'`).status).not.toBe(0);
   expect(shell(profileB.path, `cat '${profileA.path}'`).status).not.toBe(0);
   expect(shell(profileB.path, `cat '${secret}'`).status).not.toBe(0);
@@ -46,7 +47,7 @@ attack('ancestor and sibling read grants are rejected before a sandbox can expos
         : writeProfile(control, b, work, '/bin/sh', { readOnlyRoots: [candidate] }); }
       catch { rejected = true; }
       // If the guard misses, this executes the attacker using the overbroad profile.
-      const safeControl = mkdtempSync(join(root, 'fallback-'));
+      const safeControl = prepareSandbox(scratch).controlDir;
       const profile = unsafe ?? writeProfile(safeControl, b, work, '/bin/sh');
       expect(shell(profile.path, `cat '${secret}'`).status, `${mode}: ${candidate}`).not.toBe(0);
       expect(rejected, `${mode}: ${candidate}`).toBe(true);
@@ -55,44 +56,47 @@ attack('ancestor and sibling read grants are rejected before a sandbox can expos
 });
 
 attack('sandboxed ps cannot recover session or Controller credentials and cannot publish as Controller', async () => {
-  const { a, work, control } = setup();
+  const { a, work, control, readOnlyDir } = setup();
   const cache = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests'); mkdirSync(cache, { recursive: true });
   const serviceDir = mkdtempSync(join(cache, 'security-'));
   const controller = { clientId: 'Security.Controller', token: newToken() };
   const service = await startService(serviceDir, controller, [{ clientId: 'Security.A', token: a.token }]);
-  const driverDir = mkdtempSync(join(root, 'driver-'));
+  const victim = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { env: { PROBE_API_KEY: 'synthetic-unrelated-api-key', PROBE_OTHER: 'synthetic-unrelated-value' }, stdio: 'ignore' });
+  const driverDir = mkdtempSync(join(readOnlyDir, 'driver-'));
   const driver = join(driverDir, 'attack.mjs');
   // Strip the platform/setuid signature so Seatbelt tests process inspection rather than exec policy.
   const ps = join(driverDir, 'ps'); copyFileSync('/bin/ps', ps); chmodSync(ps, 0o755);
   expect(spawnSync('/usr/bin/codesign', ['--force', '--sign', '-', ps]).status).toBe(0);
+  const visible = spawnSync(ps, ['eww', '-p', String(victim.pid), '-o', 'command='], { encoding: 'utf8' });
+  expect(visible.stdout.includes('synthetic-unrelated-api-key')).toBe(true);
   writeFileSync(driver, `#!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 let prompt = ''; for await (const chunk of process.stdin) prompt += chunk;
-const { servicePid, runnerPid, port, credentials } = JSON.parse(prompt);
-const listing = spawnSync(new URL('./ps', import.meta.url).pathname, ['eww', '-p', [servicePid, runnerPid, process.pid].join(','), '-o', 'command='], { encoding: 'utf8' });
-if (listing.error) throw new Error('ps spawn: ' + listing.error.code);
-if (listing.status !== 0) throw new Error('ps status: ' + listing.status + ' ' + listing.signal);
-const tokens = [...listing.stdout.matchAll(/WAYFINDER_TOKEN=([^\\s]+)/g)].map(m => m[1]);
+const { victimPid, port, credentials } = JSON.parse(prompt);
+const inspections = [['eww', '-p', String(victimPid), '-o', 'command='], ['-E', '-p', String(victimPid), '-o', 'command=']].map(args => {
+  const listing = spawnSync(new URL('./ps', import.meta.url).pathname, args, { encoding: 'utf8' });
+  return { executed: typeof listing.status === 'number', bytes: (listing.stdout ?? '').length };
+});
 const response = await fetch('http://127.0.0.1:' + port + '/mcp', { method: 'POST', headers: {
-  'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: 'Bearer ' + (tokens[0] ?? 'unavailable') },
+  'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: 'Bearer ' + 'unavailable' },
   body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'map_create', arguments: {} } }) });
 let fileReadable = false; try { readFileSync(credentials); fileReadable = true; } catch {}
-console.log(JSON.stringify({ psWorked: listing.status === 0, leaked: tokens.length, envToken: !!process.env.WAYFINDER_TOKEN, status: response.status, fileReadable }));
+console.log(JSON.stringify({ inspections, envToken: !!process.env.WAYFINDER_TOKEN, status: response.status, fileReadable }));
 `); chmodSync(driver, 0o755);
   try {
     const profile = writeProfile(control, a, work, driver, { localPorts: [service.port] });
     const result = await runTurn({ options: { model: 'fake', effort: 'low', bin: driver, sandbox: true, timeoutMs: 5000 },
       session: a, port: 1, workdir: work, profile,
-      prompt: JSON.stringify({ servicePid: service.pid, runnerPid: process.pid, port: service.port, credentials: join(serviceDir, 'credentials.json') }) });
+      prompt: JSON.stringify({ victimPid: victim.pid, port: service.port, credentials: join(serviceDir, 'credentials.json') }) });
     expect(result.exitCode, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ psWorked: true, leaked: 0, envToken: false, status: 401, fileReadable: false });
+    expect(JSON.parse(result.stdout)).toEqual({ inspections: [{ executed: true, bytes: 0 }, { executed: true, bytes: 0 }], envToken: false, status: 401, fileReadable: false });
     expect(readFileSync(join(serviceDir, 'credentials.json'), 'utf8')).not.toContain(controller.token);
-  } finally { await service.stop(); rmSync(serviceDir, { recursive: true, force: true }); }
+  } finally { victim.kill(); await service.stop(); rmSync(serviceDir, { recursive: true, force: true }); }
 }, 20_000);
 
 attack('a client can use only its own relay, whose credential overrides client-supplied Authorization', async () => {
-  const { a, work, control } = setup();
+  const { a, work, control, readOnlyDir } = setup();
   const { createServer } = await import('node:http');
   const { startRoute } = await import('./relay.ts');
   const { freePort } = await import('./service.ts');
@@ -102,7 +106,7 @@ attack('a client can use only its own relay, whose credential overrides client-s
   await new Promise<void>(resolve => target.listen(port, '127.0.0.1', resolve));
   const own = await startRoute(port, 'synthetic-A', () => undefined);
   const other = await startRoute(port, 'synthetic-B', () => undefined);
-  const driverDir = mkdtempSync(join(root, 'relay-driver-'));
+  const driverDir = mkdtempSync(join(readOnlyDir, 'relay-driver-'));
   const driver = join(driverDir, 'attack.mjs');
   writeFileSync(driver, `#!/usr/bin/env node
 let prompt = ''; for await (const chunk of process.stdin) prompt += chunk;
@@ -121,7 +125,7 @@ console.log(JSON.stringify([await probe(own), await probe(other), await probe(di
 });
 
 attack('the per-user system temp cannot carry data between sessions', () => {
-  const { a, work, control } = setup();
+  const { a, work, control, readOnlyDir } = setup();
   const systemTemp = spawnSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8' }).stdout.trim();
   const temporary = mkdtempSync(join(systemTemp, 'wf-behave-security-'));
   const marker = join(temporary, 'marker'); writeFileSync(marker, 'synthetic');
@@ -130,4 +134,69 @@ attack('the per-user system temp cannot carry data between sessions', () => {
     expect(shell(profile.path, `cat '${marker}'`).status).not.toBe(0);
     expect(shell(profile.path, `echo forged > '${marker}'`).status).not.toBe(0);
   } finally { rmSync(temporary, { recursive: true, force: true }); }
+});
+
+attack('read grants cannot expose another Attempt or a private subtree through a root or file', () => {
+  const { a, work, control, readOnlyDir } = setup();
+  const foreign = setup();
+  const cache = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests'); mkdirSync(cache, { recursive: true });
+  const cached = mkdtempSync(join(cache, 'read-grant-'));
+  const userTemp = spawnSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8' }).stdout.trim();
+  const temporary = mkdtempSync(join(userTemp, 'wf-behave-grant-'));
+  try {
+    for (const dir of [foreign.a.home, cached, temporary, foreign.control]) {
+      const marker = join(dir, 'private-marker'); writeFileSync(marker, 'synthetic-private');
+      for (const access of [{ readOnlyRoots: [dir] }, { mutableReadOnlyFiles: [marker] }]) {
+        let unsafe: ReturnType<typeof writeProfile> | undefined;
+        try { unsafe = writeProfile(control, a, work, '/bin/sh', access); } catch { /* refused before launch */ }
+        if (unsafe) expect(shell(unsafe.path, `cat '${marker}'`).status).not.toBe(0);
+        expect(unsafe).toBeUndefined();
+      }
+    }
+  } finally { rmSync(cached, { recursive: true, force: true }); rmSync(temporary, { recursive: true, force: true }); }
+});
+
+attack('placing a client executable in the scratch cannot grant its parent and expose a peer HOME', () => {
+  const { scratch, a, b, work, control } = setup();
+  const marker = join(b.home, 'private-marker'); writeFileSync(marker, 'synthetic-private');
+  const bin = join(scratch, 'client'); copyFileSync('/bin/echo', bin);
+  let unsafe: ReturnType<typeof writeProfile> | undefined;
+  try { unsafe = writeProfile(control, a, work, bin); } catch { /* refused before launch */ }
+  if (unsafe) expect(shell(unsafe.path, `cat '${marker}'`).status).not.toBe(0);
+  expect(unsafe).toBeUndefined();
+});
+
+attack('a mutable hard link cannot import another session file into the working directory', () => {
+  const { a, b, work, control } = setup();
+  const marker = join(b.home, 'private-marker'); writeFileSync(marker, 'synthetic-private');
+  const alias = join(work, 'linked-auth'); linkSync(marker, alias);
+  let unsafe: ReturnType<typeof writeProfile> | undefined;
+  try { unsafe = writeProfile(control, a, work, '/bin/sh', { mutableReadOnlyFiles: [alias] }); } catch { /* refused before launch */ }
+  if (unsafe) expect(shell(unsafe.path, `cat '${alias}'`).status).not.toBe(0);
+  expect(unsafe).toBeUndefined();
+});
+
+attack('a Node executable placed above an Attempt cannot grant that enclosing directory', () => {
+  const base = mkdtempSync(join(root, 'node-install-'));
+  const executable = join(base, 'node'); copyFileSync(process.execPath, executable); chmodSync(executable, 0o700);
+  expect(spawnSync('/usr/bin/codesign', ['--force', '--sign', '-', executable]).status).toBe(0);
+  const module = new URL('./sandbox.ts', import.meta.url).href;
+  const probe = spawnSync(executable, ['--input-type=module', '-e', `
+    import { mkdirSync, writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+    import { spawnSync } from 'node:child_process';
+    import { prepareSandbox, writeProfile } from ${JSON.stringify(module)};
+    const scratch = join(process.argv[1], 'attempt'); mkdirSync(scratch);
+    const home = join(scratch, 'session'); mkdirSync(home);
+    const work = join(scratch, 'work'); mkdirSync(work);
+    const marker = join(scratch, 'private-marker'); writeFileSync(marker, 'synthetic');
+    const { controlDir } = prepareSandbox(scratch);
+    try {
+      const profile = writeProfile(controlDir, { home }, work, '/bin/sh');
+      const attack = spawnSync('sandbox-exec', ['-f', profile.path, '/bin/cat', marker], { stdio: 'ignore' });
+      console.log(JSON.stringify({ refused: false, readable: attack.status === 0 }));
+    } catch { console.log(JSON.stringify({ refused: true })); }
+  `, base], { encoding: 'utf8', timeout: 10_000 });
+  expect(probe.status, probe.stderr).toBe(0);
+  expect(JSON.parse(probe.stdout)).toEqual({ refused: true });
 });

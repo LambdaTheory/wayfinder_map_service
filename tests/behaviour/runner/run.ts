@@ -12,8 +12,8 @@ import type { AttemptRecord, Completeness, EventRecord, Field, GivenRules, Sessi
 import { library } from '../library.ts';
 import { fixturesRoot, readiness, validateScenario } from '../scenario.ts';
 import type { ControllerAction, Scenario } from '../scenario.ts';
-import { IsolationError, clientSkills, findRollout, loginSecrets, looksRateLimited, prepareSession, prepareWorkdir, runTurn, writeProfile } from './codex.ts';
-import type { CodexOptions, CodexSession, ControlProfile } from './codex.ts';
+import { IsolationError, clientSkills, findRollout, loginSecrets, looksRateLimited, prepareClient, prepareSandbox, prepareSession, prepareWorkdir, runTurn, writeProfile } from './codex.ts';
+import type { ClientLogin, CodexOptions, CodexSession, ControlProfile } from './codex.ts';
 import { connectController } from './controller.ts';
 import { correlateReceipts, initialRules, readRollout, streamTurn } from './normalize.ts';
 import type { RolloutFacts } from './normalize.ts';
@@ -32,7 +32,7 @@ export interface BatchOptions {
   /** Where per-Attempt scratch (HOME, working directory) lives; outside the home directory, which the sandbox hides. */
   scratchRoot: string;
   /** Explicit source: approved CLI Batches use the daily login; tests must supply synthetic state. */
-  loginSource: string | null;
+  loginSource: ClientLogin | null;
   /** Root of the personal configuration to compare; tests inject a synthetic HOME. */
   personalConfigRoot: string;
 }
@@ -159,7 +159,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   if (existsSync(dir)) return { attemptId: p.attemptId, scenario: s.id, completeness: 'not-run', detail: 'Attempt output directory already exists' };
   mkdirSync(join(dir, 'raw'), { recursive: true, mode: 0o700 });
   const scratch = mkdtempSync(join(o.scratchRoot, `wf-behave-${p.attemptId}-`));
-  const controlDir = mkdtempSync(join(o.scratchRoot, 'wf-behave-control-'));
+  const { controlDir } = prepareSandbox(scratch);
   const profiles = new Map<string, ControlProfile>();
   const isolationFailures: string[] = [];
   const controller: Credential = { clientId: 'Behaviour-Controller', token: newToken() };
@@ -207,6 +207,7 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
     ctl = await connectController(service.port, controller.token, emit);
     for (const map of s.seed.maps) seedHeads[map.mapId] = await ctl.seed(map);
     const workdir = prepareWorkdir(scratch, s.seed.fixtures, fixturesRoot);
+    const nativeOptions = { ...o.codex, bin: prepareClient(controlDir, o.codex.bin) };
     if (bait) {
       secrets['bait-address'] = `http://127.0.0.1:${service.port}`;
       mkdirSync(join(workdir, '.wayfinder-agent'), { mode: 0o700 });
@@ -277,12 +278,12 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       };
       let profile = profiles.get(session.codex.home);
       if (!profile) {
-        profile = writeProfile(controlDir, session.codex, workdir, o.codex.bin, { localPorts: [session.route!.port, ...(bait ? [service!.port] : [])] });
+        profile = writeProfile(controlDir, session.codex, workdir, nativeOptions.bin, { localPorts: [session.route!.port, ...(bait ? [service!.port] : [])] });
         profiles.set(session.codex.home, profile);
       }
       const fromSeq = events.length;
       let n: ReturnType<typeof streamTurn> | undefined;
-      const r = await runTurn({ options: o.codex, session: session.codex, port: session.route!.port, workdir,
+      const r = await runTurn({ options: nativeOptions, session: session.codex, port: session.route!.port, workdir,
         prompt: turn.say, profile, onChild,
         onLaunch: () => {
           controllerEvent('isolation-check', { session: session.label, paths: Object.keys(profile.hashes), ok: true }, index);
@@ -294,6 +295,12 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
         controllerEvent('isolation-check', { session: session.label, ok: false, launched: false, reason: r.isolationFailure }, index);
         if (completeness === 'complete') { completeness = 'driver-failed'; detail = r.isolationFailure; }
         killAll(); return;
+      }
+      if (r.postIsolationFailure) {
+        isolationFailures.push(r.postIsolationFailure);
+        controllerEvent('isolation-check', { session: session.label, ok: false, phase: 'after-turn', reason: r.postIsolationFailure }, index);
+        if (completeness === 'complete') { completeness = 'driver-failed'; detail = r.postIsolationFailure; }
+        killAll();
       }
       emit({ seq: 0, at: r.endedAt, actor: 'agent', session: turn.session, turn: index, kind: 'process', exitCode: r.exitCode, signal: r.signal });
       writeRaw(`turn-${index}-${turn.session}.stdout.jsonl`, r.stdout);
@@ -464,7 +471,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
   const result = await runBatch({ batchId: values.batch, scenarios: values.scenarios.split(','), count: Number(values.count), ceiling: Number(values.ceiling),
     out: values.out ?? join(homedir(), 'Library/Application Support/Wayfinder/behaviour-runs', values.batch), scratchRoot: '/private/tmp',
-    loginSource: join(homedir(), '.codex/auth.json'), personalConfigRoot: homedir(),
+    loginSource: { contents: readFileSync(join(homedir(), '.codex/auth.json'), 'utf8') }, personalConfigRoot: homedir(),
     codex: { model: values.model, effort: values.effort, bin: values.codex, sandbox: !values['no-sandbox'], timeoutMs: Number(values['timeout-min']) * 60_000 } });
   for (const r of result.refusals) console.error(`refused: ${r}`);
   if (result.refusals.length) process.exit(1);
