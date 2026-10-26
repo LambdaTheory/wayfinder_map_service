@@ -4,7 +4,11 @@ import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 const argv = process.argv.slice(2);
 const text = readFileSync(argv[argv.indexOf('--config') + 1], 'utf8');
-const config = text.startsWith('{') ? JSON.parse(text) : Object.fromEntries(text.trim().split('\n').map(l => l.split(/:\s+/, 2)));
+const scalar = raw => raw.startsWith('"') ? JSON.parse(raw) : raw;
+const fields = Object.fromEntries(text.split('\n').filter(l => /^(tunnel|credentials-file):/.test(l)).map(l => {
+  const [key, raw] = l.split(/:\s+/, 2); return [key, scalar(raw)];
+}));
+const config = text.startsWith('{') ? JSON.parse(text) : { ...fields, ingress: [...text.matchAll(/^\s+(?:- )?service: (.+)$/gm)].map(m => ({ service: scalar(m[1]) })) };
 const statePath = join(dirname(config['credentials-file']), 'fake-connector.json');
 const info = () => ({ id: config.tunnel, name: 'opencode', conns: existsSync(statePath) ? JSON.parse(readFileSync(statePath, 'utf8')) : [] });
 if (argv.includes('info')) {

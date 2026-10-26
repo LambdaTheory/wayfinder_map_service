@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { LocalMcpService, LocalServiceConfiguration } from '../../../src/mcp-service.ts';
@@ -9,13 +9,16 @@ import { connectController } from '../runner/controller.ts';
 import type { Controller } from '../runner/controller.ts';
 import { receiptsFrom } from '../runner/normalize.ts';
 import { checkoutRoot, freePort, newToken } from '../runner/service.ts';
+import { createHttpTestClient } from '../../helpers/mcp-http-client.mjs';
+import { clientProfiles } from '../clients.ts';
+import { upgradeChecks } from '../upgrade-checks.ts';
+import { observeIsolation } from './isolation.ts';
 import type { Scenario } from '../scenario.ts';
 import { startRelay } from './relay.ts';
 import type { Exchange, Relay } from './relay.ts';
-// @ts-expect-error -- existing JS test helper
 import { writeCanaryCheckout } from '../../helpers/canary-release.mjs';
 
-type Tool = { name: string; description?: string; inputSchema: { properties?: Record<string, { description?: string }> } };
+type Tool = { name: string; description?: string | undefined; inputSchema: { properties?: Record<string, { description?: string | undefined }> | undefined } };
 export interface Capture {
   /** Native messages, in order; null means before the first call, otherwise after the named relay call. */
   messages: { text: string; afterCall: string | null; order?: number }[];
@@ -49,12 +52,13 @@ export class ChatGPTAttempt {
   private service!: LocalMcpService;
   private controller!: Controller;
   private serviceConfig!: LocalServiceConfiguration;
-  private readonly tokens = { controller: newToken(), A: newToken(), B: newToken() };
+  private readonly tokens = { controller: newToken(), observer: newToken(), A: newToken(), B: newToken() };
   private readonly seedHeads = new Map<string, number>();
   private activeTurn: number | null = null;
   private completedTurns = 0;
   private phase: GivenRules['phase'] = 'initial';
   private tools: Tool[] = [];
+  private readonly isolation: ReturnType<typeof observeIsolation>[] = [];
   private exchanges: Exchange[] = [];
   private lastMessages = '';
   private stopped = false;
@@ -63,9 +67,9 @@ export class ChatGPTAttempt {
   private constructor(options: { dir: string; batchId: string; attemptId: string; scenario: Scenario; surface: string; model: string; commit: string; version: string }, port: number) {
     this.dir = options.dir; this.scenario = options.scenario; this.servicePort = port;
     this.databasePath = join(this.dir, 'maps.sqlite');
-    this.secrets = { 'controller-token': this.tokens.controller, 'session-A-token': this.tokens.A, 'session-B-token': this.tokens.B };
+    this.secrets = { 'controller-token': this.tokens.controller, 'observer-token': this.tokens.observer, 'session-A-token': this.tokens.A, 'session-B-token': this.tokens.B };
     this.record = { schema: attemptSchema, attemptId: options.attemptId, batchId: options.batchId,
-      subject: { kind: options.scenario.id.startsWith('U-') ? 'upgrade-check' : 'scenario', id: options.scenario.id, version: options.scenario.version },
+      subject: { kind: upgradeChecks.some(u => u.id === options.scenario.id) ? 'upgrade-check' : 'scenario', id: options.scenario.id, version: options.scenario.version },
       entry: 'chatgpt', combination: { harness: 'chatgpt', requestedModel: options.model, visibleModel: unknown('not captured from UI'), effort: unknown('not exposed') },
       client: { version: unknown('not captured from UI'), surface: { known: true, value: options.surface } },
       service: { commit: options.commit, series: 'release', version: options.version }, given: [],
@@ -82,18 +86,20 @@ export class ChatGPTAttempt {
     mkdirSync(a.dir, { mode: 0o700 }); mkdirSync(join(a.dir, 'raw'), { mode: 0o700 });
     try {
       const { initializeSQLite } = await import(pathToFileURL(join(checkoutRoot, 'dist/sqlite-storage.js')).href) as { initializeSQLite(path: string): void };
+      const existedBefore = existsSync(a.databasePath);
       initializeSQLite(a.databasePath);
+      a.saveRaw('database-creation.json', { existedBefore, existsAfter: existsSync(a.databasePath) });
       const credentialsPath = join(a.dir, 'credentials.json');
-      writeFileSync(credentialsPath, JSON.stringify({ credentials: a.record.sessions.map(s => ({ clientId: s.clientId, toolsOnly: true,
-        tokenSha256: createHash('sha256').update(a.tokens[s.label as 'A' | 'B']).digest('hex') })) }), { mode: 0o600 });
+      writeFileSync(credentialsPath, JSON.stringify({ credentials: [...a.record.sessions.map(s => ({ clientId: s.clientId, toolsOnly: true,
+        tokenSha256: createHash('sha256').update(a.tokens[s.label as 'A' | 'B']).digest('hex') })),
+        { clientId: `${a.record.controller.clientId}.tools`, toolsOnly: true, tokenSha256: createHash('sha256').update(a.tokens.observer).digest('hex') }] }), { mode: 0o600 });
       a.serviceConfig = { databasePath: a.databasePath, port: a.servicePort, token: a.tokens.controller,
         actorId: 'behaviour-chatgpt', clientId: a.record.controller.clientId, credentialsPath, allowedOrigins: [] };
       await a.startService(checkoutRoot);
       for (const map of a.scenario.seed.maps) a.seedHeads.set(map.mapId, await a.controller.seed(map));
       a.saveRaw('seed.json', { seed: a.scenario.seed, maps: await a.controller.exportCatalog() });
       a.relay = await startRelay(a.servicePort, a.tokens.A, e => a.observe(e));
-      a.saveRaw('isolation.json', { databasePath: a.databasePath, servicePort: a.servicePort, relayPort: a.relay.port,
-        freshDatabase: true, attached: false, reservedPorts: [18765, 18766], compatibilityMode: 'toolsOnly' });
+      a.measureIsolation();
       a.persist();
       return a;
     } catch (error) { await a.stop('launch-failed'); throw error; }
@@ -103,15 +109,18 @@ export class ChatGPTAttempt {
     const { startLocalMcpService } = await import(pathToFileURL(join(root, 'dist/mcp-service.js')).href) as { startLocalMcpService(c: LocalServiceConfiguration): Promise<LocalMcpService> };
     this.service = await startLocalMcpService(this.serviceConfig);
     this.controller = await connectController(this.servicePort, this.tokens.controller);
-    // Controller tooling is evidence of what the service serves, never evidence that ChatGPT's model saw it.
-    const { toolsOnlyMapTools } = await import(pathToFileURL(join(root, 'dist/mcp-tools.js')).href) as { toolsOnlyMapTools: Tool[] };
-    this.tools = toolsOnlyMapTools;
+    // Observe actual service metadata with a Controller credential in the same configured mode as ChatGPT.
+    const observation = await createHttpTestClient(this.servicePort, this.tokens.observer);
+    try { this.tools = (await observation.client.listTools()).tools as Tool[]; }
+    finally { await observation.client.close(); }
     this.saveRaw(`controller-tools-${this.phase}.json`, this.tools);
-    this.record.given.push({ phase: this.phase, fromSeq: this.record.events.length, compatibilityMode: 'toolsOnly',
-      rulesSource: { kind: 'tool-parameter', tool: 'map_apply', description: this.parameterDescription() },
+    const compatibilityMode = this.parameterDescription().includes(this.controller.version) ? 'toolsOnly' : 'instructions';
+    if (this.phase === 'initial') this.record.service.version = this.controller.version;
+    this.record.given.push({ phase: this.phase, fromSeq: this.record.events.length, compatibilityMode, serviceVersion: this.controller.version,
+      rulesSource: { kind: 'unknown', reason: 'no native client tool snapshot' },
       instructions: unknown('ChatGPT does not show server instructions to its model'), toolDescriptions: unknown('client snapshot not captured'),
-      resources: 'undocumented', prompts: 'undocumented', extraContext: [] });
-    this.record.missing.push(`given.${this.phase}.toolDescriptions`, `chatgpt.versionSourceEvidence.${this.phase}`);
+      resources: clientProfiles.chatgpt.supports['resource-read'] === false ? 'unavailable' : 'undocumented', prompts: 'undocumented', extraContext: [] });
+    this.record.missing.push(`given.${this.phase}.toolDescriptions`, `given.${this.phase}.rulesSource`);
   }
 
   private parameterDescription() {
@@ -133,6 +142,7 @@ export class ChatGPTAttempt {
     }
     if (e.request.method !== 'tools/call') return;
     const params = e.request.params as { name: string; arguments?: unknown };
+    if (!params || typeof params !== 'object' || typeof params.name !== 'string') return;
     const reply = e.response as { result?: { structuredContent?: unknown; isError?: boolean } } | null;
     const turn = this.scenario.turns[this.activeTurn]!;
     const session = this.record.sessions.find(s => s.label === turn.session)!;
@@ -158,6 +168,7 @@ export class ChatGPTAttempt {
     this.record.sessions.find(s => s.label === turn.session)!.turns.push({ index, input: turn.say, startedAt: at, endedAt: '', durationMs: 0 });
     this.record.events.push({ seq: this.record.events.length, at, actor: 'script-human', session: turn.session, turn: index, kind: 'message', role: 'user', text: turn.say });
     this.saveRaw(`before-turn-${index}.json`, await this.controller.exportCatalog());
+    this.measureIsolation();
     this.relay.active = true;
     this.persist();
     return turn.say;
@@ -172,6 +183,8 @@ export class ChatGPTAttempt {
     for (const key of ['nativeId', 'clientVersion', 'visibleModel', 'effort', 'versionSourceEvidence'] as const)
       if (capture[key] !== undefined && (typeof capture[key] !== 'string' || !capture[key]!.trim())) throw new Error(`Invalid capture ${key}`);
     for (const key of ['resources', 'prompts'] as const) if (capture[key] !== undefined && !['available', 'unavailable', 'undocumented'].includes(capture[key]!)) throw new Error(`Invalid capture ${key}`);
+    if (capture.resources !== undefined && capture.resources !== 'unavailable' && clientProfiles.chatgpt.supports['resource-read'] === false)
+      throw new Error('ChatGPT profile has no Resource support; preserve contrary observations as raw evidence for a profile review');
     if (capture.otherToolsComplete !== undefined && typeof capture.otherToolsComplete !== 'boolean') throw new Error('otherToolsComplete must be boolean');
     if (capture.otherToolCalls !== undefined && (!Array.isArray(capture.otherToolCalls) || capture.otherToolCalls.some(c => !c
       || typeof c.callId !== 'string' || typeof c.server !== 'string' || /wayfinder/i.test(c.server) || typeof c.tool !== 'string'
@@ -212,9 +225,12 @@ export class ChatGPTAttempt {
     if (capture.visibleModel) this.record.combination.visibleModel = { known: true, value: capture.visibleModel };
     if (capture.effort) this.record.combination.effort = { known: true, value: capture.effort };
     const given = this.record.given.at(-1)!;
-    if (capture.toolsShown) given.toolDescriptions = { known: true, value: Object.fromEntries(capture.toolsShown.map(t => [t.name, t.description ?? ''])) };
+    if (capture.toolsShown) {
+      given.toolDescriptions = { known: true, value: Object.fromEntries(capture.toolsShown.map(t => [t.name, t.description ?? ''])) };
+      given.rulesSource = { kind: 'tool-parameter', tool: 'map_apply', description: capture.toolsShown.find(t => t.name === 'map_apply')!.inputSchema.properties!.version!.description! };
+    }
     this.record.missing = this.record.missing.filter(m => !(capture.toolsShown && m === `given.${this.phase}.toolDescriptions`)
-      && !(capture.versionSourceEvidence && m === `chatgpt.versionSourceEvidence.${this.phase}`));
+      && !(capture.toolsShown && m === `given.${this.phase}.rulesSource`));
     if (capture.resources) given.resources = capture.resources;
     if (capture.prompts) given.prompts = capture.prompts;
     this.lastMessages = capture.messages.map(m => m.text).join('\n');
@@ -227,6 +243,7 @@ export class ChatGPTAttempt {
     if (this.completedTurns === this.scenario.turns.length && !this.record.missing.some(m => /^turn-\d+\.otherToolCalls$/.test(m)))
       this.record.missing = this.record.missing.filter(m => m !== 'chatgpt.otherToolCalls');
     this.saveRaw(`after-turn-${index}.json`, await this.controller.exportCatalog());
+    this.measureIsolation();
     this.persist();
   }
 
@@ -240,7 +257,8 @@ export class ChatGPTAttempt {
     this.phase = 'after-restart';
     this.record.events.push({ seq: this.record.events.length, at: now(), actor: 'controller', session: null, turn: null, kind: 'controller', action: 'restart-canary' });
     await this.startService(target);
-    if (this.scenario.id === 'U-chatgpt-new-chat') this.relay.token = this.tokens.B;
+    if (this.upgradeRecovery === 'new-chat') this.relay.token = this.tokens.B;
+    this.measureIsolation();
     this.upgraded = true;
     this.persist();
   }
@@ -249,10 +267,10 @@ export class ChatGPTAttempt {
     if (!['refresh-tools', 'new-chat', 'plugin-mentioned'].includes(action)) throw new Error('Unknown operator action');
     if (this.activeTurn !== null) throw new Error('Record preparation actions before begin');
     this.record.events.push({ seq: this.record.events.length, at: now(), actor: 'controller', session: null, turn: null, kind: 'controller', action });
-    if (action === 'new-chat' && this.upgraded && this.scenario.id === 'U-chatgpt-new-chat') {
+    if (action === 'new-chat' && this.upgraded && this.upgradeRecovery === 'new-chat') {
       this.phase = 'after-refresh';
       this.record.given.push({ ...this.record.given.at(-1)!, phase: this.phase, fromSeq: this.record.events.length });
-      this.record.missing.push(`given.${this.phase}.toolDescriptions`, `chatgpt.versionSourceEvidence.${this.phase}`);
+      this.record.missing.push(`given.${this.phase}.toolDescriptions`, `given.${this.phase}.rulesSource`);
     }
     this.persist();
   }
@@ -264,6 +282,7 @@ export class ChatGPTAttempt {
     const allTurns = this.completedTurns === this.scenario.turns.length;
     this.record.run.completeness = completeness === 'complete' && !allTurns ? 'cancelled' : completeness ?? (allTurns ? 'complete' : 'cancelled');
     try {
+      if (this.relay) this.measureIsolation();
       await this.relay?.stop();
       this.record.maps = (await this.controller.exportCatalog()).map(m => ({ ...m, seedHeadRevision: this.seedHeads.get(m.mapId) ?? null }));
     } catch { this.record.missing.push('maps'); }
@@ -271,11 +290,30 @@ export class ChatGPTAttempt {
       await this.controller?.close().catch(() => undefined);
       try { await this.service?.stop(); }
       finally {
-        rmSync(join(this.dir, 'credentials.json'), { force: true });
-        this.record.run.endedAt = now();
-        this.persist();
+        try {
+          if (existsSync(`${this.databasePath}.calls.jsonl`)) this.saveRaw('service-calls.json', readFileSync(`${this.databasePath}.calls.jsonl`, 'utf8'));
+        } finally {
+          rmSync(join(this.dir, 'credentials.json'), { force: true });
+          this.record.run.endedAt = now();
+          this.persist();
+        }
       }
     }
+  }
+
+  private get upgradeRecovery() { return upgradeChecks.find(u => u.id === this.scenario.id)?.chatgpt?.recovery; }
+
+  failure(action: string, detail: string) {
+    this.relay.active = false;
+    this.record.run.detail = detail;
+    this.record.events.push({ seq: this.record.events.length, at: now(), actor: 'controller', session: null, turn: null, kind: 'controller', action, detail });
+    this.persist();
+  }
+
+  private measureIsolation() {
+    const observed = observeIsolation(this.databasePath, this.servicePort, this.relay.port);
+    this.isolation.push(observed);
+    this.saveRaw('isolation.json', { ...observed, observations: this.isolation });
   }
 
   private saveRaw(name: string, value: unknown) {

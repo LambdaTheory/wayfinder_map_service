@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { reservedPorts } from '../runner/service.ts';
 
 const exec = promisify(execFile);
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -54,7 +55,7 @@ export function connectorsFrom(text: string, id: string): string[] {
   const ids: string[] = [];
   for (const c of info.conns ?? []) {
     if (typeof c.id !== 'string' || !uuid.test(c.id) || !Array.isArray(c.conns)) throw new Error('Unknown connector record');
-    if (c.conns.length) ids.push(c.id);
+    ids.push(c.id); // Registered but currently disconnected clients still occupy the tunnel.
   }
   return ids;
 }
@@ -64,6 +65,7 @@ export interface TunnelLease {
   start(relayPort: number): Promise<void>;
   check(): Promise<void>;
   stop(): Promise<void>;
+  stopSync(): void;
 }
 
 export const fakeExecutable = fileURLToPath(new URL('./fake-cloudflared.mjs', import.meta.url));
@@ -82,13 +84,32 @@ export async function acquireTunnel(options: { root: string; dir: string; config
   const localCheck = options.fake ? async () => {} : assertNoLocalConnector;
   const lock = join(options.root, `opencode-${config.id}.lock`);
   // No stale-lock stealing: a lost owner must be investigated before another connector starts.
-  mkdirSync(lock, { mode: 0o700 });
-  writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, run: options.dir }), { mode: 0o600 });
+  try { mkdirSync(lock, { mode: 0o700 }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`Tunnel lease exists: inspect ${join(lock, 'owner.json')}; verify its owner and connector PIDs, stop only a confirmed orphan, then remove that lease and its recorded temporary config before retrying`);
+    throw error;
+  }
   const configPath = join(options.dir, 'tunnel.yml');
   let child: ChildProcess | undefined;
   let exited: Promise<void> | undefined;
   let connectorId: string | undefined;
   let stopped = false;
+  const cleanupFiles = () => { rmSync(configPath, { force: true }); rmSync(lock, { recursive: true, force: true }); };
+  const stopSync = () => {
+    // process.exit cannot await the normal cleanup. Give only our child a short grace period, then force it down.
+    try {
+      if (child?.pid && child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGTERM');
+        const deadline = Date.now() + 500;
+        while (Date.now() < deadline) {
+          try { process.kill(child.pid, 0); } catch { break; }
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+        }
+        try { child.kill('SIGKILL'); } catch { /* already exited */ }
+      }
+    } finally { cleanupFiles(); }
+  };
+  process.on('exit', stopSync);
   const remote = async () => {
     try {
       const { stdout } = await exec(executable, ['tunnel', '--config', options.configPath, 'info', '--output', 'json', config.id],
@@ -96,21 +117,34 @@ export async function acquireTunnel(options: { root: string; dir: string; config
       return connectorsFrom(stdout, config.id);
     } catch { throw new Error('Cannot confirm exclusive opencode ownership with cloudflared tunnel info'); }
   };
-  const stop = async () => {
+  let stopping: Promise<void> | undefined;
+  const stop = async () => stopping ??= (async () => {
     if (stopped) return;
     stopped = true;
     if (child && child.exitCode === null && child.signalCode === null && child.pid) {
       child.kill('SIGTERM');
-      const timer = setTimeout(() => child?.kill('SIGKILL'), 5000);
+      const timer = setTimeout(() => child?.kill('SIGKILL'), 10_000);
       await exited;
       clearTimeout(timer);
     }
-    rmSync(configPath, { force: true });
-    rmSync(lock, { recursive: true, force: true });
-  };
+    try {
+      // Avoid starting the next Attempt while Cloudflare still lists this retired connector.
+      if (connectorId) {
+        const deadline = Date.now() + 5000;
+        while ((await remote()).includes(connectorId)) {
+          if (Date.now() >= deadline) throw new Error('Stopped connector is still registered; inspect tunnel info before retrying');
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+    } finally {
+      cleanupFiles();
+      process.removeListener('exit', stopSync);
+    }
+  })();
   try {
+    writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, run: options.dir, configPath }), { mode: 0o600 });
     await localCheck();
-    if ((await remote()).length) throw new Error('opencode already has a connector; refusing to split ChatGPT traffic');
+    if ((await remote()).length) throw new Error('opencode already has a registered connector; inspect cloudflared tunnel info and the lease owner before restarting any route, stop only a confirmed orphan or ask the active operator to stop, then retry');
   } catch (error) { await stop(); throw error; }
   const check = async () => {
     if (stopped || !child?.pid || child.exitCode !== null || child.signalCode !== null) throw new Error('Tunnel is not running');
@@ -121,15 +155,15 @@ export async function acquireTunnel(options: { root: string; dir: string; config
   return { config,
     async start(relayPort) {
       if (stopped || child) throw new Error('Tunnel lease is not startable');
-      if ([18765, 18766].includes(relayPort)) throw new Error('Everyday ports are forbidden');
+      if (reservedPorts.includes(relayPort)) throw new Error('Everyday ports are forbidden');
       await localCheck();
       if ((await remote()).length) throw new Error('A connector appeared before startup');
       // A fresh config redirects only this hostname; the original config, credentials and DNS stay unchanged.
-      writeFileSync(configPath, JSON.stringify({ tunnel: config.id, 'credentials-file': config.credentialsFile,
-        ingress: [{ hostname: options.hostname, service: `http://127.0.0.1:${relayPort}` }, { service: 'http_status:404' }] }), { mode: 0o600 });
+      writeFileSync(configPath, `tunnel: ${JSON.stringify(config.id)}\ncredentials-file: ${JSON.stringify(config.credentialsFile)}\ningress:\n  - hostname: ${JSON.stringify(options.hostname)}\n    service: "http://127.0.0.1:${relayPort}"\n  - service: "http_status:404"\n`, { mode: 0o600 });
       child = spawn(executable, ['tunnel', '--config', configPath, '--no-autoupdate', 'run', config.id],
-        { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+        { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
       exited = new Promise(resolve => { child!.once('exit', () => resolve()); child!.once('error', () => resolve()); });
+      writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, connectorPid: child.pid ?? null, run: options.dir, configPath }), { mode: 0o600 });
       await new Promise<void>((resolve, reject) => {
         let output = '';
         const timer = setTimeout(() => reject(new Error('Tunnel registration timed out')), 30_000);
@@ -142,8 +176,15 @@ export async function acquireTunnel(options: { root: string; dir: string; config
         child!.once('error', () => { clearTimeout(timer); reject(new Error('Cannot start cloudflared')); });
         void exited!.then(() => { clearTimeout(timer); reject(new Error('Tunnel exited')); });
       });
-      await check();
+      // Registration can precede the control-plane inventory. Only our own/empty state may be retried.
+      const deadline = Date.now() + 5000;
+      while (true) {
+        const ids = await remote();
+        if (ids.length) { await check(); break; }
+        if (Date.now() >= deadline) throw new Error('Registered connector never became visible in the tunnel inventory');
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
     },
-    check, stop,
+    check, stop, stopSync,
   };
 }

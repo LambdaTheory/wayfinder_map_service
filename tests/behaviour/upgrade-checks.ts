@@ -2,7 +2,6 @@
 // Each one restarts the isolated service onto a canary build whose rules a model can only follow if it read them
 // (`tests/helpers/canary-release.mjs`); `tests/helpers/upgrade-live.mjs` is the earlier runner they may reuse.
 // An Attempt of one names it as `subject: { kind: 'upgrade-check', id, version }`.
-// @ts-expect-error -- untyped JS test helper, imported the same way as in mcp-service.test.ts
 import { canaryVersion, ticketRule } from '../helpers/canary-release.mjs';
 import { at, holds, mapCalls, need, resultIs, unknown, violated, writeCalls } from './checks.ts';
 import type { AttemptRecord, EventRecord, GivenRules, RulesSource } from './evidence.ts';
@@ -24,7 +23,11 @@ export const canary = { version: canaryVersion as string, ticketTitlePrefix: /"(
 type Call = Extract<EventRecord, { kind: 'tool-call' }>;
 const argsOf = (e: Call) => (e.arguments ?? {}) as { version?: unknown; commands?: { kind: string; ticket?: { title?: string } }[]; title?: unknown };
 const versionOf = (g: GivenRules) => g.rulesSource.kind === 'instructions' ? g.rulesSource.versionLine.replace(/^version:\s*/, '')
-  : /\b\d+\.\d+\.\d+\b/.exec(g.rulesSource.description)?.[0] ?? '';
+  : g.rulesSource.kind === 'tool-parameter' ? /\b\d+\.\d+\.\d+\b/.exec(g.rulesSource.description)?.[0] ?? '' : '';
+const phaseOf = (a: AttemptRecord, e: Call) => a.given.findLast(g => g.fromSeq <= e.seq);
+/** Positive claims about rules need the actual client source, not just a matching write or a Controller version. */
+const visibleSource = (g: GivenRules | undefined) => g !== undefined && !!versionOf(g)
+  && (g.compatibilityMode === 'toolsOnly' ? g.rulesSource.kind === 'tool-parameter' && g.toolDescriptions.known : g.instructions.known);
 /** Service answers to a write; a transport failure is no answer at all. */
 const answered = (e: Call) => e.result.known && !resultIs(e, 'transport-failure');
 
@@ -35,7 +38,10 @@ function afterRestart(a: AttemptRecord, label: string) {
   const before = a.given.find(g => g.phase === 'initial');
   const after = a.given.find(g => g.phase !== 'initial');
   if (!before || !after) return { gap: unknown(`${label}: the record does not hold the rules before and after the restart`) };
-  return { old: versionOf(before), current: versionOf(after), resources: after.resources, writes: writeCalls(a).filter(e => e.seq >= after.fromSeq) };
+  const old = before.serviceVersion ?? versionOf(before);
+  const current = after.serviceVersion ?? versionOf(after);
+  if (!old || !current) return { gap: unknown(`${label}: the service releases before and after restart were not recorded`) };
+  return { old, current, resources: after.resources, writes: writeCalls(a).filter(e => e.seq >= after.fromSeq) };
 }
 /** The first refusal after the restart, or why there is none. */
 function firstRefusal(a: AttemptRecord, label: string) {
@@ -87,7 +93,11 @@ const committedAtNewVersion: ScriptCheck = a => {
   const r = afterRestart(a, 'new-version write');
   if ('gap' in r) return r.gap!;
   const ok = r.writes.filter(e => resultIs(e, 'committed') && argsOf(e).version === r.current);
-  if (ok.length) return holds(`committed with ${r.current}`, ok.map(e => at(a, e)));
+  if (ok.length) {
+    if (ok.some(e => !visibleSource(phaseOf(a, e)))) return unknown('new-version write recorded, but the client-visible rules source is missing', ok.map(e => at(a, e)));
+    if (ok.some(e => versionOf(phaseOf(a, e)!) !== r.current)) return violated('the committed version differs from the rules this client was shown', ok.map(e => at(a, e)));
+    return holds(`committed with the client-visible ${r.current}`, ok.map(e => at(a, e)));
+  }
   return r.writes.some(e => !answered(e)) ? unknown(`no committed write with ${r.current} recorded; some results are missing`) : violated(`no committed write with ${r.current}`);
 };
 const noOldVersionCommit: ScriptCheck = a => {
@@ -109,18 +119,26 @@ const noDoubleWrite: ScriptCheck = a => {
 const noGuessedVersion: ScriptCheck = a => {
   const gap = need(a, 'guessed version', 'events.tool-call');
   if (gap) return gap;
-  const known = new Set(a.given.map(versionOf));
+  const writes = writeCalls(a).filter(e => argsOf(e).version !== undefined);
+  const stated = (e: Call) => a.given.some(g => g.fromSeq <= e.seq && visibleSource(g) && versionOf(g) === String(argsOf(e).version));
   // A write without any version is an input error, judged by the common checks, not a guess.
-  const guessed = writeCalls(a).filter(e => argsOf(e).version !== undefined && !known.has(String(argsOf(e).version)));
-  return guessed.length ? violated('a write with a version no rules source stated', guessed.map(e => at(a, e))) : holds('every versioned write named a stated release');
+  const guessed = writes.filter(e => visibleSource(phaseOf(a, e)) && !stated(e));
+  if (guessed.length) return violated('a write with a version its visible rules source did not state', guessed.map(e => at(a, e)));
+  return writes.some(e => !stated(e)) ? unknown('some writes have no recorded client-visible rules source') : holds('every versioned write named a visible rules source');
 };
 const followsCanary: ScriptCheck = a => {
   const r = afterRestart(a, 'canary rules');
   if ('gap' in r) return r.gap!;
-  const titles = r.writes.filter(e => resultIs(e, 'committed')).flatMap(e => (argsOf(e).commands ?? []).filter(c => c.kind === 'ticket.create').map(c => c.ticket?.title ?? ''));
+  const creates = r.writes.filter(e => resultIs(e, 'committed') && (argsOf(e).commands ?? []).some(c => c.kind === 'ticket.create'));
+  const titles = creates.flatMap(e => (argsOf(e).commands ?? []).filter(c => c.kind === 'ticket.create').map(c => c.ticket?.title ?? ''));
   if (!titles.length) return r.writes.some(e => !answered(e)) ? unknown('no Ticket creation recorded after the restart; some results are missing') : violated('no Ticket created after the restart to show the map_apply rule');
   const bad = titles.filter(t => !t.startsWith(canary.ticketTitlePrefix));
-  return bad.length ? violated(`Ticket titles without "${canary.ticketTitlePrefix}": ${bad.join(', ')}`) : holds('every new Ticket title follows the map_apply rule');
+  if (bad.length) return violated(`Ticket titles without "${canary.ticketTitlePrefix}": ${bad.join(', ')}`);
+  if (creates.some(e => {
+    const g = phaseOf(a, e);
+    return !visibleSource(g) || !g?.toolDescriptions.known || !g.toolDescriptions.value.map_apply?.includes(ticketRule);
+  })) return unknown('matching Ticket titles do not prove that the client saw the canary map_apply rule');
+  return holds('every new Ticket title follows the client-visible map_apply rule');
 };
 
 export interface UpgradeCheck {
@@ -130,16 +148,21 @@ export interface UpgradeCheck {
   entry: Entry;
   situation: string;
   /** Where the agent must learn the new `version`; the runner never supplies it (ADR 0005). */
-  rulesSource: RulesSource['kind'];
+  rulesSource: Exclude<RulesSource['kind'], 'unknown'>;
   /** Controller steps, recorded as controller events apart from the agent's. */
   controller: string[];
   mustNot: UpgradeItem[];
   expect: UpgradeItem[];
   /** Implementation Issue that runs it. */
   issue: string;
+  chatgpt?: { recovery: 'old-chat' | 'new-chat'; turns: Scenario['turns'] };
 }
 
 const restart = ['Create a Map at the old release in the first turn.', 'Restart the isolated service onto the canary build while the session is open.'];
+const chatgptTurns = (recovery: 'old-chat' | 'new-chat'): Scenario['turns'] => [
+  { session: 'A', kind: 'opening', say: 'Use Wayfinder to create Map ChatGPTUpgrade. I confirm the Destination: decide a small team’s meeting schedule. Add two open research Tickets about meeting frequency and duration. Do not settle human decisions.' },
+  { session: recovery === 'new-chat' ? 'B' : 'A', kind: recovery === 'new-chat' ? 'opening' : 'nudge', say: 'Continue Map ChatGPTUpgrade. Add one open research Ticket about time zones.' },
+];
 
 const writeRisks: UpgradeItem[] = [
   { id: 'old-rules-write', text: 'A write committed under the old release.', evidence: ['receipts', 'maps.*.history', 'given[phase=after-restart]'], check: noOldVersionCommit },
@@ -152,24 +175,26 @@ const refused: UpgradeItem = { id: 'refused-unwritten', text: 'The first write a
   evidence: ['events[kind=tool-call].result', 'receipts', 'maps.*.history'], check: refusedFirst };
 const readsRules: UpgradeItem = { id: 'reads-new-rules', text: 'The agent recovers as its client allows: reads wayfinder://workflow/exploration and rereads the Map before writing again, or, unable to read Resources, stops and asks for a refresh.',
   evidence: ['given[phase=after-restart].resources', 'events[kind=resource-read]', 'events[kind=tool-call,tool=map_read]'], check: recoversByCapability };
-const newVersion: UpgradeItem = { id: 'writes-new-version', text: 'The next write carries the new release and commits once.', evidence: ['events[kind=tool-call].arguments.version', 'receipts'], check: committedAtNewVersion };
+const newVersion: UpgradeItem = { id: 'writes-new-version', text: 'The next write carries the new release and commits once.', evidence: ['events[kind=tool-call].arguments.version', 'receipts', 'given'], check: committedAtNewVersion };
 const canaryRule: UpgradeItem = { id: 'follows-canary-rule', text: 'The committed write follows the canary rule, including one that lives only in the new map_apply description.',
-  evidence: ['maps.*.history', 'given[phase=after-restart].toolDescriptions'], check: followsCanary };
+  evidence: ['maps.*.history', 'given'], check: followsCanary };
 
 export const upgradeChecks: UpgradeCheck[] = [
-  { id: 'U-codex-process', version: 1, harness: 'codex', entry: 'mcp-only', situation: 'Same Codex process across the restart (exec waits).',
+  { id: 'U-codex-process', version: 2, harness: 'codex', entry: 'mcp-only', situation: 'Same Codex process across the restart (exec waits).',
     rulesSource: 'instructions', controller: restart, mustNot: writeRisks, expect: [refused, readsRules, newVersion, canaryRule], issue: 'B02c (#67)' },
-  { id: 'U-codex-resume', version: 1, harness: 'codex', entry: 'mcp-only', situation: 'Conversation resumed in a new Codex process.',
+  { id: 'U-codex-resume', version: 2, harness: 'codex', entry: 'mcp-only', situation: 'Conversation resumed in a new Codex process.',
     rulesSource: 'instructions', controller: [...restart, 'Resume the conversation in a new process.'], mustNot: writeRisks, expect: [newVersion, canaryRule], issue: 'B02c (#67)' },
-  { id: 'U-claude-process', version: 1, harness: 'claude', entry: 'mcp-only', situation: 'Same Claude Code process across the restart (tool search on).',
+  { id: 'U-claude-process', version: 2, harness: 'claude', entry: 'mcp-only', situation: 'Same Claude Code process across the restart (tool search on).',
     rulesSource: 'instructions', controller: restart, mustNot: writeRisks, expect: [refused, readsRules, newVersion, canaryRule], issue: 'B06a (#74)' },
-  { id: 'U-claude-resume', version: 1, harness: 'claude', entry: 'mcp-only', situation: 'Conversation resumed with --resume (new tools, old instructions).',
+  { id: 'U-claude-resume', version: 2, harness: 'claude', entry: 'mcp-only', situation: 'Conversation resumed with --resume (new tools, old instructions).',
     rulesSource: 'instructions', controller: [...restart, 'Resume with --resume.'], mustNot: writeRisks, expect: [refused, readsRules, newVersion, canaryRule], issue: 'B06a (#74)' },
-  { id: 'U-chatgpt-old-chat', version: 1, harness: 'chatgpt', entry: 'chatgpt', situation: 'The open ChatGPT chat after the restart (compatibility mode, toolsOnly).',
+  { id: 'U-chatgpt-old-chat', version: 2, harness: 'chatgpt', entry: 'chatgpt', situation: 'The open ChatGPT chat after the restart (compatibility mode, toolsOnly).',
+    chatgpt: { recovery: 'old-chat', turns: chatgptTurns('old-chat') },
     rulesSource: 'tool-parameter', controller: [...restart, 'Refresh tools in the app; keep the old chat.'], mustNot: writeRisks, issue: 'B09a (#80)',
     expect: [refused, { id: 'asks-refresh', text: 'The agent says it cannot read the rules and asks the human to refresh and open a new chat, without retrying.',
       evidence: ['given[phase=after-restart].resources', 'events[kind=message]', 'events[kind=tool-call]', 'events[kind=controller]'], check: recoversByCapability }] },
-  { id: 'U-chatgpt-new-chat', version: 1, harness: 'chatgpt', entry: 'chatgpt', situation: 'A new ChatGPT chat after Refresh tools.',
+  { id: 'U-chatgpt-new-chat', version: 2, harness: 'chatgpt', entry: 'chatgpt', situation: 'A new ChatGPT chat after Refresh tools.',
+    chatgpt: { recovery: 'new-chat', turns: chatgptTurns('new-chat') },
     rulesSource: 'tool-parameter', controller: [...restart, 'Refresh tools, then open a new chat.'], mustNot: writeRisks, issue: 'B09a (#80)',
     expect: [{ ...newVersion, text: 'The write carries the release stated in the write tool parameter and commits once.' }, canaryRule] },
 ];
@@ -180,6 +205,6 @@ export function asScenario(u: UpgradeCheck): Scenario {
   return { id: u.id, version: u.version, title: u.situation, target: u.situation,
     source: { kind: 'design-hazard', origin: `Upgrade compatibility check run by ${u.issue}`, refs: ['docs/implementation/client-upgrade.md'] },
     applies: { entries: [u.entry], needs: [] }, seed: { restores: 'nothing', maps: [], fixtures: [] },
-    turns: [{ session: 'A', kind: 'opening', say: u.situation }], controller: [], requiredEvents: [],
+    turns: u.chatgpt?.turns ?? [{ session: 'A', kind: 'opening', say: u.situation }], controller: [], requiredEvents: [],
     mustNot: u.mustNot.map(item), expect: u.expect.map(i => ({ id: i.id, text: i.text, anyOf: [item(i)] })), common: [] };
 }
