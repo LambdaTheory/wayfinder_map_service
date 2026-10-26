@@ -125,7 +125,8 @@ function cellDetail(c: ReportCell): string {
   const attempts = c.verdict.attempts.map(a => {
     const items = [...a.required, ...a.mustNot, ...a.expect.flatMap(g => g.items)].filter(i => i.status !== 'holds' && i.evidence.length)
       .map(i => `${i.id} (${i.status}) at ${i.evidence.slice(0, 3).join(', ')}`);
-    return `  - ${a.attemptId}: ${a.outcome}; ${a.reasons.join('; ') || 'no open items'}${a.gaps.length ? `; gaps: ${a.gaps.join('; ')}` : ''}${a.raw ? `; raw \`${a.raw}\`` : ''}${items.length ? `; ${items.join('; ')}` : ''}`;
+    const reviews = (a.modelReviews ?? []).map(r => `review \`${r.path}\`${r.pending.length ? ` (${r.pending.map(p => `${p.itemId}: ${p.reason}; next ${p.next}`).join('; ')})` : ''}`);
+    return `  - ${a.attemptId}: ${a.outcome}; ${a.reasons.join('; ') || 'no open items'}${a.gaps.length ? `; gaps: ${a.gaps.join('; ')}` : ''}${a.raw ? `; raw \`${a.raw}\`` : ''}${items.length ? `; ${items.join('; ')}` : ''}${reviews.length ? `; ${reviews.join('; ')}` : ''}`;
   });
   return [head, ...attempts].join('\n');
 }
@@ -137,8 +138,12 @@ export function renderMarkdown(r: Report): string {
     || c.verdict.attempts.some(a => a.gaps.length));
   const failing = r.cells.filter(c => c.verdict.outcome === 'fail' && c.comparison?.status !== 'regression');
   const section = (title: string, cells: ReportCell[]) => [`## ${title}`, '', cells.length ? cells.map(cellDetail).join('\n') : 'None.', ''];
+  const quality = r.cells.flatMap(c => c.verdict.attempts.flatMap(a => a.quality.map(i =>
+    `- ${c.key.entry} · ${a.attemptId} · ${i.id}: ${i.status}; ${i.reason}${i.evidence.length ? `; at ${i.evidence.join(', ')}` : ''}`)));
   return ['# Behaviour report', '', `Batches: ${r.batches.join(', ')}. Counts are pass/fail/incomplete/insufficient evidence; a pass over a finite number of Attempts says only that those samples passed.`, '',
     ...section('New regressions', regressions), ...section('Flaky', flaky), ...section('Uncovered, undecided or retry due', uncovered), ...section('Failing', failing),
+    ...section('Model review records', r.cells.filter(c => c.verdict.attempts.some(a => a.modelReviews?.length))),
+    '## Conversation quality (does not fail a Scenario)', '', ...(quality.length ? quality : ['None.']), '',
     '## All cells', '', ...[...new Set(r.cells.map(c => c.key.entry))].sort().flatMap(entry => [
       `### ${entry}`, '', '| Scenario | Entry | Combination | Release | Outcome | Attempts | Not run | Against baseline |', '| --- | --- | --- | --- | --- | --- | --- | --- |',
       ...r.cells.filter(c => c.key.entry === entry).sort((a, b) => cellId(a.key).localeCompare(cellId(b.key))).map(tableRow), '',

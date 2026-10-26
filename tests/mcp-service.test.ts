@@ -9,7 +9,6 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { createHttpTestClient } from './helpers/mcp-http-client.mjs';
 import { versioned } from './helpers/write-version.js';
-// @ts-expect-error the canary helper is plain ESM outside the TypeScript source graph
 import { canaryVersion, replyRule, ticketRule, writeCanaryCheckout } from './helpers/canary-release.mjs';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Ajv } from 'ajv';
@@ -58,8 +57,8 @@ function storageFixture(faults: Parameters<typeof sqliteLifecycleForTests>[0] = 
 function configuration(databasePath: string, port: number): LocalServiceConfiguration {
   return { databasePath, port, token, ...author, allowedOrigins: ['http://localhost:4321'] };
 }
-async function fixture(storage?: SQLiteStorage) {
-  const f = storage ? { path: 'unused-test-only', storage } : storageFixture();
+async function fixture(override?: { storage: SQLiteStorage; path: string }) {
+  const f = override ?? storageFixture();
   const port = await freePort(); const config = configuration(f.path, port);
   const service = await serveLocalMcp(f.storage, config); cleanups.push(() => service.stop());
   return { ...f, port, config, service };
@@ -337,7 +336,7 @@ test('P06/P08: four global active calls, fifth explicitly refused; graceful stop
   const storage: SQLiteStorage = { ...f.storage, adapter: { ...f.storage.adapter,
     async commit(change) { if (++held === 4) entered.resolve(); await release.promise; return f.storage.adapter.commit(change); },
   }, close() { closed = true; f.storage.close(); } };
-  const host = await fixture(storage); const a = await connect(host.port); const b = await connect(host.port);
+  const host = await fixture({ storage, path: f.path }); const a = await connect(host.port); const b = await connect(host.port);
   const calls = [a, b, a, b].map((connection, i) => connection.create(`Concurrent.${i}`));
   const outcomes = Promise.allSettled(calls); // Attach before intentionally closing a client.
   await entered.promise;
@@ -353,6 +352,10 @@ test('P06/P08: four global active calls, fifth explicitly refused; graceful stop
   release.resolve();
   await outcomes; await stopping;
   expect(closed).toBe(true); expect(stopped).toBe(true);
+  const observations = readFileSync(`${f.path}.calls.jsonl`, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  expect(observations.filter(record => record.tool === 'map_create').map(record => record.result).sort())
+    .toEqual(['committed', 'committed', 'committed', 'committed', 'service-failure']);
+  expect(host.service.metadataStatus().missingObservations).toBe(0);
   const reopened = sqliteLifecycleForTests().open(f.path); cleanups.push(() => reopened.close());
   expect(reopened.listMaps()).toMatchObject({ maps: [0, 1, 2, 3].map(i => ({ mapId: `Concurrent.${i}`, currentRevision: 1 })) });
   expect(reopened.listMaps()).toMatchObject({ nextAfterMapId: null });
@@ -399,7 +402,7 @@ test('P09/D07/D12: HTTP busy is non-publication, failed cleanup stops all storag
   let failing = false;
   const f = storageFixture({ beforePublication() { if (failing) throw new Error(`${token} private/SQL/decision/evidence`); },
     beforeRollback() { if (failing) throw new Error(`${token} cleanup`); } });
-  const host = await fixture(f.storage); const c = await connect(host.port); await seed(c); const before = await observe(c);
+  const host = await fixture(f); const c = await connect(host.port); await seed(c); const before = await observe(c);
   const lock = new DatabaseSync(f.path);
   try {
     lock.exec('BEGIN IMMEDIATE');
@@ -416,7 +419,7 @@ test('P09/D07/D12: HTTP busy is non-publication, failed cleanup stops all storag
   }
   await c.client.close(); await host.service.stop();
   const storage = sqliteLifecycleForTests().open(f.path); cleanups.push(() => storage.close());
-  const resumed = await fixture(storage); const next = await connect(resumed.port);
+  const resumed = await fixture({ storage, path: f.path }); const next = await connect(resumed.port);
   expect(await observe(next)).toEqual(before); // All earlier history, absent proposed next, unrelated Map and catalog.
   expect((await next.apply(update, 3)).structuredContent).toMatchObject({ kind: 'committed', revision: { revision: 4 } });
 });
@@ -449,7 +452,8 @@ test('D11: HTTP receipt lost after durable COMMIT with service still alive; expl
       return result;
     },
   } };
-  const host = await fixture(wrapped); const c = await connect(host.port); await seed(c); const before = await observe(c);
+  const host = await fixture({ storage: wrapped, path: f.path }); const c = await connect(host.port); await seed(c); const before = await observe(c);
+  const observationStart = host.service.metadataStatus().observations;
   armed = true;
   const abort = new AbortController();
   const lost = fetch(`http://127.0.0.1:${host.port}/mcp`, { method: 'POST', signal: abort.signal, headers: {
@@ -457,6 +461,9 @@ test('D11: HTTP receipt lost after durable COMMIT with service still alive; expl
   }, body: message('map_apply', { mapId: 'Acceptance.Alpha', expectedRevision: 3, commands: update }) }).then(() => 'unexpected receipt', () => 'unknown');
   await committed.promise; abort.abort(); expect(await lost).toBe('unknown'); release.resolve(); await completed.promise;
   const recovered = await observe(c);
+  const observations = readFileSync(`${f.path}.calls.jsonl`, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  expect(observations.filter(record => record.sequence > observationStart && record.tool === 'map_apply'))
+    .toMatchObject([{ result: 'committed', mcpSessionId: c.transport.sessionId, mapId: 'Acceptance.Alpha' }]);
   expect(recovered.maps[1]).toEqual(before.maps[1]);
   expect(recovered.maps[0]!.history.slice(0, 3)).toEqual(before.maps[0]!.history.slice(0, 3));
   expect(recovered.maps[0]!.history[4]).toEqual(before.maps[0]!.history[4]);
@@ -480,7 +487,7 @@ test('P08: session DELETE drains multiple admitted requests without reopening ad
       return f.storage.adapter.commit(change);
     },
   } };
-  const host = await fixture(wrapped); const c = await connect(host.port); await seed(c);
+  const host = await fixture({ storage: wrapped, path: f.path }); const c = await connect(host.port); await seed(c);
   armed = true;
   const first = c.create('Delete.First'); const second = c.create('Delete.Second'); await entered.promise;
   let deleted = false;
