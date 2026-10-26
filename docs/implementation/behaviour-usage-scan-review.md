@@ -26,7 +26,7 @@ Refusal classes remain grouped into one screening lead per session, with every n
 
 ## Validation
 
-Before integrating the later main update, Node **26.3.0** passed `npm run build`, `npm test` (**24 files / 1511 tests**) and `npm run typecheck`. This includes 26 scan tests and five tests of the real B03b handoff with fake drivers. Whitespace checks pass.
+Final verification after merging `origin/main` at `046043e` on 2026-10-26: Node **26.3.0** passed `npm run build`, `npm test` (**25 files / 1628 tests**), `npm run typecheck` and whitespace checks. This includes 26 scan tests and five tests of the real B03b handoff with fake drivers. The earlier run before that main update also passed (**24 files / 1511 tests**). The synthetic manual command still produces the summary recorded in the implementation document: 11 sessions, eight calls, 19 pending leads, zero failures, zero proposed invocations and zero models started.
 
 The full suite uses the temporary private-files guard described in the [implementation record](behaviour-usage-scan.md#verification-and-self-review), removed after the run. One earlier full run used Node 26.10.0 in npm's script subprocess and failed the repository's runtime guards; it is not counted as a pass. A temporary local script-shell wrapper prepends the resolved Node 26.3.0 binary for npm scripts; no global configuration or version checks change.
 
