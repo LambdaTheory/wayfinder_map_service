@@ -3,12 +3,13 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterAll, describe, expect, test } from 'vitest';
+import { afterAll, describe, expect, test, vi } from 'vitest';
 import { attemptSchema } from './evidence.ts';
 import type { AttemptRecord } from './evidence.ts';
 import { library } from './library.ts';
 import { buildReport, renderMarkdown } from './report.ts';
 import { CliReviewDriver, codexReviewSandbox, decodeResponse, reviewArgs } from './review-cli.ts';
+import { reviewProxyVariables } from './review-proxy.ts';
 import { reviewDirectories, reviewPlan } from './review-run.ts';
 import { reviewAttempt, reviewersFor, reviewItems } from './model-review.ts';
 import { turnWriteEvidence } from './review-no-writes.ts';
@@ -664,12 +665,14 @@ socket.on('error', e => { if (e.code !== 'EPERM') process.exit(26);
  console.log(JSON.stringify({type:'result',subtype:'success',session_id:'session-fixture',result:'AVAILABLE'})); });
 `, { mode: 0o700 });
     const previous = process.env.PATH; process.env.PATH = `${binDir}:${previous ?? ''}`;
+    for (const key of reviewProxyVariables) vi.stubEnv(key, undefined);
+    const subscriptionHome = mkdtempSync(join(root, 'subscription-'));
     try {
-      const response = await new CliReviewDriver().invoke({ id: 'fixture', kind: 'availability', target: { cli: 'claude', model: 'claude-sonnet-5-5' }, input: 'No real model.' });
+      const response = await new CliReviewDriver(5000, subscriptionHome).invoke({ id: 'fixture', kind: 'availability', target: { cli: 'claude', model: 'claude-sonnet-5-5' }, input: 'No real model.' });
       expect(response.status, response.detail + response.stdout + response.stderr).toBe('complete');
       expect(response.invocation?.command).toBe('/usr/bin/sandbox-exec');
       const args = response.invocation!.args; const profile = args[args.indexOf('-p') + 1]!;
       expect(profile.split('\n').find(line => line.startsWith('(deny file-read*'))).toContain('(subpath "/private/tmp")');
-    } finally { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; }
+    } finally { vi.unstubAllEnvs(); if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; }
   });
 });
