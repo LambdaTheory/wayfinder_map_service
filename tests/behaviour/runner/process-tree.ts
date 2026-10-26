@@ -1,5 +1,5 @@
 // macOS turn ownership: group termination is supplemented by observed descendants and owned scratch cwd.
-// This is not an OS job container; see shared-sandbox-proxy.md for the hostile double-fork limit.
+// This is not an OS job container; see shared-sandbox-proxy.md for the unobserved descendant limit.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 

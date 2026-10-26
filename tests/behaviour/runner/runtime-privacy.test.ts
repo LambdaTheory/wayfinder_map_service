@@ -1,8 +1,10 @@
 // Each case starts Node afresh: environment-proxy mode is selected before module initialization.
+import { networkInterfaces } from 'node:os';
+import { createSocket } from 'node:dgram';
 import { createServer, request } from 'node:http';
 import { connect } from 'node:net';
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, watch, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { expect, test } from 'vitest';
@@ -12,9 +14,14 @@ const here = fileURLToPath(new URL('.', import.meta.url));
 const safeEnv = () => Object.fromEntries(Object.entries(process.env).filter(([key]) =>
   !/^(?:https?_proxy|all_proxy|no_proxy|node_options|node_use_env_proxy)$/i.test(key)));
 
-async function fixture(entry: 'mcp-only' | 'dedicated', mode: string, appendix = '') {
+async function fixture(entry: 'mcp-only' | 'dedicated', mode: string, appendix = '', watchdogMs = 0) {
   const root = realpathSync(mkdtempSync('/private/tmp/wf-runtime-privacy-'));
   const echoedTokens: string[] = []; const descendants = new Set<number>(); let descendantRequests = 0;
+  const watcher = watch(root, {recursive:true}, (_event, path) => {
+    if (path?.endsWith('owned-fixture-pids.json')) try { for (const pid of JSON.parse(readFileSync(join(root,path), 'utf8'))) descendants.add(pid); } catch { /* own file creation/removal */ }
+  });
+  let watchdogFired = false; const started = Date.now();
+  let nativeProxyCalls = 0;
   let runnerPid = 0; let credentialsAtProxy = 0; let requestsAtProxy = 0; let positiveControl = 0;
   const allowed = (port: number) => {
     if ([18765, 18766].includes(port)) return false;
@@ -25,6 +32,7 @@ async function fixture(entry: 'mcp-only' | 'dedicated', mode: string, appendix =
     } catch { return false; }
   };
   const proxy = createServer((req, res) => {
+    if (req.headers['x-native-probe']) { nativeProxyCalls++; res.end('native-proxy-fixture'); return; }
     if (req.headers['x-descendant']) { descendants.add(Number(req.headers['x-descendant'])); descendantRequests++; res.end('fixture'); return; }
     if (req.headers['x-synthetic-token']) { echoedTokens.push(String(req.headers['x-synthetic-token'])); res.end('fixture'); return; }
     requestsAtProxy++; if (req.headers.authorization) credentialsAtProxy++;
@@ -55,8 +63,16 @@ async function fixture(entry: 'mcp-only' | 'dedicated', mode: string, appendix =
   await new Promise<void>(resolve => proxy.listen(0, '127.0.0.1', resolve));
   const port = (proxy.address() as { port: number }).port;
   const positive = createServer((_req, res) => res.end('synthetic'));
-  await new Promise<void>(resolve => positive.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>(resolve => positive.listen(0, '0.0.0.0', resolve));
   const target = (positive.address() as { port: number }).port;
+  const ownIp = Object.values(networkInterfaces()).flat().find(item => item?.family === 'IPv4' && !item.internal)?.address ?? '127.0.0.1';
+  const udp = createSocket('udp4'); await new Promise<void>(resolve => udp.bind(0, '0.0.0.0', resolve));
+  const udpPort = udp.address().port;
+  if (appendix.includes('__OWNED_IP__')) {
+    await new Promise<void>((resolve,reject) => { const c=connect(target,ownIp,()=>{c.destroy();resolve();});c.on('error',reject); });
+    await new Promise<void>((resolve,reject) => { udp.once('message',()=>resolve());udp.send('positive-control',udpPort,ownIp,error=>{if(error)reject(error);}); });
+  }
+  appendix = appendix.replaceAll('__UPSTREAM_PORT__', String(port)).replaceAll('__PUBLIC_PORT__', String(target)).replaceAll('__UDP_PORT__', String(udpPort)).replaceAll('__OWNED_IP__', JSON.stringify(ownIp));
   const bin = join(root, 'fake-client.mjs');
   writeFileSync(bin, readFileSync(join(here, 'fake-codex.mjs'), 'utf8') + '\n' + appendix, { mode: 0o700 });
   const proxyUrl = `http://run:synthetic%40proxy-password@localhost:${port}`;
@@ -77,24 +93,25 @@ if (${JSON.stringify(mode)} !== 'off') for (const open of [()=>connectController
 }
 process.send({...result,transportRefusals});
 `);
-  const args = [...(mode === 'argv' ? ['--use-env-proxy'] : []), childScript];
+  const args = [...(mode.startsWith('argv') ? [mode.split(':')[1] ?? '--use-env-proxy'] : []), childScript];
   const env = { ...safeEnv(), HTTP_PROXY: `http://127.0.0.1:${port}`, http_proxy: `http://127.0.0.1:${port}`,
     NO_PROXY: 'localhost', no_proxy: 'localhost', ...(mode === 'env' ? { NODE_USE_ENV_PROXY: '1' } : {}),
-    ...(mode === 'options' ? { NODE_OPTIONS: '--use-env-proxy' } : {}) };
+    ...(mode.startsWith('options') ? { NODE_OPTIONS: mode.split(':')[1] ?? '--use-env-proxy' } : {}) };
   const child = spawn(process.execPath, args, { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }); runnerPid = child.pid!;
   let terminal = ''; let result: (Awaited<ReturnType<typeof import('./run.ts').runBatch>> & { transportRefusals: string[] }) | undefined;
   child.stdout!.on('data', d => { terminal += d; }); child.stderr!.on('data', d => { terminal += d; });
   child.on('message', message => { result = message as typeof result; });
-  const code = await new Promise<number | null>(resolve => child.on('close', resolve));
-  return { root, proxyUrl, terminal, result, code, credentialsAtProxy, requestsAtProxy, positiveControl, echoedTokens,
+  const watchdog = watchdogMs ? setTimeout(() => { watchdogFired = true; for (const pid of descendants) try { process.kill(pid,'SIGKILL'); } catch {} }, watchdogMs) : undefined;
+  const code = await new Promise<number | null>(resolve => child.on('close', resolve)); clearTimeout(watchdog);
+  return { root, proxyUrl, terminal, watchdogFired, elapsedMs: Date.now()-started, result, code, credentialsAtProxy, requestsAtProxy, positiveControl, echoedTokens, nativeProxyCalls,
     descendants: () => [...descendants], descendantRequests: () => descendantRequests,
-    close: async () => { for (const pid of descendants) try { process.kill(pid, 'SIGKILL'); } catch { /* owned red-test descendant already exited */ }
+    close: async () => { watcher.close(); udp.close(); for (const pid of descendants) try { process.kill(pid, 'SIGKILL'); } catch { /* owned red-test descendant already exited */ }
       for (const socket of sockets) socket.destroy(); await Promise.all([
       new Promise<void>(resolve => proxy.close(() => resolve())), new Promise<void>(resolve => positive.close(() => resolve()))]); rmSync(root, { recursive: true, force: true }); } };
 }
 
 attack.each(['mcp-only', 'dedicated'] as const)('%s refuses Node environment-proxy modes before authenticated traffic', async entry => {
-  for (const mode of ['off', 'env', 'argv', 'options']) {
+  for (const mode of ['off', 'env', ...['--use-env-proxy', '--use_env_proxy', '--use-env_proxy', '--use_env-proxy'].flatMap(flag => ['argv:' + flag, 'options:' + flag])]) {
     const f = await fixture(entry, mode);
     try {
       expect(f.code).toBe(0);
@@ -143,7 +160,9 @@ await new Promise(resolve=>setTimeout(resolve,300));
 ${mode === 'crash' ? 'process.exit(3);' : mode === 'timeout' ? 'await new Promise(resolve=>setTimeout(resolve,30_000));' : ''}
 `);
     try {
-      expect(f.code).toBe(0); expect(f.result?.outcomes[0]?.completeness).toBe(mode === 'crash' ? 'driver-failed' : mode === 'timeout' ? 'timeout' : 'complete');
+      expect(f.code).toBe(0);
+      const blocked = JSON.parse(readFileSync(join(f.root, 'records/S0b-1/raw/proxy-channel.json'), 'utf8')).blockedConnections;
+      expect(f.result?.outcomes[0]?.completeness).toBe(blocked || mode === 'crash' ? 'driver-failed' : mode === 'timeout' ? 'timeout' : 'complete');
       expect(f.descendants().length).toBeGreaterThanOrEqual(2);
       const requests = f.descendantRequests();
       await new Promise(resolve => setTimeout(resolve, 350));
@@ -152,3 +171,45 @@ ${mode === 'crash' ? 'process.exit(3);' : mode === 'timeout' ? 'await new Promis
     } finally { await f.close(); }
   }
 }, 60_000);
+
+
+attack.each((['mcp-only', 'dedicated'] as const).flatMap(entry => [false,true].map(pipes => ({entry,pipes}))))('$entry bounds inherited-pipe drain (pipes=$pipes) and cuts escaped descendants off from its upstream proxy', async ({entry,pipes}) => {
+    const f = await fixture(entry, 'off', `
+const {spawn: spawnLate} = await import('node:child_process');
+const lateProxy = new URL(process.env.HTTPS_PROXY);
+const lateCode = "const http=require('node:http');const ping=()=>{const req=http.request({host:'127.0.0.1',port:"+lateProxy.port+",headers:{'x-descendant':String(process.pid)}},res=>res.resume());req.on('error',()=>{});req.end();};ping();setInterval(ping,40);setTimeout(()=>process.exit(0),6000);";
+const late = spawnLate(process.execPath,['-e',lateCode],{detached:true,cwd:${pipes ? 'process.cwd()' : "'/'"},stdio:${pipes ? "['ignore','inherit','inherit']" : "'ignore'"}});late.unref();
+writeFileSync('owned-fixture-pids.json',JSON.stringify([late.pid]));process.exit(0);
+`, 8000);
+    try {
+      expect(f.watchdogFired).toBe(false); expect(f.elapsedMs).toBeLessThan(8000);
+      const count = f.descendantRequests(); await new Promise(resolve=>setTimeout(resolve,200));
+      expect(f.descendantRequests()).toBe(count);
+      const channel = JSON.parse(readFileSync(join(f.root,'records/S0b-1/raw/proxy-channel.json'),'utf8'));
+      expect(channel.closed).toBe(true);
+      expect(f.descendants().length).toBeGreaterThan(0);
+      if (channel.blockedConnections > 0 || pipes) expect(f.result?.outcomes[0]?.completeness).toBe('driver-failed');
+    } finally { await f.close(); }
+}, 30_000);
+
+
+attack.each(['mcp-only', 'dedicated'] as const)('%s exposes only its forwarding endpoint, with no direct IPv4/alias/IPv6/UDP proxy bypass', async entry => {
+  const f = await fixture(entry, 'off', `
+const assert = (await import('node:assert/strict')).default;
+const {connect: connectProbe} = await import('node:net');
+const {createSocket: udpProbe} = await import('node:dgram');
+const gateway = new URL(process.env.HTTPS_PROXY);
+assert.notEqual(Number(gateway.port),__UPSTREAM_PORT__);
+await new Promise((resolve,reject)=>import('node:http').then(({request})=>{
+ const req=request({host:'127.0.0.1',port:gateway.port,headers:{'x-native-probe':'yes'}},res=>{let body='';res.on('data',c=>body+=c);res.on('end',()=>{try{assert.equal(body,'native-proxy-fixture');resolve();}catch(e){reject(e);}});});req.on('error',reject);req.end();}));
+const denied = (host,port) => new Promise(resolve=>{const socket=connectProbe(port,host);socket.on('connect',()=>{socket.destroy();resolve('connected');});socket.on('error',e=>resolve(e.code));});
+for(const host of ['127.0.0.1','localhost','127.1','0.0.0.0','::1','::ffff:127.0.0.1','::ffff:0.0.0.0']) assert.equal(await denied(host,__UPSTREAM_PORT__),'EPERM');
+for(const host of ['::1','::ffff:127.0.0.1','::ffff:0.0.0.0']) assert.equal(await denied(host,Number(gateway.port)),'EPERM');
+assert.equal(await denied(__OWNED_IP__,__PUBLIC_PORT__),'EPERM');
+for(const [host,type,port] of [[__OWNED_IP__,'udp4',__UDP_PORT__],['127.0.0.1','udp4',Number(gateway.port)],['::ffff:127.0.0.1','udp6',Number(gateway.port)]]) {
+ const result=await new Promise(resolve=>{const socket=udpProbe(type);socket.send('synthetic',port,host,error=>{socket.close();resolve(error?.code??'sent');});}); assert.equal(result,'EPERM');
+}
+`);
+  try { expect(f.code).toBe(0); expect(f.result?.outcomes[0]?.completeness).toBe('complete'); expect(f.nativeProxyCalls).toBe(2); }
+  finally { await f.close(); }
+}, 30_000);

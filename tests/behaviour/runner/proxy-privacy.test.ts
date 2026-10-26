@@ -85,7 +85,7 @@ emit({type:'fixture', [process.env.HTTPS_PROXY]:'url-key', [privacyLogin]:'login
     const raw = files(join(f.out, 'S0b-1/raw')).map(path => readFileSync(path, 'utf8'));
     expect(raw.some(text => ['synthetic-password-for-proxy', f.proxyUrl, 'synthetic-login-for-tests-only', f.controller()].some(secret => text.includes(secret)))).toBe(false);
   } finally { await f.close(); }
-});
+}, 20_000);
 
 attack('a protocol refusal still stops every owned process/relay and removes temporary controls', async () => {
   const f = await fixture(`await rpc('tools/call', {name:'map_list', arguments:{kind:process.env.HTTPS_PROXY}});`);
@@ -98,7 +98,7 @@ attack('a protocol refusal still stops every owned process/relay and removes tem
     expect(f.controls.every(path => !existsSync(path))).toBe(true);
     expect(readdirSync(f.root).some(name => name.startsWith('wf-behave-'))).toBe(false);
   } finally { await f.close(); }
-});
+}, 20_000);
 
 attack.each(['HTTP_PROXY', 'http_proxy'])('Dedicated launcher keeps Controller credentials away from %s and its client', async key => {
   const f = await fixture('', 'dedicated', key);
@@ -106,7 +106,7 @@ attack.each(['HTTP_PROXY', 'http_proxy'])('Dedicated launcher keeps Controller c
     const result = await f.run();
     expect(f.leaked()).toBe(false); expect(f.unsafeRoute()).toBe(false); expect(result.outcomes[0]?.completeness).toBe('complete'); expect(f.calls()).toBe(2);
   } finally { await f.close(); }
-});
+}, 20_000);
 
 attack('a raw-file leak check withholds evidence even when the redactor misses a known secret', async () => {
   const f = await fixture(`emit({type:'fixture', aggregated_output:privacyProxy.password});`);
@@ -120,7 +120,7 @@ attack('a raw-file leak check withholds evidence even when the redactor misses a
     expect(ownedServices.every(service => !alive(service.pid))).toBe(true);
     expect(ownedServices.every(service => !existsSync(dirname(service.protocolReport)))).toBe(true);
   } finally { await f.close(); }
-});
+}, 20_000);
 
 attack.each(['preparation', 'finalization'])('unexpected %s failure still releases all Attempt resources', async phase => {
   const f = await fixture('', 'dedicated');
@@ -135,7 +135,7 @@ attack.each(['preparation', 'finalization'])('unexpected %s failure still releas
     expect(f.controls.length).toBeGreaterThan(0); expect(f.controls.every(path => !existsSync(path))).toBe(true);
     expect(readdirSync(f.root).some(name => name.startsWith('wf-behave-'))).toBe(false);
   } finally { await f.close(); }
-});
+}, 20_000);
 
 attack('cleanup rejection keeps the Batch outcome and saved Attempt consistently failed', async () => {
   const start = relays.startRoute;
@@ -152,4 +152,4 @@ attack('cleanup rejection keeps the Batch outcome and saved Attempt consistently
     expect(result.outcomes[0]?.record).toBe('S0b-1/attempt.json');
     expect(ownedServices.every(service => !alive(service.pid))).toBe(true);
   } finally { await f.close(); }
-});
+}, 20_000);

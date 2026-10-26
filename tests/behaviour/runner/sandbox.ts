@@ -9,6 +9,8 @@ import { proxyRouting } from '../proxy.ts';
 import { localNetworkDenials } from './network-policy.ts';
 import { reserveProxyPorts, reservedPorts } from './network-ports.ts';
 
+import type { ProxyPermit } from './network-ports.ts';
+
 export class IsolationError extends Error {
   constructor(message: string) { super(`isolation failure: ${message}`); this.name = 'IsolationError'; }
 }
@@ -20,6 +22,8 @@ export interface SandboxAccess {
   localPorts?: number[];
   /** Explicit proxy input; never load personal settings inside the sandbox API. */
   proxyEnv?: NodeJS.ProcessEnv;
+  /** Opaque capability for this controller-owned forwarding listener; reviewers never use it. */
+  proxyPermit?: ProxyPermit;
   /** Additional protected endpoints known to a caller in another controller process. */
   protectedPorts?: readonly number[];
 }
@@ -166,7 +170,7 @@ function canonicalDenial(path: string): string {
 
 interface Policy {
   home: string; workdir: string; readRoots: string[]; readFiles: string[];
-  denyRoots: string[]; denyEntries: string[]; localPorts: number[]; proxyRules: string[]; controlDirectories: string[];
+  denyRoots: string[]; denyEntries: string[]; localPorts: number[]; proxyRules: string[]; controlDirectories: string[]; proxyOnly: boolean;
 }
 function sandboxProfile(p: Policy): string {
   const q = JSON.stringify;
@@ -188,6 +192,7 @@ function sandboxProfile(p: Policy): string {
     '(deny sysctl-read (sysctl-name-prefix "kern.proc"))', '(deny process-info*)', '(allow process-info* (target self) (target same-sandbox))',
     '(deny mach-task-name)', '(allow mach-task-name (target self) (target same-sandbox))',
     '(deny signal)', '(allow signal (target self) (target same-sandbox))',
+    ...(p.proxyOnly ? ['(deny network-outbound)'] : []),
     ...localNetworkDenials,
     ...p.proxyRules,
     ...p.localPorts.map(port => `(allow network-outbound (remote tcp4 "localhost:${port}"))`),
@@ -197,7 +202,7 @@ function sandboxProfile(p: Policy): string {
 /** All grants, including Node and the client, go through the same canonical allowlist. */
 export function writeProfile(controlDir: string, session: { home: string }, workdir: string, bin: string, access: SandboxAccess = {}): ControlProfile {
   try {
-    const proxies = proxyRouting(access.proxyEnv ?? {}, [...(access.localPorts ?? []), ...(access.protectedPorts ?? [])]);
+    const proxies = proxyRouting(access.proxyEnv ?? {}, [...(access.localPorts ?? []), ...(access.protectedPorts ?? [])], access.proxyPermit);
     const layout = layoutFor(controlDir);
     if (!lstatSync(session.home).isDirectory()) throw new IsolationError('session HOME must be a real directory');
     if (!lstatSync(workdir).isDirectory()) throw new IsolationError('workdir must be a real directory inside this Attempt');
@@ -235,10 +240,10 @@ export function writeProfile(controlDir: string, session: { home: string }, work
     const pinnedRoots = denyEntries.filter(p => lstatSync(p, { throwIfNoEntry: false }));
     const expectedIdentities = Object.freeze(identities(pinnedRoots, mutable));
     const immutableHashes = treeHashes(readOnlyRoots); // Validate before reserving the exclusive profile path.
-    reserveProxyPorts(layout.controlDir, proxies.ports);
+    reserveProxyPorts(layout.controlDir, proxies.ports, access.proxyPermit);
     const path = join(layout.controlDir, `${basename(home)}.sb`);
     writeFileSync(path, sandboxProfile({ home, workdir, readRoots, readFiles: [executable, ...mutable], denyRoots,
-      denyEntries, controlDirectories: controls, localPorts: access.localPorts ?? [], proxyRules: proxies.rules }), { flag: 'wx', mode: 0o600 });
+      denyEntries, controlDirectories: controls, localPorts: access.localPorts ?? [], proxyRules: proxies.rules, proxyOnly: !!access.proxyPermit && proxies.ports.length > 0 }), { flag: 'wx', mode: 0o600 });
     const profile = { path, readOnlyRoots, mutableReadOnlyFiles: mutable, pinnedRoots, identities: expectedIdentities, proxyEnvironment: Object.freeze(proxies.environment) };
     return { ...profile, hashes: Object.freeze({ ...immutableHashes, [path]: fileHash(path) }) };
   } catch (error) { if (error instanceof IsolationError) throw error; throw new IsolationError(`cannot prepare sandbox: ${String(error)}`); }

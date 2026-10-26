@@ -9,6 +9,7 @@ import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { attemptSchema, classifyResult, leaks, redact, requiredFields } from '../evidence.ts';
 import type { AttemptRecord, Completeness, Entry, EventRecord, Field, GivenRules, SessionRecord } from '../evidence.ts';
+import { startProxyChannel } from './proxy-channel.ts';
 import { clearClientDirectories } from './process-tree.ts';
 import { nodeProxyRefusal, requireDirectRuntime } from './direct-runtime.ts';
 import { ProxyError, proxyEnvironment, proxyRouting, proxySecrets, proxySummary } from '../proxy.ts';
@@ -203,6 +204,8 @@ async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: ()
   const { controlDir } = layout;
   defer(() => rmSync(controlDir, { recursive: true, force: true }));
   const clearClients = defer(() => clearClientDirectories([scratch]));
+  const channel = await startProxyChannel(proxies.environment);
+  defer(() => channel.close());
   const profiles = new Map<string, ControlProfile>();
   const isolationFailures: string[] = [];
   const controller: Credential = { clientId: 'Behaviour-Controller', token: newToken() };
@@ -215,7 +218,7 @@ async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: ()
   const nativeSessions = sessions.map(s => s.codex);
   const secrets: Record<string, string> = { 'controller-token': controller.token,
     ...Object.fromEntries(sessions.flatMap(x => [[`token-${x.label}`, x.credential.token], ...loginSecrets(x.codex).map((v, i) => [`codex-login-${x.label}-${i}`, v])])) };
-  Object.assign(secrets, proxySecrets(o.proxyEnv ?? {}, proxies.environment));
+  Object.assign(secrets, proxySecrets(o.proxyEnv ?? {}, proxies.environment), Object.fromEntries(Object.entries(proxySecrets(proxies.environment, channel.environment)).map(([name,value]) => [name.replace('proxy-', 'proxy-channel-'), value])));
   const startedAt = new Date().toISOString();
   const events: EventRecord[] = [];
   const emit = (event: EventRecord) => { events.push({ ...event, seq: events.length }); };
@@ -272,7 +275,7 @@ async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: ()
     const workdir = prepareWorkdir(scratch, s.seed.fixtures, fixturesRoot);
     const nativeOptions = { ...o.codex, bin: prepareClient(controlDir, o.codex.bin) };
     if (entry === 'dedicated') {
-      dedicated = prepareDedicated(sessions[0]!.codex, service, controller, nativeOptions, layout, workdir, proxies.environment);
+      dedicated = prepareDedicated(sessions[0]!.codex, service, controller, nativeOptions, layout, workdir, channel.environment, channel.permit);
       secrets['launcher-probe-token'] = dedicated.probeToken;
       sessions[0]!.codex.codexHome = dedicated.codexHome;
       profiles.set(sessions[0]!.codex.home, dedicated.profile);
@@ -296,6 +299,7 @@ async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: ()
       }, proxies.ports);
       session.route.close = defer(session.route.close);
     }
+    defer(() => channel.close()); // Close the capability before slower service/relay cleanup on an exceptional exit.
     const actionRuns = new Map<ControllerAction, Promise<void>>();
     const executeControllerAction = async (a: ControllerAction, session: Session, index: number, mapId?: string) => {
       controllerEvent(a.action, { status: 'started', detail: a.detail }, index);
@@ -351,18 +355,20 @@ async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: ()
       };
       let profile = profiles.get(session.codex.home);
       if (!profile) {
-        profile = writeProfile(controlDir, session.codex, workdir, nativeOptions.bin, { localPorts: [session.route!.port, ...(bait ? [service!.port] : [])], proxyEnv: proxies.environment });
+        profile = writeProfile(controlDir, session.codex, workdir, nativeOptions.bin, { localPorts: [session.route!.port, ...(bait ? [service!.port] : [])], proxyEnv: channel.environment, ...(channel.permit ? { proxyPermit: channel.permit } : {}) });
         profiles.set(session.codex.home, profile);
       }
       const fromSeq = events.length;
       let n: ReturnType<typeof streamTurn> | undefined;
+      let releaseProxy = () => {};
       const request = { options: nativeOptions, session: session.codex, port: session.route!.port, workdir,
         prompt: turn.say, profile, onChild,
         onLaunch: () => {
-          controllerEvent('isolation-check', { session: session.label, paths: Object.keys(profile.hashes), proxy: proxySummary(profile.proxyEnvironment), ok: true }, index);
+          releaseProxy = channel.activate();
+          controllerEvent('isolation-check', { session: session.label, paths: Object.keys(profile.hashes), proxy: proxySummary(profile.proxyEnvironment, channel.permit), ok: true }, index);
           n = streamTurn(turn.session, index, turn.say, new Date().toISOString(), workdir, emit);
-        }, onLine: (line: import('./normalize.ts').Line) => n?.line(line) };
-      const r = dedicated ? await runDedicatedTurn(request, dedicated) : await runTurn(request);
+        }, onExit: () => releaseProxy(), onLine: (line: import('./normalize.ts').Line) => n?.line(line) };
+      const r = await (dedicated ? runDedicatedTurn(request, dedicated) : runTurn(request)).finally(() => releaseProxy());
       n?.finish();
       if (dedicated) {
         try {
@@ -438,6 +444,8 @@ async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: ()
       }
       for (const a of s.controller.filter(a => 'after' in a.when && a.when.after === index)) await runControllerAction(a, session, index);
     };
+    await channel.observe();
+    if (channel.evidence().blockedConnections) throw new IsolationError('client connection attempted before proxy activation');
     for (let index = 0; index < s.turns.length;) {
       if (cancelled()) { completeness = 'cancelled'; break; }
       const group = [index++];
@@ -461,6 +469,8 @@ async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: ()
         killAll(); throw error;
       })));
       const failed = results.find(r => r.status === 'rejected');
+      await channel.observe();
+      if (channel.evidence().blockedConnections) { completeness = 'driver-failed'; detail = 'Client connection attempted while the proxy channel was inactive'; }
       if (failed?.status === 'rejected') throw failed.reason;
       if (completeness !== 'complete') break;
     }
@@ -476,6 +486,12 @@ async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: ()
     detail = `${detail ?? ''} ${String(error instanceof Error ? error.message : error)}`.trim();
   }
   await clearClients();
+  await channel.observe();
+  await channel.close();
+  const proxyEvidence = channel.evidence();
+  writeRaw('proxy-channel.json', JSON.stringify(proxyEvidence));
+  controllerEvent('proxy-channel', proxyEvidence);
+  if (proxyEvidence.blockedConnections) { completeness = 'driver-failed'; detail = 'Client connection attempted while the proxy channel was inactive'; isolationFailures.push(detail); }
   if (dedicated) {
     entryContext = dedicatedContext(dedicated, sessions[0]?.rollout?.text);
     writeRaw('entry-context.json', JSON.stringify({ launcher: dedicatedLauncherSource, context: entryContext, launches }, null, 1));

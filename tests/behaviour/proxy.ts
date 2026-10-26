@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { isProtectedPort, reservedPorts } from './runner/network-ports.ts';
+import { isProtectedPort, permitsProxyPort, reservedPorts } from './runner/network-ports.ts';
+
+import type { ProxyPermit } from './runner/network-ports.ts';
 
 export class ProxyError extends Error {}
 
@@ -31,7 +33,7 @@ export function proxyEnvironment(subscriptionHome: string | null, inherited: Nod
 }
 
 /** Validate before launch; keep the forwarded URLs and sandbox exceptions on the same IPv4 endpoints. */
-export function proxyRouting(environment: NodeJS.ProcessEnv, protectedPorts: readonly number[] = []): { environment: Record<string, string>; rules: string[]; ports: number[] } {
+export function proxyRouting(environment: NodeJS.ProcessEnv, protectedPorts: readonly number[] = [], permit?: ProxyPermit): { environment: Record<string, string>; rules: string[]; ports: number[] } {
   const selected: Record<string, string> = {};
   for (const key of proxyVariables) if (environment[key] !== undefined) selected[key] = environment[key];
   const endpoints = new Set<number>();
@@ -46,7 +48,7 @@ export function proxyRouting(environment: NodeJS.ProcessEnv, protectedPorts: rea
     if (port === 0) throw new ProxyError('Proxy URL must use a nonzero port');
     // Refuse even non-loopback URLs on these ports; no proxy exception may target the everyday service or relay.
     if (reservedPorts.includes(port)) throw new ProxyError('Proxy uses a reserved Wayfinder port');
-    if (isProtectedPort(port) || protectedPorts.includes(port)) throw new ProxyError('Proxy uses a protected harness endpoint');
+    if ((isProtectedPort(port) && !permitsProxyPort(permit, port)) || protectedPorts.includes(port)) throw new ProxyError('Proxy uses a protected harness endpoint');
     if (url.hostname !== 'localhost' && url.hostname !== '127.0.0.1')
       throw new ProxyError('Proxy must use localhost or 127.0.0.1');
     // Seatbelt's tcp6 localhost exception also admits IPv4-mapped sockets. Never generate that exception.
@@ -58,8 +60,8 @@ export function proxyRouting(environment: NodeJS.ProcessEnv, protectedPorts: rea
 }
 
 /** Safe Batch metadata: no URLs, credentials or bypass-list values. */
-export function proxySummary(environment: NodeJS.ProcessEnv) {
-  const routing = proxyRouting(environment);
+export function proxySummary(environment: NodeJS.ProcessEnv, permit?: ProxyPermit) {
+  const routing = proxyRouting(environment, [], permit);
   return { enabled: routing.rules.length > 0, variables: Object.keys(routing.environment) };
 }
 

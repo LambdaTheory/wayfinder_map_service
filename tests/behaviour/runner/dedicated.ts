@@ -5,6 +5,7 @@ import { dirname, join, relative } from 'node:path';
 import { clientSkills, executeTurn, findRollout, loginSecrets } from './codex.ts';
 import type { CodexOptions, CodexSession, TurnRequest } from './codex.ts';
 import { readRollout, shown } from './normalize.ts';
+import type { ProxyPermit } from './network-ports.ts';
 import { checkoutRoot, newToken, reservedPorts } from './service.ts';
 import { entryIdentity, hashContents, IsolationError, readPinnedFile, readRegularFile, verifyProfile, writeProfile } from './sandbox.ts';
 import type { ControlProfile, SandboxLayout } from './sandbox.ts';
@@ -49,7 +50,7 @@ export interface DedicatedSetup {
 }
 
 export function prepareDedicated(session: CodexSession, service: IsolatedService,
-  controller: Credential, options: CodexOptions, layout: SandboxLayout, workdir: string, proxyEnv: NodeJS.ProcessEnv = {}): DedicatedSetup {
+  controller: Credential, options: CodexOptions, layout: SandboxLayout, workdir: string, proxyEnv: NodeJS.ProcessEnv = {}, proxyPermit?: ProxyPermit): DedicatedSetup {
   if (!options.sandbox) throw new IsolationError('Dedicated Entry requires the allowlist sandbox');
   if (reservedPorts.includes(service.port)) throw new IsolationError('Dedicated Entry refuses an everyday port');
   const serviceDir = dirname(service.protocolReport);
@@ -130,7 +131,7 @@ os.execvpe(command[0], command, env)
   const profile = writeProfile(control, session, workdir, binary, {
     readOnlyRoots: [checkout, launcherDir, shimDir], mutableReadOnlyFiles: [sourceAuth],
     denyWriteRoots: protectedTrees, denyWritePaths: [join(outputs, 'mcp'), join(outputs, 'matt')], localPorts: [service.port],
-    proxyEnv,
+    proxyEnv, ...(proxyPermit ? { proxyPermit } : {}),
   });
   const installedFiles = new Map<string, string>();
   const expectedFiles: Record<string, string> = {
