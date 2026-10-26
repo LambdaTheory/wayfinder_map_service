@@ -7,7 +7,7 @@ Implementation and review-remediation evidence for Issue #80 / PR #97, 2026-10-2
 `node tests/behaviour/chatgpt/run.ts plan|run` prepares a manually operated Batch using the shared Scenario library. The [operating guide](../../tests/behaviour/chatgpt/README.md) gives approval impacts, exact commands, capture format and old-chat/new-chat upgrade steps. The generated checklist gives each selected Scenario's messages and reply preconditions in order.
 
 - Fresh database and credentials per Attempt in the behaviour-test cache; independent service/relay ports; no daily attach path or inherited database settings.
-- Exclusive `opencode` ownership checks, temporary YAML ingress and cleanup. Existing connectors are refused, never stopped. The original config, credential files and DNS remain unchanged.
+- Exclusive `opencode` ownership checks, temporary YAML ingress and cleanup. Existing target connectors are refused, never stopped; unrelated local tunnels do not block the Batch. The original config, credential files and DNS remain unchanged.
 - Actual MCP request/result capture, native message and other-tool import, before/after Map history, receipts, service call metadata, explicit evidence gaps and separate Controller actions.
 - Shared `verdict.ts`/`report.ts` results, all planned Attempts retained, separate app/web/mobile Combination keys and explicit untested surfaces.
 - Controlled canary restart on the same owned database for both ChatGPT upgrade checks. No canary version or rule is injected into the Scenario message.
@@ -38,7 +38,7 @@ Other suggestions addressed:
 - Rename the local type to `ChatGPTSurface`; add `canary-release.d.mts` and remove the corresponding type-error suppressions.
 - Move ChatGPT guidance under Running a Batch and include `chatgpt/` in the existing two-review rule. That project rule remains the single review-policy location; PR review evidence verifies it was followed. No authorization gate changed.
 - Allow ping and Resource/Prompt listing between turns. State reads/writes stay gated. Verify actual Refresh tools in the approved run.
-- Bound registration/deregistration visibility retries and allow ten seconds for shutdown. Unknown/foreign state fails closed. Document remote inventory as the guard for service-manager launches the conservative local pattern can miss.
+- Bound registration/deregistration visibility retries and allow ten seconds for shutdown. Unknown/foreign state fails closed. Remote inventory is the authoritative guard for connectors, including service-manager launches without a visible target identity (see the startup fix below).
 - Record handshake version and refuse a package/dist version mismatch. Still require a build immediately before every run: version comparison cannot detect same-version source edits. HEAD labels the checkout, not proof that a dirty build matches it.
 - Print public read/mutate and attribution risks, unattended prohibition, other-hostname downtime, Kun takeover and surface-specific refresh steps. The operator must inventory original ingress hostnames before approval; generic `plan` intentionally reads no local configuration.
 - Add approved daily-route restoration, refresh of normal tools and recording both actions. Explicitly retain S6 as a coverage gap.
@@ -56,7 +56,21 @@ Read the complete **Independent re-review (Claude /code-review)** comment. This 
 
 Wire equality establishes what the identified client session fetched, not a direct observation of model cognition. Native chat evidence, intended-chat attribution, actual version use and Kun's acceptance are still required; an uncorrelatable real client stays unknown rather than inviting a Controller substitute. No shared verdict semantics, product code, release number or approval gate changed in this round.
 
-## Verification
+## Local tunnel startup fix (2026-10-27)
+
+The first real attempt was refused by the broad local process check even though the coordinator observed zero remote `opencode` connectors. The machine had two unrelated `cloudflared` services, one using `--token` and one using `--token-file`. Unrelated tunnels are common on a real machine; their presence alone cannot establish ownership of `opencode`.
+
+The local check now refuses only `cloudflared` command lines with the target UUID, credentials-file path, selected config path or `opencode` name, plus the daily `scripts/local-chatgpt-test.mjs` runner. Matching uses complete arguments/option values, so another tunnel's name or path prefix is not enough. Opaque token processes defer to the authoritative remote inventory. No token is parsed/decoded or token file opened; process command lines stay in memory and never appear in logs or evidence.
+
+The directory lock, refusal of every registered remote connector (including connected, reconnecting and zero-connection records), exclusive post-registration ownership, per-request/turn/second verification and exit cleanup remain enforced. Concurrent ownership checks share one inspection to avoid treating this command's own target-specific `tunnel info` subprocess as another connector.
+
+The fake mode now runs the same local matcher against an optional synthetic process inventory; real mode always uses `ps`. With the old matcher, the new fake startup regression failed with `Another local tunnel connector or daily ChatGPT runner is active`; after the fix it starts, verifies ownership and cleans up with both unrelated token processes present and zero remote connectors. Additional regressions retain refusals for all four target identifiers, the daily runner and all three remote states. Existing full-CLI regressions still cover a later foreign connector, request/turn/timer aborts and exit cleanup. Neither the fixture credential path nor its token-file path exists.
+
+This fix changes only the test command and its documentation, so §14.3 requires no Release Version bump. Real cloudflared, credentials, token files, models, ChatGPT and the daily service/database were not used for verification; the coordinator still owns the approved real retry and independent reviews.
+
+Verified with Node `v26.3.0` after `npm ci`: `npm run build`, `npm test` (38 files / 1879 tests, including all 36 ChatGPT cases), `npm run typecheck` and `git diff --check` passed. The focused ChatGPT suite also passed 36 tests. The red run exercised the fake startup boundary and failed for the expected local-connector refusal before the matcher changed.
+
+## Original command verification (PR #97)
 
 Node `v26.3.0`; `npm ci`; latest main merged first. Final gates ran in this order:
 

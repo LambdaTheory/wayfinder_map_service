@@ -85,13 +85,87 @@ test('checklist selects the initial five without injecting version or controller
   assert.throws(() => selectScenarios(['S5', 'S5']), /distinct/);
 }, 30_000);
 
+test('unrelated token connectors allow startup when the target has no remote connectors', async () => {
+  const root = fresh(); const options = fixture(root);
+  const fakeProcesses = [
+    '42 /opt/homebrew/bin/cloudflared tunnel run --token synthetic-test-token',
+    `43 /opt/homebrew/bin/cloudflared tunnel --no-autoupdate run --token-file ${join(root, 'missing-token-file')}`,
+  ].join('\n');
+  try {
+    const lease = await acquireTunnel({ ...options, fakeProcesses });
+    try { await lease.start(23456); await Promise.all([lease.check(), lease.check()]); }
+    finally { await lease.stop(); }
+    assert.equal(existsSync(join(root, 'tunnel.yml')), false);
+    assert.equal(existsSync(join(root, `opencode-${options.id}.lock`)), false);
+    assert.equal(existsSync(join(root, 'fake-connector.json')), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}, 30_000);
+
+for (const identity of ['UUID', 'credentials path', 'config path', 'name', 'daily runner'] as const)
+  test(`local ${identity} refuses startup without exposing the process command`, async () => {
+    const root = fresh(); const options = fixture(root);
+    const target = { ...readTunnelConfig(options.configPath), configPath: options.configPath };
+    const commands = {
+      UUID: `/opt/homebrew/bin/cloudflared tunnel run ${target.id}`,
+      'credentials path': `/opt/homebrew/bin/cloudflared tunnel --credentials-file "${target.credentialsFile}" run`,
+      'config path': `/opt/homebrew/bin/cloudflared --config=${target.configPath}`,
+      name: 'cloudflared tunnel run opencode',
+      'daily runner': '/opt/homebrew/bin/node --no-warnings /checkout/scripts/local-chatgpt-test.mjs',
+    };
+    const fakeProcesses = `42 ${commands[identity]} --token synthetic-secret-must-stay-private`;
+    try {
+      await assert.rejects(acquireTunnel({ ...options, fakeProcesses }), error => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /Another local tunnel connector or daily ChatGPT runner/);
+        assert.equal(error.message.includes('synthetic-secret-must-stay-private'), false);
+        return true;
+      });
+      assert.equal(hasLocalConnector(fakeProcesses, target, 42), false);
+      assert.equal(hasLocalConnector(fakeProcesses, target, 43), true);
+      assert.equal(existsSync(join(root, 'fake-run.json')), false);
+      assert.equal(existsSync(join(root, `opencode-${options.id}.lock`)), false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }, 30_000);
+
+test('other tunnel identities and names sharing a prefix do not claim the target', async () => {
+  const root = fresh(); const options = fixture(root);
+  const target = { ...readTunnelConfig(options.configPath), configPath: options.configPath };
+  const fakeProcesses = [
+    `42 cloudflared tunnel run ${randomUUID()}`,
+    '43 cloudflared tunnel run opencode-other',
+    `44 cloudflared tunnel --config=${target.configPath}.other run`,
+    `45 cloudflared tunnel --credentials-file=${target.credentialsFile}.other run`,
+    `46 node unrelated-script.mjs ${target.id}`,
+  ].join('\n');
+  try {
+    const lease = await acquireTunnel({ ...options, fakeProcesses });
+    try { await lease.start(23456); await lease.check(); }
+    finally { await lease.stop(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}, 30_000);
+
+for (const state of ['connected', 'reconnecting', 'registered'] as const)
+  test(`opaque local token connectors still refuse a ${state} remote connector`, async () => {
+    const root = fresh(); const options = fixture(root);
+    const remote = [{ id: randomUUID(), conns: state === 'registered' ? [] : [{ is_pending_reconnect: state === 'reconnecting' }] }];
+    writeFileSync(join(root, 'fake-connector.json'), JSON.stringify(remote));
+    try {
+      await assert.rejects(acquireTunnel({ ...options, fakeProcesses: '42 cloudflared tunnel run --token synthetic-token' }),
+        /already has a registered connector/);
+      assert.deepEqual(JSON.parse(readFileSync(join(root, 'fake-connector.json'), 'utf8')), remote);
+      assert.equal(existsSync(join(root, 'fake-run.json')), false);
+      assert.equal(existsSync(join(root, `opencode-${options.id}.lock`)), false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }, 30_000);
+
 test('tunnel refuses foreign connectors, unknown remote records and an existing lease; restores config on exit', async () => {
   const root = fresh(); const options = fixture(root); const tunnelId = options.id; const original = readFileSync(options.configPath, 'utf8');
   try {
     assert.equal(readTunnelConfig(options.configPath).id, tunnelId);
-    assert.equal(hasLocalConnector('42 /opt/homebrew/bin/cloudflared tunnel --config config.yml run opencode'), true);
-    assert.equal(hasLocalConnector('42 node scripts/local-chatgpt-test.mjs'), true);
-    assert.equal(hasLocalConnector('42 /opt/homebrew/bin/cloudflared tunnel --config config.yml run opencode', 42), false);
+    const target = { ...readTunnelConfig(options.configPath), configPath: options.configPath };
+    assert.equal(hasLocalConnector('42 /opt/homebrew/bin/cloudflared tunnel --config config.yml run opencode', target), true);
+    assert.equal(hasLocalConnector('42 node scripts/local-chatgpt-test.mjs', target), true);
+    assert.equal(hasLocalConnector('42 /opt/homebrew/bin/cloudflared tunnel --config config.yml run opencode', target, 42), false);
     assert.throws(() => connectorsFrom('{}', tunnelId), /Cannot confirm/);
     assert.deepEqual(connectorsFrom(JSON.stringify({ id: tunnelId, name: 'opencode', conns: null }), tunnelId), []);
     assert.deepEqual(connectorsFrom(JSON.stringify({ id: tunnelId, name: 'opencode', conns: [{ id: tunnelId, conns: [] }] }), tunnelId), [tunnelId]);
