@@ -1,0 +1,133 @@
+{
+  "schema": "wayfinder-interactive-assessment/1",
+  "scenario": "W7",
+  "confirmations": {
+    "async-question": {
+      "status": "unverified",
+      "clientVersion": "synthetic-1",
+      "surface": "interactive-cli",
+      "checkedAt": "2026-01-01T01:02:00.000Z",
+      "documentation": [
+        "https://code.claude.com/docs/en/hooks"
+      ],
+      "reason": "The native question ended before the answer; no verified Claude mid-turn delivery decoder is available.",
+      "probe": {
+        "path": "claude-probe.jsonl",
+        "sha256": "b056709f4306807a037eed4817411dc0e841c2336059f8324c2c000550e5d30b",
+        "endedAt": "2026-01-01T01:01:00.000Z",
+        "locations": [
+          "claude-probe.jsonl:1"
+        ],
+        "reading": "Synthetic native evidence only; asynchronous delivery is not established by these records.",
+        "capturePath": "claude-probe-capture.json",
+        "selection": {
+          "question": 1,
+          "preparation": 2,
+          "answer": 3,
+          "revisedRecommendation": 4,
+          "continuation": 5,
+          "preparationFinding": "Base supports mobile entry",
+          "preparationUse": "Base supports mobile entry"
+        }
+      }
+    },
+    "prepare-while-waiting": {
+      "status": "supported",
+      "clientVersion": "synthetic-1",
+      "surface": "interactive-cli",
+      "checkedAt": "2026-01-01T01:02:00.000Z",
+      "documentation": [
+        "https://code.claude.com/docs/en/hooks"
+      ],
+      "reason": "Synthetic support assertion for adapter tests only; not a real client capability claim.",
+      "probe": {
+        "path": "claude-probe.jsonl",
+        "sha256": "b056709f4306807a037eed4817411dc0e841c2336059f8324c2c000550e5d30b",
+        "endedAt": "2026-01-01T01:01:00.000Z",
+        "locations": [
+          "claude-probe.jsonl:1"
+        ],
+        "reading": "Synthetic native evidence only; asynchronous delivery is not established by these records.",
+        "capturePath": "claude-probe-capture.json",
+        "selection": {
+          "question": 1,
+          "preparation": 2,
+          "answer": 3,
+          "revisedRecommendation": 4,
+          "continuation": 5,
+          "preparationFinding": "Base supports mobile entry",
+          "preparationUse": "Base supports mobile entry"
+        }
+      }
+    },
+    "adjust-recommendation": {
+      "status": "supported",
+      "clientVersion": "synthetic-1",
+      "surface": "interactive-cli",
+      "checkedAt": "2026-01-01T01:02:00.000Z",
+      "documentation": [
+        "https://code.claude.com/docs/en/hooks"
+      ],
+      "reason": "Synthetic support assertion for adapter tests only; not a real client capability claim.",
+      "probe": {
+        "path": "claude-probe.jsonl",
+        "sha256": "b056709f4306807a037eed4817411dc0e841c2336059f8324c2c000550e5d30b",
+        "endedAt": "2026-01-01T01:01:00.000Z",
+        "locations": [
+          "claude-probe.jsonl:1"
+        ],
+        "reading": "Synthetic native evidence only; asynchronous delivery is not established by these records.",
+        "capturePath": "claude-probe-capture.json",
+        "selection": {
+          "question": 1,
+          "preparation": 2,
+          "answer": 3,
+          "revisedRecommendation": 4,
+          "continuation": 5,
+          "preparationFinding": "Base supports mobile entry",
+          "preparationUse": "Base supports mobile entry"
+        }
+      }
+    },
+    "continue-same-turn": {
+      "status": "supported",
+      "clientVersion": "synthetic-1",
+      "surface": "interactive-cli",
+      "checkedAt": "2026-01-01T01:02:00.000Z",
+      "documentation": [
+        "https://code.claude.com/docs/en/hooks"
+      ],
+      "reason": "Synthetic support assertion for adapter tests only; not a real client capability claim.",
+      "probe": {
+        "path": "claude-probe.jsonl",
+        "sha256": "b056709f4306807a037eed4817411dc0e841c2336059f8324c2c000550e5d30b",
+        "endedAt": "2026-01-01T01:01:00.000Z",
+        "locations": [
+          "claude-probe.jsonl:1"
+        ],
+        "reading": "Synthetic native evidence only; asynchronous delivery is not established by these records.",
+        "capturePath": "claude-probe-capture.json",
+        "selection": {
+          "question": 1,
+          "preparation": 2,
+          "answer": 3,
+          "revisedRecommendation": 4,
+          "continuation": 5,
+          "preparationFinding": "Base supports mobile entry",
+          "preparationUse": "Base supports mobile entry"
+        }
+      }
+    }
+  },
+  "selection": {
+    "question": 1,
+    "preparation": 2,
+    "answer": 3,
+    "revisedRecommendation": 4,
+    "continuation": 5,
+    "preparationFinding": "Base supports mobile entry",
+    "preparationUse": "Base supports mobile entry"
+  },
+  "reviews": [],
+  "verdictVersion": 4
+}
