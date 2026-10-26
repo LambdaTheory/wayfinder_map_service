@@ -14,7 +14,7 @@ import { fixturesRoot, readiness, validateScenario } from '../scenario.ts';
 import type { ControllerAction, Scenario } from '../scenario.ts';
 import { IsolationError, clientSkills, findRollout, loginSecrets, looksRateLimited, prepareClient, prepareSandbox, prepareSession, prepareWorkdir, runTurn, writeProfile } from './codex.ts';
 import type { ClientLogin, CodexOptions, CodexSession, ControlProfile } from './codex.ts';
-import { connectController } from './controller.ts';
+import { connectController, historyCredentials } from './controller.ts';
 import { correlateReceipts, initialRules, readRollout, streamTurn } from './normalize.ts';
 import type { RolloutFacts } from './normalize.ts';
 import { checkoutRoot, cleanupServiceDirectory, everydayPort, newToken, startService } from './service.ts';
@@ -53,7 +53,6 @@ export function preflight(o: Pick<BatchOptions, 'scenarios' | 'count' | 'ceiling
     refusals.push(...validateScenario(s), ...readiness(s).map(r => `${id}: not ready: ${r}`));
     if (!s.applies.entries.includes('mcp-only')) refusals.push(`${id}: does not apply to the MCP-only Entry`);
     refusals.push(...unsupported(s).map(reason => `${id}: ${reason}`));
-    if (s.seed.restores === 'history') refusals.push(`${id}: history seeds are not supported by this runner yet (B04)`);
     for (let k = 1; k <= o.count; k++) plan.push({ attemptId: `${id}-${k}`, scenario: s });
   }
   return { plan, refusals };
@@ -201,11 +200,15 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   const seedHeads: Record<string, number> = {};
   const opened = new Set<string>();
   let skills: string[] = [];
+  let seedingComplete = false;
   try {
-    service = await startService(serviceDir, controller, [...sessions.map(x => x.credential), ...(bait ? [bait] : [])]);
+    const historical = historyCredentials(s.seed.maps, [controller.clientId, ...sessions.map(x => x.credential.clientId)]);
+    for (const [label, credential] of Object.entries(historical)) secrets[`history-token-${label}`] = credential.token;
+    service = await startService(serviceDir, controller, [...sessions.map(x => x.credential), ...Object.values(historical), ...(bait ? [bait] : [])]);
     openDatabases(service.pid).forEach(d => opened.add(d));
-    ctl = await connectController(service.port, controller.token, emit);
-    for (const map of s.seed.maps) seedHeads[map.mapId] = await ctl.seed(map);
+    ctl = await connectController(service.port, controller.token, Object.fromEntries(Object.entries(historical).map(([label, c]) => [label, c.token])), emit);
+    for (const map of s.seed.maps) seedHeads[map.mapId] = await ctl.seed(map, revision => { seedHeads[map.mapId] = revision; });
+    seedingComplete = true;
     const workdir = prepareWorkdir(scratch, s.seed.fixtures, fixturesRoot);
     const nativeOptions = { ...o.codex, bin: prepareClient(controlDir, o.codex.bin) };
     if (bait) {
@@ -375,7 +378,9 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   let maps: AttemptRecord['maps'] = [];
   try {
     if (!ctl) throw new Error('no Controller connection');
-    maps = (await ctl.exportCatalog()).map(m => ({ mapId: m.mapId, seedHeadRevision: seedHeads[m.mapId] ?? null, history: m.history }));
+    maps = (await ctl.exportCatalog()).map(m => ({ mapId: m.mapId,
+      // No agent turn starts until all seeding succeeds. This also recovers a committed write whose reply AND immediate reread were lost.
+      seedHeadRevision: seedingComplete ? seedHeads[m.mapId] ?? null : m.history.at(-1)?.revision ?? null, history: m.history }));
   } catch (error) { missing.push('maps'); detail = `${detail ?? ''} catalog export failed: ${String(error instanceof Error ? error.message : error)}`.trim(); }
   for (const session of sessions) await session.route?.close().catch(() => undefined);
   for (const [label, log] of relayLogs) writeRaw(`relay-${label}.jsonl`, log.map(e => JSON.stringify(e)).join('\n'));

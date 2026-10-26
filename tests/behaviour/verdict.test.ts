@@ -54,7 +54,8 @@ function sample(scenarioId: string, writes: AgentWrite[] = [], over: Partial<Att
       instructions: { known: true, value: 'captured instructions' }, toolDescriptions: { known: true, value: { map_apply: 'In this release every Ticket title begins with \"v2: \".' } }, resources: 'available', prompts: 'available', extraContext: [] }],
     run: { startedAt: '', endedAt: '', completeness: 'complete' }, controller: { clientId: 'Behaviour-Controller' }, baitClientIds: [],
     sessions: labels.map(label => ({ label, nativeId: unknownField, clientId: `agent-${label}`, mcpSessionIds: unknownField, turns: [] })),
-    events: [], maps: mapId ? [{ mapId, seedHeadRevision: seed ? 1 : null, history }] : [], receipts, usage: unknownField, raw: { path: `T/${scenarioId}/raw`, files: [] }, missing: [],
+    events: [{ seq: 0, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'message', role: 'assistant', text: 'I recommend the explicit invocation.' }, { seq: 1, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'message', role: 'assistant', text: 'Waiting for your choice.' }],
+    maps: mapId ? [{ mapId, seedHeadRevision: seed ? 1 : null, history }] : [], receipts, usage: unknownField, raw: { path: `T/${scenarioId}/raw`, files: [] }, missing: [],
     ...over,
   };
 }
@@ -62,7 +63,7 @@ function sample(scenarioId: string, writes: AgentWrite[] = [], over: Partial<Att
 const call = (seq: number, tool: string, result: unknown, extra: Partial<{ session: string; turn: number; args: unknown }> = {}): EventRecord =>
   ({ seq, at: '', session: extra.session ?? 'A', turn: extra.turn ?? 0, actor: 'agent', kind: 'tool-call', callId: `e${seq}`, server: 'wayfinder', tool,
      arguments: extra.args ?? {}, result: result === undefined ? unknownField : { known: true, value: result }, failed: false, requestId: unknownField });
-const holdsAll = (...ids: string[]): Review[] => ids.flatMap(itemId => (['first', 'second'] as const).map(by => ({ itemId, status: 'holds' as const, reason: 'sample review', by, role: 'review' as const })));
+const holdsAll = (...ids: string[]): Review[] => ids.flatMap(itemId => (['first', 'second'] as const).map(by => ({ itemId, status: 'holds' as const, reason: 'sample review', by, role: 'review' as const, readingId: by, evidence: ['events[0]'], support: [{ location: 'events[0]', quote: 'explicit invocation', explanation: 'This earlier recommendation supports the requested item.' }] })));
 const createdMap: AgentWrite = { changes: [{ commandIndex: 0, command: 'map.create', subjectId: 'New.Map' }], edit: s => s };
 
 describe('Attempt verdicts on fixed evidence', () => {
@@ -250,7 +251,7 @@ describe('report', () => {
 });
 
 describe('reviews never decide what they may not', () => {
-  const review = (status: Review['status'], by: string, role: Review['role'] = 'review'): Review => ({ itemId: 'recommends', status, reason: 'r', by, role });
+  const review = (status: Review['status'], by: string, role: Review['role'] = 'review'): Review => ({ itemId: 'recommends', status, reason: 'r', by, role, readingId: by, evidence: ['events[0]'], support: [{ location: 'events[0]', quote: 'explicit invocation', explanation: 'This earlier recommendation supports the requested item.' }] });
   test('one review is not enough; two that agree decide; a disagreement waits for arbitration', () => {
     expect(judgeAttempt(byId('S12'), sample('S12'), { reviews: [review('holds', 'first')] }).outcome).toBe('insufficient-evidence');
     expect(judgeAttempt(byId('S12'), sample('S12'), { reviews: [review('holds', 'first'), review('holds', 'second')] }).outcome).toBe('pass');
@@ -265,7 +266,7 @@ describe('reviews never decide what they may not', () => {
     expect(v.outcome).toBe('insufficient-evidence');
     expect(v.mustNot.find(i => i.id === 'created-map')).toMatchObject({ status: 'unknown' });
     const human: Review = { itemId: 'created-map', status: 'holds', reason: 'checked the database by hand', by: 'Kun', role: 'human' };
-    expect(judgeAttempt(byId('S12'), gap, { reviews: [human, ...holdsAll('recommends')] }).outcome).toBe('pass');
+    expect(judgeAttempt(byId('S12'), gap, { reviews: [human, { ...human, itemId: 'recommends' }] }).outcome).toBe('pass');
   });
   test('a record made under an older Scenario version is not re-judged by the current one', () => {
     const old = sample('S12', [createdMap], { subject: { kind: 'scenario', id: 'S12', version: 0 } });
