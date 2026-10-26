@@ -87,6 +87,7 @@ export async function host(args: string[], options: { subscriptionHome: string; 
   let before = unavailable(); let after = unavailable();
   let opened: Field<string[]> = { known: false, reason: 'service did not open a database' };
   let phase: 'setup' | 'service' | 'client' = 'setup';
+  let launchExposed = false; let clientExitAttested = false;
   const abort = new AbortController();
   const readline = createInterface({ input: process.stdin, output: process.stdout });
   const cancelled = () => { capture.run.completeness = 'cancelled'; abort.abort(); };
@@ -113,10 +114,12 @@ export async function host(args: string[], options: { subscriptionHome: string; 
     const launchPath = join(scratch, 'launch.sh');
     writeFileSync(launchPath, launcher({ scratch, client, bin, port: service.port, token: agent.token, model, effort,
       subscriptionHome: options.subscriptionHome, proxyEnv }), { mode: 0o700 });
+    launchExposed = true;
     console.log(`Private Attempt: ${dir}\nClient command (approved Batch only): ${q(launchPath)}\nOpening line: ${scenario.turns[0]!.say}\nStop the client before finishing here. The host has a 60-minute ceiling.`);
     capture.run.completeness = 'cancelled';
     const status = await readline.question('Client exited; enter complete, precondition-not-met, launch-failed, timeout, rate-limited, cancelled, driver-failed, or service-failed: ', { signal: abort.signal });
     if (!completeness.includes(status as Completeness)) throw new Error('unrecognized capture outcome');
+    clientExitAttested = true;
     capture.run.completeness = status as Completeness;
   } catch (error) {
     const safe = new Error(privateText(String(error), secrets));
@@ -155,7 +158,9 @@ export async function host(args: string[], options: { subscriptionHome: string; 
       }
       let loginSync: unknown = { status: 'not-applicable' };
       let syncFailed = false;
-      if (scratch && client === 'codex') {
+      const pendingClient = launchExposed && !clientExitAttested;
+      if (scratch && pendingClient) loginSync = { status: 'deferred', retainedScratch: scratch, reason: 'client exit not attested; no refresh synchronization or scratch removal is safe' };
+      if (scratch && !pendingClient && client === 'codex') {
         try { loginSync = syncCodexLogin(scratch, options.subscriptionHome); }
         catch {
           syncFailed = true; capture.run.completeness = 'driver-failed';
@@ -163,7 +168,7 @@ export async function host(args: string[], options: { subscriptionHome: string; 
           loginSync = { status: 'failed', retainedScratch: scratch };
         }
       }
-      if (scratch && !syncFailed) rmSync(scratch, { recursive: true, force: true });
+      if (scratch && !syncFailed && !pendingClient) rmSync(scratch, { recursive: true, force: true });
       rmSync(join(dir, 'credentials.json'), { force: true });
       capture.run.endedAt = new Date().toISOString();
       if (!capture.maps.length) capture.missing.push('maps');
@@ -173,7 +178,7 @@ export async function host(args: string[], options: { subscriptionHome: string; 
         codexLoginSync: loginSync,
         scratchRemoved: scratch ? !existsSync(scratch) : null, credentialsRemoved: !existsSync(join(dir, 'credentials.json')),
         port: service?.port, database: service?.databasePath, measurements: isolationMeasurements(before, after, opened, service?.databasePath),
-        clientExit: { known: false, reason: 'manually launched client exit is operator-attested' } }, secrets);
+        clientExit: { known: false, reason: clientExitAttested ? 'manually launched client exit is operator-attested, not measured' : 'client exit not attested; exposed scratch retained' } }, secrets);
       if (syncFailed) throw new Error(capture.run.detail);
     }
   }

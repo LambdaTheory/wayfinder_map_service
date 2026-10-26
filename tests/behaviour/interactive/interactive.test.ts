@@ -166,7 +166,7 @@ it('manual launchers isolate HOME/configuration, use their own credential and co
   }
 });
 
-it.each(['', 'refresh', 'failure'])('the manual host stops only its own service and preserves subscription state (%s)', async mode => {
+it.each(['', 'refresh', 'failure', 'cancel'])('the manual host stops only its own service and preserves subscription state (%s)', async mode => {
   const { spawn } = await import('node:child_process');
   const { cacheRoot } = await import('./host.ts');
   const attempt = `fixture-${process.pid}-${Date.now()}`;
@@ -176,15 +176,15 @@ it.each(['', 'refresh', 'failure'])('the manual host stops only its own service 
       'codex', 'synthetic-model', 'high', 'W7', process.execPath], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, B09_SYNTHETIC_REFRESH: mode } });
     let output = ''; let answered = false;
     const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(output)); }, 20_000);
-    child.stdout.on('data', data => { output += data; if (!answered && output.includes('Client exited; enter')) { answered = true; child.stdin.write('complete\n'); } });
+    child.stdout.on('data', data => { output += data; if (!answered && output.includes('Client exited; enter')) { answered = true; if (mode === 'cancel') child.stdin.end(); else child.stdin.write('complete\n'); } });
     child.stderr.on('data', data => { output += data; });
     child.on('error', reject); child.on('close', code => { clearTimeout(timer); resolve({ code, output }); });
   });
-  expect(result, result.output).toMatchObject({ code: mode === 'failure' ? 1 : 0 });
+  expect(result, result.output).toMatchObject({ code: ['failure', 'cancel'].includes(mode) ? 1 : 0 });
   const isolation = JSON.parse(readFileSync(join(dir, 'isolation.json'), 'utf8'));
-  expect(isolation).toMatchObject({ serviceStopped: { known: true }, scratchRemoved: mode !== 'failure', credentialsRemoved: true });
-  expect(isolation.codexLoginSync.status).toBe(mode === 'failure' ? 'failed' : mode === 'refresh' ? 'synced' : 'linked');
-  if (mode === 'failure') {
+  expect(isolation).toMatchObject({ serviceStopped: { known: true }, scratchRemoved: !['failure', 'cancel'].includes(mode), credentialsRemoved: true });
+  expect(isolation.codexLoginSync.status).toBe(mode === 'cancel' ? 'deferred' : mode === 'failure' ? 'failed' : mode === 'refresh' ? 'synced' : 'linked');
+  if (mode === 'failure' || mode === 'cancel') {
     const retained = isolation.codexLoginSync.retainedScratch; dirs.push(retained);
     expect(readFileSync(join(retained, 'home/.codex/auth.json'), 'utf8')).toBe('synthetic-refreshed-login');
   }
