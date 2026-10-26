@@ -42,9 +42,10 @@ async function fixture(failStorage = false, toolsOnly = false) {
   const records = () => readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line) as CallMetadataRecord).filter(record => record.schema === 'wayfinder-service-call/1');
   return { dir, path, log, config, service, records };
 }
-async function post(port: number, body: unknown, session?: string, bearer = token) {
+async function post(port: number, body: unknown, session?: string, bearer: string | null = token) {
   const response = await fetch(`http://127.0.0.1:${port}/mcp`, { method: 'POST', headers: {
-    Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Connection: 'close',
+    ...(bearer === null ? {} : { Authorization: `Bearer ${bearer}` }),
+    'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Connection: 'close',
     ...(session ? { 'mcp-session-id': session, 'mcp-protocol-version': '2025-11-25' } : {}),
   }, body: JSON.stringify(body) });
   return { status: response.status, session: response.headers.get('mcp-session-id'), body: await response.text() };
@@ -199,6 +200,21 @@ test('B07: real SDK GET stream probe is expected, and HTTP/session fields remain
 test('B07: stale sessions and non-ID request strings retain safe correlation across restart', async () => {
   const f = await fixture(); const a = await initialize(f.config.port); await f.service.stop();
   const service = await startLocalMcpService(f.config); cleanups.push(() => service.stop());
+  for (const bearer of [null, 'synthetic-rejected-bearer-credential-0000']) {
+    for (const presentedSession of ['Kun-private-plan-name', 'synthetic-other-credential-0000000000']) {
+      const denied = await post(f.config.port, { jsonrpc: '2.0', id: 'Private-request-content', method: 'tools/call',
+        params: { name: 'map_read', arguments: { mapId: 'Private-map-content' } } }, presentedSession, bearer);
+      expect(denied.status).toBe(401);
+      expect(denied.body).toBe(JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: 'Local token required' }, id: null }));
+      expect(f.records().at(-1)).toMatchObject({ httpMethod: 'POST', httpStatus: 401, result: 'transport-failure',
+        mcpSessionId: null, presentedMcpSessionId: null, clientId: null, credentialFingerprint: null,
+        requestId: null, requestIdType: null, requestIdHash: null, method: null, tool: null, mapId: null });
+      const logged = readFileSync(f.log, 'utf8');
+      for (const content of [presentedSession, bearer, 'Private-request-content', 'Private-map-content'].filter(value => value !== null)) {
+        expect(logged).not.toContain(content);
+      }
+    }
+  }
   const rawId = '/private/synthetic request';
   const response = await call(f.config.port, a.session, rawId, 'map_list');
   expect(response.status).toBe(404);
@@ -231,8 +247,8 @@ test.each([false, true])('B07: the last failed observation stays durable across 
 
 test('B07: observations hold no raw credentials and fingerprints are separated from authentication verifiers', () => {
   const metadata = new CallMetadata('/synthetic', token);
-  const observation = metadata.begin(`Bearer ${token}`, 'POST', token);
-  metadata.identify(observation, clientId, token);
+  const observation = metadata.begin('POST');
+  metadata.identify(observation, clientId, token, token);
   metadata.capture(observation, { id: token, method: 'tools/call', params: { name: 'map_read', arguments: { mapId: token } } });
   expect(JSON.stringify(observation)).not.toContain(token);
   expect(observation!.fields).toMatchObject({ presentedMcpSessionId: null, mapId: null, requestId: null, requestIdHash: requestIdHash(token) });

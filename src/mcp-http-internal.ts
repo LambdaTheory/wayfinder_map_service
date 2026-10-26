@@ -149,7 +149,8 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
     if (!credential) { httpFailure(response, 401, 'Local token required'); return; }
     const presentedSession = typeof request.headers['mcp-session-id'] === 'string' ? sessions.get(request.headers['mcp-session-id']) : undefined;
     const matchingSession = presentedSession && timingSafeEqual(presentedSession.credential, credential.key) ? presentedSession : undefined;
-    metadata.identify(observation, matchingSession?.clientId ?? credential.clientId, request.headers.authorization!.slice(7), matchingSession?.transport.sessionId);
+    metadata.identify(observation, matchingSession?.clientId ?? credential.clientId, request.headers.authorization!.slice(7),
+      request.headers['mcp-session-id'], matchingSession?.transport.sessionId);
     const origin = request.headers.origin;
     if (origin !== undefined && !origins.has(origin)) { httpFailure(response, 403, 'Origin forbidden'); return; }
     if (request.url !== '/mcp') { httpFailure(response, 404, 'Endpoint not found'); return; }
@@ -243,7 +244,7 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
   }
   const http = createServer((request, response) => {
     const observation = requestTarget(request.url, host)?.pathname === '/mcp'
-      ? metadata.begin(request.headers.authorization, request.method, request.headers['mcp-session-id']) : undefined;
+      ? metadata.begin(request.method) : undefined;
     const work = metadata.run(observation, async () => {
       try { await handle(request, response, observation); }
       catch { httpFailure(response, 500, 'Service failure; outcome unknown'); }

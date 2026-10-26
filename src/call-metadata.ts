@@ -98,7 +98,7 @@ export class CallMetadata {
 
   status() { return { observations: this.sequence, missingObservations: this.missing }; }
 
-  begin(authorization: string | undefined, httpMethod: string | undefined, presentedSession: unknown): CallObservation | undefined {
+  begin(httpMethod: string | undefined): CallObservation | undefined {
     try {
       const observation: CallObservation = { fields: { startedAt: new Date().toISOString(),
         httpMethod: httpMethod && httpMethods.has(httpMethod) ? httpMethod : null, httpStatus: null,
@@ -106,8 +106,6 @@ export class CallMetadata {
         clientId: null, credentialFingerprint: null, method: null, tool: null, mapId: null },
       startedMonotonicMs: performance.now(), handled: false, toolCompleted: false, httpCompleted: false,
       recorded: false, failed: false, protocolFailed: false, result: undefined };
-      this.secrets.set(observation, secretDigest(authorization?.replace(/^Bearer /, '') ?? ''));
-      observation.fields.presentedMcpSessionId = this.safeId(presentedSession, observation);
       return observation;
     } catch { this.sequence++; this.gap(); return undefined; }
   }
@@ -129,10 +127,13 @@ export class CallMetadata {
     try { action(observation); } catch { observation.failed = true; }
   }
 
-  identify(observation: CallObservation | undefined, clientId: string, token: string, sessionId?: string): void {
+  // Only the authenticated HTTP path may supply client/session headers.
+  identify(observation: CallObservation | undefined, clientId: string, token: string, presentedSession: unknown, sessionId?: string): void {
     this.update(observation, value => {
+      this.secrets.set(value, secretDigest(token));
       value.fields.clientId = this.safeId(clientId, value);
       value.fields.credentialFingerprint ??= credentialFingerprint(token);
+      value.fields.presentedMcpSessionId = this.safeId(presentedSession, value);
       if (sessionId !== undefined) value.fields.mcpSessionId = this.safeId(sessionId, value);
     });
   }

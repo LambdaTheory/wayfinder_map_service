@@ -52,6 +52,8 @@ Observed smoke summary:
 
 ## Self-review and remaining gates
 
+Second review follow-up: presented session IDs and the credential-filter digest are now supplied to metadata only after Host and token checks pass. The stale-session regression also sends missing/invalid credentials with arbitrary content and a credential-shaped value in the session header, plus content-bearing request fields. Each 401 keeps client/session/request fields null, retains the exact refusal bytes, and leaves none of those supplied values in the log; authenticated stale-session correlation still works. Inspection of the pre-authentication path confirms that only allowlisted HTTP method/status, server timing and counters are persisted, with no other raw header or request-body field.
+
 **Standards:** no remaining findings. Metadata stays at the HTTP/operator boundary, outside the pure domain and SQLite mutation transaction; projection uses bounded identifiers and allowlists rather than serializing input/output. File and diagnostic failures cannot alter a tool receipt. Changes are confined to B07 implementation, launcher, tests, operator documentation and release records.
 
 **Spec:** no remaining findings against Issue 78. Default recording requires no entry-specific flag; calls that write nothing and missing records are covered. Existing Client IDs and B01 keys are reused, with no new identity or MCP tool. Source authorization and human-verdict semantics are unchanged.
