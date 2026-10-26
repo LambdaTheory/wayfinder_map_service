@@ -35,6 +35,8 @@ Approved by Kun on 2026-10-25 (Issue #65) to repeat the onboarding under the all
 
 F11 has now failed in three of three Attempts on 2.0.2 (product Issue #87).
 
+These B1/B2 Attempts supply B04's reproduction evidence. The [F11 capture trace](behaviour-capture.md#f11-trace) connects the source question and Revision to the unchanged B01 seed, conversion/redaction record, verdict items and library entry; its new-tool check uses only the public fixture and synthetic SQLite data.
+
 **Codex Driver onboarding (R2), MCP-only Entry, passed:**
 
 1. Runs and resumes: S0b's second turn resumed the same thread.

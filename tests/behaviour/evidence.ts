@@ -28,7 +28,10 @@ export type Surface = 'available' | 'unavailable' | 'undocumented';
 
 /** What the client was actually given in one phase of the Attempt; content it did not show its model is never claimed as read. */
 export interface GivenRules {
-  /** `initial` at the first connection; later phases after a Controller restart or an app refresh (upgrade checks). */
+  /** The logical session and first turn whose native log proves this rule exposure. */
+  session?: string;
+  turn?: number;
+  /** `initial` identifies the initial service phase, with exposure rechecked per native turn; later phases follow a restart or refresh. */
   phase: 'initial' | 'after-restart' | 'after-refresh';
   /** First event sequence number this phase covers. */
   fromSeq: number;
@@ -48,9 +51,12 @@ export interface GivenRules {
 /**
  * Markers a Driver puts in `missing` when a whole evidence class is unavailable. A check that needs a missing
  * class answers `unknown`, never `holds`. Single fields use their path instead, e.g. `combination.visibleModel`.
+ * Native integrity guards are also registered here; `combination.model-mismatch` means requested versus observed,
+ * while a missing or conflicting native model observation uses the `combination.visibleModel` field path.
  */
 export const missingMarkers = ['maps', 'receipts', 'events', 'events.message', 'events.tool-call', 'events.resource-read',
-  'events.file-read', 'events.file-change', 'events.command', 'events.delegation'] as const;
+  'events.file-read', 'events.file-change', 'events.command', 'events.delegation', 'events.process',
+  'native.integrity', 'native.boundaries', 'native.sidechain', 'native.unhandled', 'combination.model-mismatch'] as const;
 
 export interface AttemptRecord {
   schema: typeof attemptSchema;
@@ -97,7 +103,7 @@ export interface SessionRecord {
   clientId: string;
   /** MCP session IDs the service issued to this session (reconnects add more): the join key with service metadata (B07). */
   mcpSessionIds: Field<string[]>;
-  turns: { index: number; input: string; startedAt: string; endedAt: string; durationMs: number }[];
+  turns: { nativeId?: Field<string>; index: number; input: string; startedAt: string; endedAt: string; durationMs: number }[];
 }
 
 /** Who acted. Controller seeding, injected Conflicts and evidence reads never count as agent behaviour. */
@@ -106,7 +112,9 @@ export type Actor = 'agent' | 'controller' | 'script-human';
 interface EventBase { seq: number; at: string; session: string | null; turn: number | null; actor: Actor }
 
 export type EventRecord = EventBase & (
-  | { kind: 'message'; role: 'assistant' | 'user'; text: string }
+  | { kind: 'message'; role: 'assistant' | 'user'; text: string;
+      /** Native tool results synthesized as user input retain their origin; they are not free-form human delivery. */
+      inputSource?: { kind: 'question-tool'; tool: string; callId: string } }
   | { kind: 'tool-call'; callId: string; server: string; tool: string; arguments: unknown;
       result: Field<unknown>; failed: boolean;
       /** The JSON-RPC request ID when the Driver can see it; joins the call to the service's metadata record. */
@@ -224,7 +232,11 @@ export const requiredFields = ['subject.kind', 'subject.id', 'subject.version', 
 export function redact(text: string, secrets: Record<string, string>): string {
   let out = text;
   for (const [name, secret] of Object.entries(secrets)) {
-    if (secret) out = out.split(secret).join(`<${name}>`);
+    if (name === 'bait-address' && secret) {
+      const port = new URL(secret).port;
+      // Match host aliases and schemeless commands, but never a different, longer port number.
+      out = out.replace(new RegExp(`(?:https?://)?(?:127\\.0\\.0\\.1|localhost):${port}(?![0-9])`, 'g'), `<${name}>`);
+    } else if (secret) out = out.split(secret).join(`<${name}>`);
   }
   return out;
 }

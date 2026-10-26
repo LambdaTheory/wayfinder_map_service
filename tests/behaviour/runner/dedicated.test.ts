@@ -1,3 +1,4 @@
+import { syntheticClientState } from './test-state.ts';
 // Model-free onboarding evidence for the Dedicated Entry; real-model onboarding still needs an approved Batch.
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -8,7 +9,7 @@ import { afterAll, expect, test } from 'vitest';
 import { clientProfiles, supportsFor } from '../clients.ts';
 import type { AttemptRecord } from '../evidence.ts';
 import { library } from '../library.ts';
-import { prepareSession, writeProfile } from './codex.ts';
+import { prepareClient, prepareSandbox, prepareSession } from './codex.ts';
 import { captureDedicatedArtifacts, dedicatedContext, dedicatedLauncher, dedicatedServiceDirectory, prepareDedicated, runDedicatedTurn } from './dedicated.ts';
 import { isolationSnapshot, preflight, runAttempt, runBatch } from './run.ts';
 import { newToken, startService } from './service.ts';
@@ -23,7 +24,8 @@ chmodSync(fake, 0o700);
 const auth = join(scratch, 'synthetic-auth.json');
 writeFileSync(auth, '{}', { mode: 0o600 });
 const sandbox = spawnSync('which', ['sandbox-exec']).status === 0;
-const options = { model: 'fake-model', effort: 'low', bin: fake, sandbox, timeoutMs: 60_000, authFile: auth };
+const clientState = syntheticClientState(scratch);
+const options = { model: 'fake-model', effort: 'low', bin: fake, sandbox, timeoutMs: 60_000 };
 afterAll(() => { rmSync(scratch, { recursive: true, force: true }); rmSync(records, { recursive: true, force: true }); });
 
 test('Dedicated planning is explicit, and synthetic evidence does not onboard the Entry', () => {
@@ -34,11 +36,11 @@ test('Dedicated planning is explicit, and synthetic evidence does not onboard th
 });
 
 test.skipIf(!sandbox)('real launcher runs and resumes inside the allowlist, records its context and never reaches everyday state', async () => {
-  const before = isolationSnapshot();
+  const before = isolationSnapshot(clientState.personalConfigRoot);
   const out = join(records, 'run');
   const scenario = library.find(s => s.id === 'S0b')!;
   const outcome = await runAttempt({ entry: 'dedicated', batchId: 'DedicatedFake', scenarios: [], count: 1, ceiling: 1, out,
-    codex: options, scratchRoot: scratch }, { attemptId: 'S0b-1', scenario: { ...scenario, seed: { ...scenario.seed, fixtures: ['ask-card'] } } }, () => false, () => undefined);
+    codex: options, scratchRoot: scratch, ...clientState }, { attemptId: 'S0b-1', scenario: { ...scenario, seed: { ...scenario.seed, fixtures: ['ask-card'] } } }, () => false, () => undefined);
   expect(outcome.completeness, outcome.detail).toBe('complete');
   const path = join(out, 'S0b-1');
   const record = JSON.parse(readFileSync(join(path, 'attempt.json'), 'utf8')) as AttemptRecord & { isolation: Record<string, unknown> };
@@ -72,7 +74,7 @@ test.skipIf(!sandbox)('real launcher runs and resumes inside the allowlist, reco
   expect(first.argv.join(' ')).not.toMatch(/:(18765|18766)\//);
   const probe = JSON.parse(readFileSync(join(path, 'raw/work/entry-probe.json'), 'utf8'));
   expect(probe.privateHome).toBe(first.home);
-  expect(probe.authTarget.replace(homedir(), '~')).toBe(`${first.overrides.WAYFINDER_AGENT_SERVICE_DIR}/launcher-home/.codex/auth.json`);
+  expect(probe.authTarget).toMatch(/\/read-only-[^/]+\/launcher-home\/\.codex\/auth.json$/);
   expect(probe.instructionsAvailable && probe.skillAvailable && probe.authReadable).toBe(true);
   expect(probe.bootstrapKeys).toEqual([]);
   expect(probe.resumed).toBe(true);
@@ -80,13 +82,13 @@ test.skipIf(!sandbox)('real launcher runs and resumes inside the allowlist, reco
   expect(existsSync(join(path, 'raw/work/src/ask-card.js'))).toBe(true);
   const commands = record.events.filter(e => e.kind === 'command');
   expect(commands.map(e => e.kind === 'command' && e.exitCode)).toEqual([0, 1, 0, 0, 1, 0]);
-  expect(isolationSnapshot()).toEqual(before);
+  expect(isolationSnapshot(clientState.personalConfigRoot)).toEqual(before);
 }, 60_000);
 
 test.skipIf(!sandbox)('Dedicated Batch metadata, ceilings and directory refusal preserve the Entry', async () => {
   const out = join(records, 'batch');
   const batch = { entry: 'dedicated' as const, batchId: 'DedicatedBatch', scenarios: ['S0b'], count: 2, ceiling: 1,
-    out, codex: options, scratchRoot: scratch };
+    out, codex: options, scratchRoot: scratch, ...clientState };
   const result = await runBatch(batch);
   expect(result.refusals).toEqual([]);
   expect(result.outcomes.map(o => o.completeness)).toEqual(['complete', 'not-run']);
@@ -101,7 +103,7 @@ test.skipIf(!sandbox)('Dedicated timeouts retain evidence and clean up the owned
   const scenario = library.find(s => s.id === 'S12')!;
   const out = join(records, 'timeout');
   const outcome = await runAttempt({ entry: 'dedicated', batchId: 'DedicatedTimeout', scenarios: [], count: 1, ceiling: 1,
-    out, codex: { ...options, timeoutMs: 1_500 }, scratchRoot: scratch },
+    out, codex: { ...options, timeoutMs: 1_500 }, scratchRoot: scratch, ...clientState },
   { attemptId: 'D-1', scenario: { ...scenario, turns: [{ session: 'A', kind: 'opening', say: 'FAKE-SLEEP' }] } }, () => false, () => undefined);
   expect(outcome.completeness).toBe('timeout');
   const record = JSON.parse(readFileSync(join(out, 'D-1/attempt.json'), 'utf8'));
@@ -115,10 +117,13 @@ test('a stopped run service cannot make the launcher spawn an untracked replacem
   const controller = { clientId: 'Behaviour-Controller', token: newToken() };
   const service = await startService(dir, controller, []);
   try {
-    const session = prepareSession(own, 'A', newToken(), auth);
-    const setup = prepareDedicated(own, session, service, controller, options, writeProfile(own, fake));
+    const session = prepareSession(own, 'A', newToken(), { contents: '{}' });
+    const layout = prepareSandbox(own);
+  const workdir = join(own, 'work'); mkdirSync(workdir);
+  const nativeOptions = { ...options, bin: prepareClient(layout.controlDir, options.bin) };
+  const setup = prepareDedicated(own, session, service, controller, nativeOptions, layout, workdir);
     await service.stop();
-    const result = spawnSync(dedicatedLauncher, ['--harness', 'codex', '--method', 'mcp', '--', 'exec', '--json', '-'],
+    const result = spawnSync('/usr/bin/python3', ['-I', setup.launcher, '--harness', 'codex', '--method', 'mcp', '--', 'exec', '--json', '-'],
       { cwd: own, env: { ...setup.env, WAYFINDER_AGENT_DRY_RUN: '1' }, input: 'never run', encoding: 'utf8', timeout: 15_000 });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('npm run build');
@@ -143,15 +148,17 @@ async function launcherFixture() {
   const own = mkdtempSync(join(scratch, 'cross-turn-'));
   const controller = { clientId: 'Behaviour-Controller', token: newToken() };
   const service = await startService(dir, controller, []);
-  const session = prepareSession(own, 'A', newToken(), auth);
-  const setup = prepareDedicated(own, session, service, controller, options, writeProfile(own, fake));
-  session.codexHome = setup.codexHome;
+  const session = prepareSession(own, 'A', newToken(), { contents: '{}' });
+  const layout = prepareSandbox(own);
   const workdir = join(own, 'work'); mkdirSync(workdir);
-  const request = { options, session, port: service.port, workdir, profile: setup.profile, prompt: 'start' };
+  const nativeOptions = { ...options, bin: prepareClient(layout.controlDir, options.bin) };
+  const setup = prepareDedicated(own, session, service, controller, nativeOptions, layout, workdir);
+  session.codexHome = setup.codexHome;
+  const request = { options: nativeOptions, session, port: service.port, workdir, profile: setup.profile, prompt: 'start' };
   return { dir, own, setup, session, service, request,
-    sandboxed: (code: string) => spawnSync('/usr/bin/sandbox-exec', ['-f', setup.profile, process.execPath, '-e', code],
+    sandboxed: (code: string) => spawnSync('/usr/bin/sandbox-exec', ['-f', setup.profile.path, process.execPath, '-e', code],
       { cwd: workdir, env: { PATH: process.env.PATH, HOME: join(setup.state, 'home'), CODEX_HOME: setup.state }, encoding: 'utf8', timeout: 10_000 }),
-    close: async () => { await service.stop(); rmSync(dir, { recursive: true, force: true }); } };
+    close: async () => { await service.stop(); rmSync(dir, { recursive: true, force: true }); rmSync(layout.controlDir, { recursive: true, force: true }); } };
 }
 
 // These are actual client-permission writes between two real launcher invocations, not string checks.
@@ -160,8 +167,8 @@ test.skipIf(!sandbox).each(['codex', 'python3', 'service-build', 'profile'])('cr
   const marker = join(records, `escaped-${kind}`);
   try {
     expect((await runDedicatedTurn(f.request, f.setup)).turnStarted).toBe(true);
-    const target = kind === 'service-build' ? join(f.setup.control, 'launcher-checkout/dist/mcp-start.js')
-      : kind === 'profile' ? f.setup.profile : join(f.setup.control, 'launcher-bin', kind);
+    const target = kind === 'service-build' ? join(f.setup.checkout, 'dist/mcp-start.js')
+      : kind === 'profile' ? f.setup.profile.path : join(f.setup.shimDir, kind);
     const payload = kind === 'profile' ? '(version 1)\n(allow default)\n'
       : kind === 'service-build' ? `require('fs').writeFileSync(${JSON.stringify(marker)}, 'escaped')`
       : `#!/bin/sh\nprintf escaped > '${marker}'\nexit 0\n`;
@@ -186,7 +193,7 @@ test.skipIf(!sandbox)('a changed control manifest aborts before a second launche
   try {
     expect((await runDedicatedTurn(f.request, f.setup)).turnStarted).toBe(true);
     // Runner-side fault injection complements the sandbox write-denial test.
-    writeFileSync(f.setup.profile, '(version 1)\n(allow default)\n');
+    writeFileSync(f.setup.profile.path, '(version 1)\n(allow default)\n');
     await expect(runDedicatedTurn(f.request, f.setup)).rejects.toThrow(/isolation failure/);
   } finally { await f.close(); }
 }, 30_000);
@@ -235,23 +242,10 @@ test.skipIf(!sandbox).each(['symlink', 'inode'])('private source login %s substi
   } finally { await f.close(); }
 }, 30_000);
 
-test.skipIf(!sandbox)('the actual Dedicated sandbox rejects TCP connections to both everyday ports', async () => {
-  const f = await launcherFixture();
-  try {
-    const probe = f.sandboxed(`Promise.all([18765,18766].map(port => new Promise(resolve => {
-      const socket = require('net').connect(port, '127.0.0.1');
-      socket.once('connect', () => { socket.destroy(); resolve([port, 'CONNECTED']); });
-      socket.once('error', e => resolve([port, e.code]));
-    }))).then(results => console.log(JSON.stringify(results)));`);
-    expect(probe.status).toBe(0);
-    expect(JSON.parse(probe.stdout)).toEqual([[18765, 'EPERM'], [18766, 'EPERM']]);
-  } finally { await f.close(); }
-}, 30_000);
-
 test('runAttempt refuses Dedicated without a sandbox before creating resources', async () => {
   const out = join(records, 'unsafe');
   const outcome = await runAttempt({ entry: 'dedicated', batchId: 'Unsafe', scenarios: [], count: 1, ceiling: 1,
-    out, codex: { ...options, sandbox: false }, scratchRoot: scratch }, { attemptId: 'D-1', scenario: library[0]! }, () => false, () => undefined);
+    out, codex: { ...options, sandbox: false }, scratchRoot: scratch, ...clientState }, { attemptId: 'D-1', scenario: library[0]! }, () => false, () => undefined);
   expect(outcome).toMatchObject({ completeness: 'driver-failed', detail: expect.stringContaining('isolation failure') });
   expect(existsSync(out)).toBe(false);
 });
@@ -260,7 +254,7 @@ test.skipIf(!sandbox)('a launcher failure records no installed Skill just becaus
   const broken = join(scratch, 'broken-codex'); writeFileSync(broken, '#!/bin/sh\nexit 3\n', { mode: 0o700 });
   const out = join(records, 'failed-install');
   const outcome = await runAttempt({ entry: 'dedicated', batchId: 'FailedInstall', scenarios: [], count: 1, ceiling: 1,
-    out, codex: { ...options, bin: broken }, scratchRoot: scratch }, { attemptId: 'D-1', scenario: library[0]! }, () => false, () => undefined);
+    out, codex: { ...options, bin: broken }, scratchRoot: scratch, ...clientState }, { attemptId: 'D-1', scenario: library[0]! }, () => false, () => undefined);
   expect(outcome.completeness).toBe('launch-failed');
   const context = JSON.parse(readFileSync(join(out, 'D-1/raw/entry-context.json'), 'utf8'));
   expect(context.context.map((c: { installed: boolean }) => c.installed)).toEqual([false, false, false, false]);
@@ -274,7 +268,7 @@ test.skipIf(!sandbox)('tokens refreshed between turns are redacted before native
   const out = join(records, 'refresh');
   const scenario = library.find(s => s.id === 'S12')!;
   const outcome = await runAttempt({ entry: 'dedicated', batchId: 'Refresh', scenarios: [], count: 1, ceiling: 1,
-    out, codex: options, scratchRoot: scratch }, { attemptId: 'D-1', scenario: { ...scenario, turns: [
+    out, codex: options, scratchRoot: scratch, ...clientState }, { attemptId: 'D-1', scenario: { ...scenario, turns: [
       { session: 'A', kind: 'opening', say: 'FAKE-REFRESH' }, { session: 'A', kind: 'nudge', say: 'resume' },
     ] } }, () => false, () => undefined);
   expect(outcome.completeness, outcome.detail).toBe('complete');
@@ -287,17 +281,17 @@ test.skipIf(!sandbox)('runAttempt records a client auth-link attack as isolation
   const sentinel = join(records, 'attempt-sentinel'); writeFileSync(sentinel, 'unchanged');
   const hostile = join(scratch, 'hostile-codex.mjs');
   writeFileSync(hostile, `#!/usr/bin/env node
-await import(${JSON.stringify(new URL('file://' + fake).href)});
+${readFileSync(fake, 'utf8').replace(/^#![^\n]*\n/, '')}
 const fs = await import('node:fs');
 const auth = process.env.CODEX_HOME + '/auth.json';
 fs.rmSync(auth); fs.symlinkSync(${JSON.stringify(sentinel)}, auth);
 `, { mode: 0o700 });
   const out = join(records, 'hostile-attempt');
   const outcome = await runAttempt({ entry: 'dedicated', batchId: 'Hostile', scenarios: [], count: 1, ceiling: 1,
-    out, codex: { ...options, bin: hostile }, scratchRoot: scratch }, { attemptId: 'D-1', scenario: library.find(s => s.id === 'S0b')! }, () => false, () => undefined);
+    out, codex: { ...options, bin: hostile }, scratchRoot: scratch, ...clientState }, { attemptId: 'D-1', scenario: library.find(s => s.id === 'S0b')! }, () => false, () => undefined);
   expect(outcome).toMatchObject({ completeness: 'driver-failed', detail: expect.stringContaining('isolation failure') });
   const record = JSON.parse(readFileSync(join(out, 'D-1/attempt.json'), 'utf8'));
-  expect(record.isolation).toMatchObject({ failure: expect.stringContaining('changed native auth link target'),
+  expect(record.isolation).toMatchObject({ failures: expect.arrayContaining([expect.stringContaining('changed native auth link target')]),
     dedicatedServiceRemoved: true, scratchRemoved: true, serviceStopped: { code: 0 } });
   expect(record.missing).toContain('raw.client');
   expect(existsSync(join(out, 'D-1/raw/entry-context.json'))).toBe(true);

@@ -4,7 +4,9 @@ import { readiness } from './scenario.ts';
 import type { Capability, Scenario } from './scenario.ts';
 
 /**
- * What each client supports. An Entry joins `onboarded` only when its Driver has passed the five onboarding checks
+ * What each scripted Driver supports. Interactive surfaces are confirmed per version/mode in
+ * `interactive/` (B09b); synthetic native samples never promote these values. An Entry joins `onboarded`
+ * only when its Driver has passed the five onboarding checks
  * of R2 (B02a for Codex MCP-only, B02d and B06 for the rest); until then no cell is shown as applicable. `true`
  * means proven in a run, `false` known unsupported, `'unverified'` expected but not yet shown.
  */

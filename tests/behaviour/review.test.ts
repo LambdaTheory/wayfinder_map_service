@@ -2,15 +2,18 @@
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
-import { afterAll, describe, expect, test } from 'vitest';
+import { afterAll, describe, expect, test, vi } from 'vitest';
 import { attemptSchema } from './evidence.ts';
 import type { AttemptRecord } from './evidence.ts';
 import { library } from './library.ts';
 import { buildReport, renderMarkdown } from './report.ts';
 import { CliReviewDriver, codexReviewSandbox, decodeResponse, reviewArgs } from './review-cli.ts';
+import { reviewProxyVariables } from './review-proxy.ts';
 import { reviewDirectories, reviewPlan } from './review-run.ts';
-import { reviewAttempt, reviewersFor, reviewItems } from './model-review.ts';
+import { reviewAttempt, reviewItems } from './model-review.ts';
+import { reviewersFor } from './review-plan.ts';
 import { turnWriteEvidence } from './review-no-writes.ts';
 import type { ReviewDriver, ReviewRequest, ReviewResponse } from './model-review.ts';
 import { decideReviews, evidenceHash, evidenceLocations, missingForReview, reportReason, reviewProblem } from './review-verdict.ts';
@@ -87,6 +90,58 @@ describe('independent reviews over complete Attempt evidence', () => {
     expect(verdict.expect[0]!.items[0]!.evidence).toEqual(['events[0]']);
     expect(readdirSync(dirname(join(dir, result.path))).filter(x => x.endsWith('.input.json'))).toHaveLength(4);
     expect(readdirSync(dirname(join(dir, result.path))).filter(x => x.endsWith('.output.json'))).toHaveLength(4);
+  });
+  test('neutral synthetic examples cover both verdicts and satisfy the unchanged evidence validator', async () => {
+    const inputs: string[] = [];
+    const fake = new Fake((req, out) => {
+      if (req.kind === 'availability') return out;
+      inputs.push(req.input);
+      return out;
+    });
+    expect((await judged(fake)).verdict.outcome).toBe('pass');
+    expect(inputs).toHaveLength(2);
+    for (const input of inputs) {
+      const packet = JSON.parse(input.slice(input.indexOf('\n{') + 1));
+      expect(packet.syntheticCitationExamples).toHaveLength(2);
+      expect(packet.syntheticCitationExamples.map((e: { output: { items: Review[] } }) => e.output.items[0]!.status).sort()).toEqual(['holds', 'violated']);
+      expect(JSON.stringify(packet.syntheticCitationExamples)).not.toMatch(/scope|permission|Feishu|asks-scope/i);
+      for (const example of packet.syntheticCitationExamples) {
+        const a = sample(); const session = a.sessions[0]!;
+        session.label = 'SYNTHETIC'; session.turns[0]!.index = 37;
+        a.events = [{ ...a.events[0]!, kind: 'message', role: 'assistant', session: session.label, turn: 37, text: example.sources.reply.text }];
+        expect(example.sources.reply).toMatchObject({ session: 'SYNTHETIC', turn: 37 });
+        const entry = example.output.items[0];
+        expect(Object.keys(entry).sort()).toEqual(['evidence', 'itemId', 'reason', 'status', 'support']);
+        expect(entry.itemId).toBe('synthetic-label-check');
+        expect(entry.support).toHaveLength(2);
+        expect(entry.support[1].quote).toBe(turnWriteEvidence(a)[0]![0]!.statement);
+        expect(reviewProblem({ ...entry, by: 'fixture', role: 'review', readingId: 'synthetic-example' }, a)).toBeNull();
+      }
+    }
+  });
+  test('the guide identifies human events and turns as context and explains decoded quotations', async () => {
+    const a = sample();
+    a.sessions[0]!.turns[0]!.input = 'Choose "cobalt"\nthen wait.';
+    a.events.push({ seq: 12, at: '', session: 'A', turn: 0, actor: 'script-human', kind: 'message', role: 'user', text: 'A human question.' },
+      { seq: 13, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'message', role: 'user', text: 'Recorded user input.' },
+      { seq: 14, at: '', session: null, turn: null, actor: 'controller', kind: 'message', role: 'user', text: 'Controller setup.' });
+    const fake = new Fake(); const { result } = await judged(fake, a);
+    expect(result.reviews).toHaveLength(4); // Two requested items, each read twice.
+    const requests = fake.requests.filter(r => r.kind === 'review'); expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      const packet = JSON.parse(request.input.slice(request.input.indexOf('\n{') + 1));
+      expect(packet.citationGuide.contextOnly).toEqual(['sessions[0].turns[0]', 'events[2]', 'events[3]']);
+      expect(packet.citationGuide.contextOnly.every((p: string) => packet.evidenceLocations.includes(p))).toBe(true);
+      expect(request.input).toContain("sessions[i].turns[j] quotes an exact substring of that turn's decoded input field, not its JSON");
+      expect(request.input).toContain('Human message events quote decoded text');
+    }
+    const reading = result.reviews[0]!;
+    const context = { location: 'sessions[0].turns[0]', quote: a.sessions[0]!.turns[0]!.input, explanation: 'The human input supplies context only.' };
+    const supported = { ...reading, evidence: [...reading.evidence!, context.location], support: [...reading.support!, context] };
+    expect(reviewProblem(supported, a)).toBeNull();
+    expect(reviewProblem({ ...supported, support: [...reading.support!, { ...context, quote: JSON.stringify(context.quote) }] }, a))
+      .toContain('review needs quoted');
+    expect(reviewProblem({ ...reading, evidence: [context.location], support: [context] }, a)).toContain('review needs quoted');
   });
   test('disagreement goes to the stronger model with both readings and the full evidence', async () => {
     const fake = new Fake((req, out, n) => req.kind === 'availability' ? out : status(out, n === 1 ? 'holds' : 'violated'));
@@ -454,6 +509,70 @@ describe('final replies with independent same-turn evidence', () => {
     expect(judgeAttempt(f11, { ...a, modelReviews: [result] }).outcome).toBe('pass');
     expect(fake.requests.map(r => r.kind)).toEqual(['availability', 'availability', 'review', 'review']);
   });
+  test.each(['complete', 'final-only', 'listed-proof', 'pretty-tool-quote', 'wrong-item-key', 'invalid-json'] as const)(
+    'synthetic read-only F11 review: %s preserves the existing acceptance boundary', async shape => {
+      const { a, reply } = fixture('event', 'holds');
+      a.events[0]!.seq = 9; a.events[1]!.seq = 10; // Locators still use array positions, not native seq values.
+      const dir = directory(a); let raw = '';
+      const fake = new Fake((req, out) => {
+        if (req.kind === 'availability') return out;
+        const packet = JSON.parse(req.input.slice(req.input.indexOf('\n{') + 1));
+        expect(packet.citationGuide.events).toEqual(['events[0]', 'events[1]']);
+        expect(packet.citationGuide.noWrites).toEqual([{ location: 'turnWrites[0][0]', session: 'A', turn: 0,
+          quote: turnWriteEvidence(a)[0]![0]!.statement }]);
+        const proof = packet.citationGuide.noWrites[0];
+        const entry = { itemId: 'asks-scope', status: 'holds',
+          reason: 'The agent only read the scope, answered the permission question and asked before any change; turnWrites records no committed receipts and unchanged catalog heads.',
+          evidence: [reply, proof.location], support: [
+            { location: reply, quote: (a.events[1] as { text: string }).text, explanation: 'The final reply answers the question and asks before moving scope.' },
+            { location: proof.location, quote: proof.quote, explanation: 'The whole-catalog no-write proof independently confirms no Map changed in the same session and turn.' },
+          ] };
+        if (shape === 'final-only' || shape === 'listed-proof') entry.support = entry.support.slice(0, 1);
+        if (shape === 'final-only') entry.evidence = [reply];
+        if (shape === 'complete' || shape === 'pretty-tool-quote') {
+          entry.evidence.push('events[0]');
+          entry.support.push({ location: 'events[0]', quote: shape === 'complete' ? '"tool":"map_read"' : '"tool": "map_read"',
+            explanation: 'The recorded tool call reads the permission scope discussed in the reply.' });
+        }
+        const { itemId, ...rest } = entry;
+        raw = shape === 'invalid-json' ? '{"items":[' : JSON.stringify({ items: [shape === 'wrong-item-key' ? { id: itemId, ...rest } : entry] });
+        return { ...out, text: raw, stdout: raw };
+      });
+      const result = await reviewAttempt(f11, a, fake, dir, { itemIds: ['asks-scope'] });
+      expect(result.reviews).toHaveLength(2);
+      expect(fake.requests.map(r => r.kind)).toEqual(['availability', 'availability', 'review', 'review']);
+      const verdict = judgeAttempt(f11, { ...a, modelReviews: [result] });
+      if (shape === 'complete') {
+        expect(result.pending).toEqual([]); expect(result.reviews.every(r => !r.rejected)).toBe(true);
+        expect(verdict.outcome).toBe('pass');
+      } else {
+        const reason = shape === 'wrong-item-key' || shape === 'invalid-json' ? 'invalid or incomplete review JSON' : 'review needs quoted, item-relevant independent evidence';
+        expect(result.reviews.every(r => r.rejected?.includes(reason))).toBe(true);
+        expect(verdict.outcome).toBe('insufficient-evidence');
+        const saved = JSON.parse(readFileSync(join(dirname(join(dir, result.path)), '4-review.output.json'), 'utf8'));
+        expect(saved.text).toBe(raw); // Rejected native text is retained, never silently repaired.
+      }
+    });
+  test('the prompt lists receipts and individual Revisions and offers no no-write quotation for a writing turn', async () => {
+    const { a } = fixture('event', 'holds'); createMap(a, 0);
+    const inputs: string[] = [];
+    const fake = new Fake((req, out) => {
+      if (req.kind === 'availability') return out;
+      inputs.push(req.input);
+      return out;
+    });
+    const result = await reviewAttempt(f11, a, fake, directory(a), { itemIds: ['asks-scope'] });
+    expect(result.reviews).toHaveLength(2);
+    expect(fake.requests.map(r => r.kind)).toEqual(['availability', 'availability', 'review', 'review']);
+    expect(inputs).toHaveLength(2);
+    for (const input of inputs) {
+      const packet = JSON.parse(input.slice(input.indexOf('\n{') + 1));
+      expect(packet.citationGuide.receipts).toEqual(['receipts[0]']);
+      expect(packet.citationGuide.revisions).toContain('maps[1].history[0]');
+      expect(packet.citationGuide.noWrites).toEqual([]);
+      expect(packet.turnWrites[0][0]).toBeNull();
+    }
+  });
 });
 
 describe('native CLI contract without model calls', () => {
@@ -630,30 +749,67 @@ describe('PR 93 independent-review regressions', () => {
     a.missing.push('sessions[0].turns[0].input');
     expect(missingForReview('status-narration', a)).toContain('sessions[0].turns[0].input');
   });
-  test.skipIf(process.platform !== 'darwin')('Claude native process is isolated, not just given isolation flag names', async () => {
+  test.skipIf(process.platform !== 'darwin')('Claude login and review use private temporary storage inside the real sandbox', async () => {
+    let connections = 0;
+    const listener = createServer(socket => {
+      connections++; socket.on('error', () => {}); // A failed isolation probe can reset immediately; the connection count reports it.
+      socket.end('unrelated fixture');
+    });
+    await new Promise<void>((resolve, reject) => { listener.once('error', reject); listener.listen(0, '127.0.0.1', resolve); });
+    const address = listener.address();
+    if (!address || typeof address === 'string') throw new Error('missing fixture port');
     const install = mkdtempSync(join(root, 'fake-cli-')); const binDir = join(install, 'bin'); mkdirSync(binDir); const bin = join(binDir, 'claude');
     const privateFixture = join(root, 'private-context.txt'); writeFileSync(privateFixture, 'private fixture');
     writeFileSync(bin, `#!${process.execPath}
-const fs = require('node:fs'); const net = require('node:net');
-if (process.argv.includes('status')) { console.log(JSON.stringify({loggedIn:true, authMethod:'claude.ai'})); process.exit(0); }
+const fs = require('node:fs'); const net = require('node:net'); const path = require('node:path'); const assert = require('node:assert/strict');
+const isLogin = process.argv.includes('status');
+const temporary = process.env.CLAUDE_CODE_TMPDIR ?? '/tmp';
+const perUid = path.join(temporary, 'claude-' + process.getuid());
+const probe = path.join(perUid, isLogin ? 'login-probe' : 'review-probe');
+try {
+  fs.mkdirSync(perUid, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(probe, 'synthetic temporary data');
+} catch (e) { console.error('temporary storage write failed: ' + e.code); process.exit(29); }
+assert.equal(fs.readFileSync(probe, 'utf8'), 'synthetic temporary data');
+assert.equal(path.dirname(fs.realpathSync(temporary)), fs.realpathSync(process.env.TMPDIR));
+const info = fs.statSync(temporary);
+assert.ok(info.isDirectory()); assert.equal(info.mode & 0o777, 0o700); assert.equal(info.uid, process.getuid());
+fs.closeSync(fs.openSync(temporary, 'r'));
+assert.throws(() => { const fd = fs.openSync('/private/tmp', 'r'); fs.closeSync(fd); }, { code: 'EPERM' });
+if (isLogin) { console.log(JSON.stringify({loggedIn:true, authMethod:'claude.ai'})); process.exit(0); }
 try { fs.writeFileSync(process.cwd() + '/must-not-write', 'bad'); console.log('workspace write was allowed'); process.exit(23); } catch (e) { if (e.code !== 'EPERM') throw e; }
 if (!process.env.CLAUDE_CONFIG_DIR || process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR !== '') process.exit(24);
 if (fs.readdirSync(process.env.CLAUDE_CONFIG_DIR).length || process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY !== '1') process.exit(27);
-for(const path of [${JSON.stringify(privateFixture)}]) {
- try { fs.readFileSync(path); process.exit(28); } catch(e) { if(e.code!=='EPERM') throw e; }
+for(const fixturePath of [${JSON.stringify(privateFixture)}]) {
+ try { fs.readFileSync(fixturePath); process.exit(28); } catch(e) { if(e.code!=='EPERM') throw e; }
 }
-const socket = net.connect(18766, '127.0.0.1');
-socket.on('connect', () => { socket.destroy(); process.exit(25); });
-socket.on('error', e => { if (e.code !== 'EPERM') process.exit(26);
+(async () => {
+ for (const address of ['127.0.0.1', '0.0.0.0', '::ffff:127.0.0.1', '::ffff:0.0.0.0', '::1']) {
+  await new Promise(resolve => {
+   const socket = net.connect(${address.port}, address);
+   socket.setTimeout(1500, () => { socket.destroy(); process.exit(26); });
+   socket.on('connect', () => { console.error(address + ' reached unrelated listener'); socket.destroy(); process.exit(25); });
+   socket.on('error', e => { if (e.code !== 'EPERM') process.exit(26); resolve(); });
+  });
+ }
  console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-sonnet-5-5',tools:[],mcp_servers:[]}));
  console.log(JSON.stringify({type:'assistant',message:{id:'msg-fixture',model:'claude-sonnet-5-5',content:[]}}));
- console.log(JSON.stringify({type:'result',subtype:'success',session_id:'session-fixture',result:'AVAILABLE'})); });
+ console.log(JSON.stringify({type:'result',subtype:'success',session_id:'session-fixture',result:'AVAILABLE'}));
+})();
 `, { mode: 0o700 });
     const previous = process.env.PATH; process.env.PATH = `${binDir}:${previous ?? ''}`;
+    for (const key of reviewProxyVariables) vi.stubEnv(key, undefined);
+    const subscriptionHome = mkdtempSync(join(root, 'subscription-'));
     try {
-      const response = await new CliReviewDriver().invoke({ id: 'fixture', kind: 'availability', target: { cli: 'claude', model: 'claude-sonnet-5-5' }, input: 'No real model.' });
-      expect(response.status, response.stdout + response.stderr).toBe('complete');
+      const response = await new CliReviewDriver(5000, subscriptionHome).invoke({ id: 'fixture', kind: 'availability', target: { cli: 'claude', model: 'claude-sonnet-5-5' }, input: 'No real model.' });
+      expect(response.status, response.detail + response.stdout + response.stderr).toBe('complete');
+      expect(connections).toBe(0);
       expect(response.invocation?.command).toBe('/usr/bin/sandbox-exec');
-    } finally { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; }
+      const args = response.invocation!.args; const profile = args[args.indexOf('-p') + 1]!;
+      expect(profile.split('\n').find(line => line.startsWith('(deny file-read*'))).toContain('(subpath "/private/tmp")');
+    } finally {
+      vi.unstubAllEnvs(); if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous;
+      await new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()));
+    }
   });
 });

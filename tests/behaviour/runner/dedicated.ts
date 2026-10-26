@@ -1,5 +1,4 @@
 // The real Dedicated launcher is trusted setup. Everything it executes or uses as policy is runner-owned.
-import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -8,14 +7,14 @@ import { clientSkills, executeTurn, findRollout, loginSecrets } from './codex.ts
 import type { CodexOptions, CodexSession, TurnRequest } from './codex.ts';
 import { readRollout, shown } from './normalize.ts';
 import { checkoutRoot, reservedPorts } from './service.ts';
+import { IsolationError, verifyProfile, writeProfile } from './sandbox.ts';
+import type { ControlProfile, SandboxLayout } from './sandbox.ts';
 import type { Credential, IsolatedService } from './service.ts';
 
 export const dedicatedLauncher = join(checkoutRoot, 'scripts/wayfinder-agent/wayfinder');
 export const dedicatedLauncherSource = relative(checkoutRoot, dedicatedLauncher);
 const python = '/usr/bin/python3';
-export class IsolationFailure extends Error {
-  constructor(reason: string) { super(`isolation failure: ${reason}`); }
-}
+export { IsolationError as IsolationFailure } from './sandbox.ts';
 
 export function dedicatedServiceDirectory(): string {
   const root = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests');
@@ -28,25 +27,9 @@ const hash = (text: Buffer | string) => createHash('sha256').update(text).digest
 function identity(path: string, kind: 'file' | 'directory', content = false): string {
   const info = lstatSync(path);
   if ((kind === 'file' ? !info.isFile() || info.nlink !== 1 : !info.isDirectory()) || info.isSymbolicLink())
-    throw new IsolationFailure(`unexpected ${kind} type`);
+    throw new IsolationError(`unexpected ${kind} type`);
   return JSON.stringify([info.dev, info.ino, info.mode, content ? hash(readFileSync(path)) : null]);
 }
-function pin(path: string, kind: 'file' | 'directory', content = false): () => void {
-  const before = identity(path, kind, content);
-  return () => {
-    try { if (identity(path, kind, content) === before) return; } catch { /* same safe refusal */ }
-    throw new IsolationFailure(`changed runner-owned ${kind}`);
-  };
-}
-function tree(root: string): string {
-  const visit = (path: string): unknown => {
-    const info = lstatSync(path);
-    if (info.isDirectory()) return [identity(path, 'directory'), readdirSync(path).sort().map(name => [name, visit(join(path, name))])];
-    return identity(path, 'file', true);
-  };
-  return JSON.stringify(visit(root));
-}
-
 interface LaunchEvidence {
   token: string;
   clientId: string;
@@ -63,7 +46,10 @@ export interface DedicatedSetup {
   outputs: string;
   control: string;
   launcherHome: string;
-  profile: string;
+  profile: ControlProfile;
+  launcher: string;
+  checkout: string;
+  shimDir: string;
   codexHome: string;
   sourceAuth: string;
   verify(): void;
@@ -72,41 +58,49 @@ export interface DedicatedSetup {
 }
 
 export function prepareDedicated(scratch: string, session: CodexSession, service: IsolatedService,
-  controller: Credential, options: CodexOptions, baseProfile: string): DedicatedSetup {
-  if (!options.sandbox) throw new IsolationFailure('Dedicated Entry requires the allowlist sandbox');
-  if (reservedPorts.includes(service.port)) throw new IsolationFailure('Dedicated Entry refuses an everyday port');
+  controller: Credential, options: CodexOptions, layout: SandboxLayout, workdir: string): DedicatedSetup {
+  if (!options.sandbox) throw new IsolationError('Dedicated Entry requires the allowlist sandbox');
+  if (reservedPorts.includes(service.port)) throw new IsolationError('Dedicated Entry refuses an everyday port');
   const serviceDir = dirname(service.protocolReport);
-  const control = join(serviceDir, 'control');
-  const launcherHome = join(serviceDir, 'launcher-home');
+  const control = layout.controlDir;
+  const launcherHome = join(layout.readOnlyDir, 'launcher-home');
   const sourceAuth = join(launcherHome, '.codex/auth.json');
   mkdirSync(dirname(sourceAuth), { recursive: true, mode: 0o700 });
-  copyFileSync(join(session.codexHome, 'auth.json'), sourceAuth);
+  // Opaque injected bytes only; never resolve a personal login path here.
+  writeFileSync(sourceAuth, existsSync(join(session.codexHome, 'auth.json')) ? readFileSync(join(session.codexHome, 'auth.json')) : '', { mode: 0o600, flag: 'wx' });
   const root = join(session.home, 'dedicated');
   const state = join(root, '.codex-wayfinder');
   const stateHome = join(state, 'home');
   const skills = join(stateHome, '.agents/skills');
   mkdirSync(skills, { recursive: true, mode: 0o700 });
-  const checkout = join(control, 'launcher-checkout');
+  const checkout = join(layout.readOnlyDir, 'launcher-checkout');
   const skill = join(checkout, '.agents/skills/wayfinder');
-  const outputs = join(scratch, 'outputs');
+  const outputs = join(workdir, 'outputs');
   for (const method of ['mcp', 'matt']) mkdirSync(join(outputs, method), { recursive: true, mode: 0o700 });
   // The projection has no dist/, and the client cannot add one. Lost service => refusal, never a daemon.
   cpSync(join(checkoutRoot, '.agents/skills/wayfinder'), skill, { recursive: true, dereference: true });
   writeFileSync(join(serviceDir, 'wayfinder-token'), controller.token + '\n', { mode: 0o600 });
+  // The shared service stores every credential in its reloadable file, including the Controller.
+  // Register these runner-owned lifetimes so the real launcher's pruning preserves them on resume.
+  const existing = JSON.parse(readFileSync(join(serviceDir, 'credentials.json'), 'utf8')) as {
+    credentials: { clientId: string; tokenSha256: string }[];
+  };
+  writeFileSync(join(serviceDir, 'credential-owners.json'), JSON.stringify(Object.fromEntries(
+    existing.credentials.map(c => [c.tokenSha256, { clientId: c.clientId, pid: process.pid }]))), { mode: 0o600, flag: 'wx' });
   const capturePath = join(serviceDir, 'codex-launch.json');
-  const shimDir = join(control, 'launcher-bin');
+  const launcherDir = join(layout.readOnlyDir, 'launcher');
+  mkdirSync(launcherDir, { mode: 0o700 });
+  for (const name of ['wayfinder', 'config.toml', 'agent-instructions.md'])
+    copyFileSync(join(dirname(dedicatedLauncher), name), join(launcherDir, name));
+  const launcher = join(launcherDir, 'wayfinder');
+  const shimDir = join(layout.readOnlyDir, 'launcher-bin');
   mkdirSync(shimDir, { mode: 0o700 });
-  const resolved = options.bin.includes('/') ? options.bin : spawnSync('which', [options.bin], { encoding: 'utf8' }).stdout.trim();
-  const binary = realpathSync(resolved);
-  const profile = join(control, 'sandbox.sb');
+  const binary = realpathSync(options.bin);
   const protectedDirectories = [scratch, session.home, root, state, stateHome, join(stateHome, '.agents'), skills, outputs, join(outputs, 'mcp'), join(outputs, 'matt')];
-  const protectedTrees = [serviceDir, join(state, 'AGENTS.md'), join(state, 'config.toml'), join(stateHome, '.agents')];
-  // This extends the shared profile; #94's shared per-session writer will own these options after integration.
-  writeFileSync(profile, readFileSync(baseProfile, 'utf8') + `\n(allow file-read* (subpath ${JSON.stringify(skill)}) (literal ${JSON.stringify(sourceAuth)}))\n`
-    + `(deny file-write* ${protectedTrees.map(p => `(subpath ${JSON.stringify(p)})`).join(' ')}\n`
-    + `${[...protectedDirectories, binary].map(p => `(literal ${JSON.stringify(p)})`).join(' ')})\n`, { mode: 0o600 });
-  rmSync(baseProfile, { force: true });
-  const command = ['/usr/bin/sandbox-exec', '-f', profile, binary];
+  const protectedTrees = [serviceDir, launcherHome, join(state, 'AGENTS.md'), join(state, 'config.toml'), join(stateHome, '.agents')];
+  // writeProfile owns policy and pinning. The exclusive path depends only on this session HOME.
+  const profilePath = join(control, `${session.home.split('/').at(-1)}.sb`);
+  const command = ['/usr/bin/sandbox-exec', '-f', profilePath, binary];
   const expected = { home: stateHome, codexHome: state, url: `mcp_servers.wayfinder.url="http://127.0.0.1:${service.port}/mcp"` };
   const constants = JSON.stringify({ command, capturePath, serviceDir, expected, path: process.env.PATH ?? '/usr/bin:/bin' });
   const shim = `#!${python} -I
@@ -135,40 +129,38 @@ command = settings["command"] + sys.argv[1:]
 os.execvpe(command[0], command, env)
 `;
   writeFileSync(join(shimDir, 'codex'), shim, { mode: 0o700 });
-  const manifest = tree(control);
-  const guards = [pin(serviceDir, 'directory'), pin(control, 'directory'), pin(launcherHome, 'directory'),
-    pin(dirname(sourceAuth), 'directory'), pin(sourceAuth, 'file'),
-    ...protectedDirectories.map(p => pin(p, 'directory')),
-    ...[dedicatedLauncher, join(dirname(dedicatedLauncher), 'config.toml'), join(dirname(dedicatedLauncher), 'agent-instructions.md'), binary]
-      .map(p => pin(p, 'file', true))];
+  const profile = writeProfile(control, session, workdir, binary, {
+    readOnlyRoots: [checkout, launcherDir, shimDir], mutableReadOnlyFiles: [sourceAuth],
+    denyWriteRoots: protectedTrees, denyWritePaths: protectedDirectories, localPorts: [service.port],
+  });
   const installedFiles = new Map<string, string>();
   const expectedFiles: Record<string, string> = {
-    'AGENTS.md': readFileSync(join(dirname(dedicatedLauncher), 'agent-instructions.md'), 'utf8')
+    'AGENTS.md': readFileSync(join(launcherDir, 'agent-instructions.md'), 'utf8')
       .replaceAll('@WORK@', join(outputs, 'mcp')).replaceAll('@RELAUNCH@', 'wayfinder'),
-    'config.toml': readFileSync(join(dirname(dedicatedLauncher), 'config.toml'), 'utf8').replaceAll('@WORK@', join(outputs, 'mcp')),
+    'config.toml': readFileSync(join(launcherDir, 'config.toml'), 'utf8').replaceAll('@WORK@', join(outputs, 'mcp')),
   };
   const verify = () => {
-    guards.forEach(check => check());
-    if (tree(control) !== manifest) throw new IsolationFailure('changed launcher control tree');
+    const failure = verifyProfile(profile);
+    if (failure) throw new IsolationError(failure.replace(/^isolation failure: /, ''));
     // The launcher writes through these paths outside the sandbox. No substituted links or hardlinks.
     for (const file of ['AGENTS.md', 'config.toml']) {
       const path = join(state, file);
       if (lstatSync(path, { throwIfNoEntry: false })) {
         const current = identity(path, 'file', true);
         if (hash(readFileSync(path)) !== hash(expectedFiles[file]!) || (installedFiles.has(file) && installedFiles.get(file) !== current))
-          throw new IsolationFailure('changed launcher-installed context');
+          throw new IsolationError('changed launcher-installed context');
         installedFiles.set(file, current);
-      } else if (installedFiles.has(file)) throw new IsolationFailure('removed launcher-installed context');
+      } else if (installedFiles.has(file)) throw new IsolationError('removed launcher-installed context');
     }
     for (const dir of [join(stateHome, '.agents'), skills]) identity(dir, 'directory');
     const ownAuth = join(state, 'auth.json');
     const info = lstatSync(ownAuth, { throwIfNoEntry: false });
     if (info?.isSymbolicLink()) {
-      if (readlinkSync(ownAuth) !== sourceAuth) throw new IsolationFailure('changed native auth link target');
+      if (readlinkSync(ownAuth) !== sourceAuth) throw new IsolationError('changed native auth link target');
     } else if (info) identity(ownAuth, 'file'); // A native atomic refresh may replace the link with a regular file.
   };
-  return { state, skill, outputs, capturePath, control, launcherHome, profile, codexHome: state, sourceAuth, verify,
-    controlEvidence: { profile: readFileSync(profile, 'utf8'), shim, manifest }, env: {
+  return { state, skill, outputs, capturePath, control, launcherHome, profile, launcher, checkout, shimDir, codexHome: state, sourceAuth, verify,
+    controlEvidence: { profile: readFileSync(profile.path, 'utf8'), shim, manifest: JSON.stringify(profile) }, env: {
       PATH: `${shimDir}:${process.env.PATH ?? '/usr/bin:/bin'}`, HOME: launcherHome, TMPDIR: join(session.home, 'tmp'), LANG: 'en_US.UTF-8',
       WAYFINDER_AGENT_STATE_ROOT: root, WAYFINDER_AGENT_SERVICE_DIR: serviceDir, WAYFINDER_AGENT_OUTPUTS: outputs,
       WAYFINDER_AGENT_PORT: String(service.port), WAYFINDER_AGENT_DATABASE: service.databasePath,
@@ -183,8 +175,11 @@ export async function runDedicatedTurn(request: TurnRequest, setup: DedicatedSet
   const exec = s.thread ? ['exec', 'resume', '--json', '--skip-git-repo-check', s.thread, '-']
     : ['exec', '--json', '--skip-git-repo-check', '-'];
   // -I prevents Python importing a client-planted module from cwd or HOME; neither interpreter uses PATH.
-  return executeTurn(request, python,
-    ['-I', dedicatedLauncher, '--harness', 'codex', '--method', 'mcp', '--model', o.model, '--effort', o.effort, '--', ...exec], setup.env);
+  request.onLaunch?.();
+  const result = await executeTurn(request, python,
+    ['-I', setup.launcher, '--harness', 'codex', '--method', 'mcp', '--model', o.model, '--effort', o.effort, '--', ...exec], setup.env);
+  setup.verify(); // Includes the launcher's mutable auth link and newly installed context.
+  return result;
 }
 
 export function dedicatedLaunch(setup: DedicatedSetup): LaunchEvidence | null {

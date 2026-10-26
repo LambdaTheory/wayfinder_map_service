@@ -1,14 +1,14 @@
 // Codex `exec --json` output and its session log, normalized into the evidence record of `../evidence.ts`.
 import { readFileSync } from 'node:fs';
 import { classifyResult } from '../evidence.ts';
-import type { EventRecord, GivenRules, Receipt } from '../evidence.ts';
+import type { AttemptRecord, EventRecord, GivenRules, Receipt } from '../evidence.ts';
 
 interface CodexItem {
   id: string; type: string; text?: string; command?: string; exit_code?: number | null; server?: string; tool?: string;
   arguments?: unknown; result?: { structured_content?: unknown } | null; error?: unknown; status?: string;
   changes?: { path: string; kind: string }[];
 }
-type Line = { type: string; item?: CodexItem; usage?: Record<string, number>; message?: string; thread_id?: string };
+export type Line = { type: string; item?: CodexItem; usage?: Record<string, number>; message?: string; thread_id?: string };
 
 export const parseLines = (stdout: string): Line[] => stdout.split('\n').flatMap(line => {
   if (!line.trim()) return [];
@@ -45,46 +45,57 @@ export interface Normalized { events: EventRecord[]; usage: { inputTokens: numbe
 export function normalizeTurn(lines: Line[], session: string, turn: number, input: string, at: string, firstSeq: number, workdir: string): Normalized {
   const events: EventRecord[] = [];
   let seq = firstSeq;
-  const base = (actor: EventRecord['actor']) => ({ seq: seq++, at, session, turn, actor });
-  events.push({ ...base('script-human'), kind: 'message', role: 'user', text: input });
+  const normalizer = streamTurn(session, turn, input, at, workdir, event => events.push({ ...event, seq: seq++ }));
+  for (const line of lines) normalizer.line(line);
+  normalizer.finish();
+  return { events, usage: normalizer.usage, errors: normalizer.errors };
+}
+
+/** Incremental normalization preserves observed interleaving across concurrent clients and Controller actions. */
+export function streamTurn(session: string, turn: number, input: string, at: string, workdir: string, emit: (event: EventRecord) => void) {
+  const callId = (id: string) => `${session}:${turn}:${id}`;
+  const base = (actor: EventRecord['actor']) => ({ seq: 0, at: new Date().toISOString(), session, turn, actor });
+  emit({ ...base('script-human'), at, kind: 'message', role: 'user', text: input });
   const usage = { inputTokens: 0, outputTokens: 0 };
   const errors: string[] = [];
   const pending = new Map<string, CodexItem>();
-  for (const line of lines) {
+  const line = (line: Line) => {
     if (line.type === 'item.started' && line.item?.type === 'mcp_tool_call') pending.set(line.item.id, line.item);
     if (line.type === 'turn.completed' && line.usage) { usage.inputTokens += line.usage.input_tokens ?? 0; usage.outputTokens += line.usage.output_tokens ?? 0; }
     if ((line.type === 'error' || line.type === 'turn.failed') && line.message) errors.push(line.message);
-    if (line.type !== 'item.completed' || !line.item) continue;
+    if (line.type !== 'item.completed' || !line.item) return;
     const item = line.item;
     pending.delete(item.id);
     switch (item.type) {
-      case 'agent_message': events.push({ ...base('agent'), kind: 'message', role: 'assistant', text: item.text ?? '' }); break;
+      case 'agent_message': emit({ ...base('agent'), kind: 'message', role: 'assistant', text: item.text ?? '' }); break;
       case 'command_execution':
-        events.push({ ...base('agent'), kind: 'command', command: item.command ?? '', exitCode: item.exit_code ?? null });
-        for (const path of readsIn(item.command ?? '', workdir)) events.push({ ...base('agent'), kind: 'file-read', path });
+        emit({ ...base('agent'), kind: 'command', command: item.command ?? '', exitCode: item.exit_code ?? null });
+        for (const path of readsIn(item.command ?? '', workdir)) emit({ ...base('agent'), kind: 'file-read', path });
         break;
       case 'mcp_tool_call': {
         const structured = item.result?.structured_content;
-        events.push({ ...base('agent'), kind: 'tool-call', callId: item.id, server: item.server ?? '', tool: item.tool ?? '', arguments: item.arguments ?? null,
+        emit({ ...base('agent'), kind: 'tool-call', callId: callId(item.id), server: item.server ?? '', tool: item.tool ?? '', arguments: item.arguments ?? null,
           result: structured === undefined || structured === null ? { known: false, reason: item.error ? 'the call failed' : 'no structured result' } : { known: true, value: structured },
           failed: item.status === 'failed' || (item.error !== null && item.error !== undefined), requestId: { known: false, reason: 'Codex does not report JSON-RPC request IDs' } });
-        if (/resource/i.test(item.tool ?? '')) events.push({ ...base('agent'), kind: 'resource-read', uri: String((item.arguments as { uri?: string } | null)?.uri ?? ''), ok: item.status !== 'failed' });
+        if (/resource/i.test(item.tool ?? '')) emit({ ...base('agent'), kind: 'resource-read', uri: String((item.arguments as { uri?: string } | null)?.uri ?? ''), ok: item.status !== 'failed' });
         break;
       }
       case 'file_change':
-        for (const change of item.changes ?? []) events.push({ ...base('agent'), kind: 'file-change', path: relativePath(change.path, workdir),
+        for (const change of item.changes ?? []) emit({ ...base('agent'), kind: 'file-change', path: relativePath(change.path, workdir),
           change: change.kind === 'add' ? 'add' : change.kind === 'delete' ? 'delete' : 'modify' });
         break;
-      case 'collab_tool_call': events.push({ ...base('agent'), kind: 'delegation', phase: 'start', id: item.id, summary: item.tool ?? 'collab' }); break;
+      case 'collab_tool_call': emit({ ...base('agent'), kind: 'delegation', phase: 'start', id: item.id, summary: item.tool ?? 'collab' }); break;
       default: break;
     }
-  }
-  // A call still running when the turn ended (timeout, cancellation) has no known outcome; its receipt stays unknown.
-  for (const item of pending.values()) {
-    events.push({ ...base('agent'), kind: 'tool-call', callId: item.id, server: item.server ?? '', tool: item.tool ?? '', arguments: item.arguments ?? null,
-      result: { known: false, reason: 'the turn ended before the call completed' }, failed: false, requestId: { known: false, reason: 'Codex does not report JSON-RPC request IDs' } });
-  }
-  return { events, usage, errors };
+  };
+  const finish = () => {
+    // A call still running when the turn ended (timeout, cancellation) has no known outcome; its receipt stays unknown.
+    for (const item of pending.values()) {
+      emit({ ...base('agent'), kind: 'tool-call', callId: callId(item.id), server: item.server ?? '', tool: item.tool ?? '', arguments: item.arguments ?? null,
+        result: { known: false, reason: 'the turn ended before the call completed' }, failed: false, requestId: { known: false, reason: 'Codex does not report JSON-RPC request IDs' } });
+    }
+  };
+  return { line, finish, usage, errors };
 }
 
 /** A receipt for every agent write: committed with its Revision, refused with its class, or unknown. */
@@ -96,11 +107,29 @@ export function receiptsFrom(events: EventRecord[]): Receipt[] {
     if (!e.result.known) return [{ ...base, outcome: { kind: 'unknown' as const, reason: e.result.reason } }];
     const value = e.result.value as { mapId?: string; revision?: number | { mapId: string; revision: number } };
     const cls = classifyResult(value, e.failed);
+    if (cls === 'transport-failure') return [{ ...base, outcome: { kind: 'unknown', reason: 'unrecognized or missing write result' } }];
     if (cls !== 'committed') return [{ ...base, outcome: { kind: 'not-written' as const, because: cls } }];
     const revision = typeof value.revision === 'number' ? value.revision : value.revision?.revision;
     const mapId = value.mapId ?? (typeof value.revision === 'object' ? value.revision.mapId : undefined) ?? base.mapId;
-    return revision === undefined ? [{ ...base, outcome: { kind: 'unknown' as const, reason: 'committed result without a Revision' } }]
-      : [{ ...base, mapId, outcome: { kind: 'committed' as const, revision } }];
+    if (mapId !== base.mapId) return [{ ...base, outcome: { kind: 'unknown', reason: 'receipt Map does not match the call' } }];
+    return !Number.isInteger(revision) || revision! < 1 ? [{ ...base, outcome: { kind: 'unknown' as const, reason: 'committed result without a Revision' } }]
+      : [{ ...base, mapId, outcome: { kind: 'committed' as const, revision: revision! } }];
+  });
+}
+
+/** Corroborate native receipts with history; neither relay observations nor authors manufacture a receipt. */
+export function correlateReceipts(events: EventRecord[], maps: AttemptRecord['maps'], sessions: AttemptRecord['sessions'], controllerId: string): Receipt[] {
+  const receipts = receiptsFrom(events);
+  return receipts.map(receipt => {
+    if (receipt.outcome.kind !== 'committed') return receipt;
+    const revision = receipt.outcome.revision;
+    const matches = maps.flatMap(m => m.history.filter(r => r.mapId === receipt.mapId && r.revision === revision
+      && (m.seedHeadRevision === null || r.revision > m.seedHeadRevision)));
+    const owners = sessions.filter(s => s.label === receipt.session);
+    const competing = receipts.filter(r => r.mapId === receipt.mapId && r.outcome.kind === 'committed' && r.outcome.revision === revision);
+    const valid = matches.length === 1 && competing.length === 1 && owners.length === 1
+      && matches[0]!.author.clientId === owners[0]!.clientId && matches[0]!.author.clientId !== controllerId;
+    return valid ? receipt : { ...receipt, outcome: { kind: 'unknown', reason: 'receipt does not uniquely match a post-seed Revision by this session' } };
   });
 }
 
