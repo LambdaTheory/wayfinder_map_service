@@ -1,65 +1,94 @@
 // Subscription CLIs only. The controller never reads/copies credentials, and never inherits API keys or hooks.
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import type { ReviewDriver, ReviewRequest, ReviewResponse, Reviewer } from './review.ts';
+import { modelMatches } from './model-review.ts';
+import { reportReason } from './review-verdict.ts';
+import type { ReviewDriver, ReviewRequest, ReviewResponse, Reviewer } from './model-review.ts';
 
-const disabled = ['apps', 'plugins', 'hooks', 'memories', 'shell_tool', 'shell_snapshot', 'unified_exec', 'multi_agent',
+const disabledCodexFeatures = ['apps', 'plugins', 'hooks', 'memories', 'shell_tool', 'shell_snapshot', 'unified_exec', 'multi_agent',
   'multi_agent_v2', 'code_mode', 'browser_use', 'computer_use', 'image_generation', 'in_app_browser', 'skill_search', 'remote_plugin', 'view_image'];
 
 export function reviewArgs(target: Reviewer): string[] {
-  if (target.cli === 'claude') return ['--print', '--safe-mode', '--restricted', '--setting-sources', '',
+  if (target.cli === 'claude') return ['--print', '--safe-mode', '--restricted', '--setting-sources', 'user',
     '--settings', '{"disableAllHooks":true,"autoMemoryEnabled":false}', '--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-    '--disable-slash-commands', '--no-chrome', '--no-session-persistence', '--output-format', 'stream-json', '--verbose', '--model', target.model,
+    '--disable-slash-commands', '--no-chrome', '--no-session-persistence', '--permission-prompts', 'none', '--system-prompt-snapshot', 'off', '--output-format', 'stream-json', '--verbose', '--model', target.model,
     '--system-prompt', 'You are an evidence reviewer. Follow only the review instructions in the user input. No tools or external context.'];
-  return ['--no-daemon', 'exec', '--ignore-user-config', '--ignore-rules', '--ephemeral', '--skip-git-repo-check',
+  return ['--no-daemon', 'exec', '--strict-config', '--json', '--ignore-user-config', '--ignore-rules', '--ephemeral', '--skip-git-repo-check',
     '--sandbox', 'read-only', '--color', 'never', '--model', target.model,
-    ...disabled.flatMap(f => ['--disable', f]), '--enable', 'skip_host_skill_discovery',
+    ...disabledCodexFeatures.flatMap(f => ['--disable', f]), '--enable', 'skip_host_skill_discovery',
     '-c', 'approval_policy="never"', '-c', 'project_doc_max_bytes=0', '-c', 'web_search="disabled"',
     '-c', 'memories.use_memories=false', '-c', 'memories.generate_memories=false',
     '-c', 'check_for_update_on_startup=false', '-c', 'mcp_servers={}', '-'];
 }
 
-/** Private working/runtime directories, and only the login file accessible outside them for Codex authentication. */
-export function codexReviewSandbox(scratch: string, runtime: string, install: string, auth: string): string {
+/** Both CLIs use the same OS boundary. Native authentication is the only permitted personal resource. */
+export function reviewSandbox(scratch: string, runtime: string, install: string, auth?: string, keychain?: string): string {
   const q = JSON.stringify;
+  const workspace = join(homedir(), 'workspace');
+  const blocked = [homedir(), '/private/tmp', realpathSync(tmpdir()), process.cwd(),
+    '/Library/Application Support/ClaudeCode', '/Library/Application Support/Claude', '/Library/Application Support/OpenAI',
+    '/Library/Managed Preferences', '/Library/Preferences/com.anthropic.claudecode.plist',
+    '/etc/claude-code', '/private/etc/claude-code', '/etc/codex', '/private/etc/codex',
+    ...(existsSync(workspace) ? [realpathSync(workspace)] : [])];
+  const authTemp = auth ? `${dirname(auth).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(?:auth\\.json(?:\\.[^/]*)?|\\.tmp[^/]+)$` : null;
   return ['(version 1)', '(allow default)',
-    `(deny file-read* (subpath ${q(homedir())}) (subpath "/private/tmp") (subpath ${q(realpathSync(tmpdir()))}) (subpath ${q(process.cwd())}))`,
-    '(allow file-read-metadata)',
-    `(allow file-read* (subpath ${q(scratch)}) (subpath ${q(install)}) (subpath ${q(dirname(dirname(process.execPath)))}) (literal ${q(auth)}))`,
+    `(deny file-read* ${blocked.map(p => `(subpath ${q(p)})`).join(' ')})`, '(allow file-read-metadata)',
+    `(allow file-read* (subpath ${q(scratch)}) (subpath ${q(install)}) (subpath ${q(dirname(dirname(process.execPath)))})${auth ? ` (literal ${q(auth)})` : ''}${keychain ? ` (literal ${q(keychain)})` : ''})`,
     '(deny file-write*)', `(allow file-write* (subpath ${q(runtime)}) (literal "/dev/null") (literal "/dev/tty"))`,
+    // Use one native login storage location: a refresh must never strand newer tokens in a disposable copy.
+    ...(auth ? [`(allow file-write* (literal ${q(auth)}) (regex #${q(`^${authTemp}`)}))`] : []),
+    // Do not fetch cached managed/user preferences through cfprefsd around the file-read boundary.
+    '(deny mach-lookup (global-name "com.apple.cfprefsd.daemon") (global-name "com.apple.cfprefsd.agent"))',
     '(deny network-outbound (remote ip "localhost:*"))', ''].join('\n');
 }
+export const codexReviewSandbox = reviewSandbox;
 
 interface ProcessOutput { stdout: string; stderr: string; code: number | null; timedOut: boolean; cancelled?: boolean }
 
-export function decodeResponse(cli: Reviewer['cli'], output: ProcessOutput): ReviewResponse {
+const object = (v: unknown): Record<string, unknown> => v !== null && typeof v === 'object' ? v as Record<string, unknown> : {};
+const string = (v: unknown): string | null => typeof v === 'string' ? v : null;
+
+export function decodeResponse(cli: Reviewer['cli'], output: ProcessOutput, requestedModel?: string): ReviewResponse {
   const { stdout, stderr, code, timedOut } = output;
-  const base: ReviewResponse = { status: 'error', detail: output.cancelled ? 'review batch cancelled' : timedOut ? 'client timed out' : `client exit ${code}`, text: '', stdout, stderr,
-    responseId: null, visibleModel: null, cached: false };
+  const base: ReviewResponse = { status: 'error', detail: output.cancelled ? 'review batch cancelled' : timedOut ? 'client timed out' : `client exit ${code}`,
+    text: '', stdout, stderr, responseId: null, visibleModel: null, cached: false };
   if (output.cancelled || timedOut || code !== 0) return { ...base, status: /model.*(not found|not available|not supported|does not exist)|authentication|not logged in|login required/i.test(stdout + stderr) ? 'unavailable' : 'error' };
-  if (cli === 'codex') {
-    // Text-mode exec emits its native model and session header on stderr, final answer on stdout.
-    const model = /^model:\s*(\S+)\s*$/m.exec(stderr)?.[1] ?? null;
-    const id = /^session id:\s*(\S+)\s*$/m.exec(stderr)?.[1] ?? null;
-    if (/^(exec|file update|apply_patch|tool [^\n]+)\s*$/m.test(stderr)) return { ...base, detail: 'isolation violation: Codex attempted tool activity' };
-    return { ...base, status: 'complete', detail: 'codex exec completed', text: stdout.trim(), responseId: id, visibleModel: model };
-  }
-  const lines: Record<string, any>[] = [];
+  const lines: Record<string, unknown>[] = [];
   for (const line of stdout.split('\n').filter(Boolean)) {
-    try { lines.push(JSON.parse(line)); } catch { return { ...base, detail: 'invalid Claude native JSON stream' }; }
+    try { lines.push(object(JSON.parse(line))); } catch { return { ...base, detail: 'invalid native JSON stream' }; }
+  }
+  const cached = lines.some(x => x.isReplay === true || x.is_replay === true || x.cached_response === true || x.type === 'response.replayed'
+    || object(x.message).isReplay === true || object(x.message).cached_response === true);
+  const cacheEvidence = cached ? 'replayed' as const : 'not-reported' as const;
+  if (cli === 'codex') {
+    const allowedEvents = new Set(['thread.started', 'turn.started', 'turn.completed', 'item.started', 'item.updated', 'item.completed', 'error', 'turn.failed']);
+    if (lines.some(x => !allowedEvents.has(String(x.type)))) return { ...base, cached, cacheEvidence, detail: 'unsupported Codex event; isolation cannot be confirmed' };
+    const items = lines.filter(x => /^item\./.test(String(x.type))).map(x => object(x.item));
+    if (items.some(x => x.type !== 'agent_message' && x.type !== 'reasoning')) return { ...base, cached, cacheEvidence, detail: 'isolation violation: Codex attempted tool activity' };
+    if (lines.some(x => x.type === 'error' || x.type === 'turn.failed') || !lines.some(x => x.type === 'turn.completed')) return { ...base, cached, cacheEvidence, detail: 'Codex turn failed or incomplete' };
+    const messages = lines.filter(x => x.type === 'item.completed' && object(x.item).type === 'agent_message').map(x => object(x.item));
+    const final = messages.at(-1); const thread = string(lines.find(x => x.type === 'thread.started')?.thread_id);
+    const nativeModel = lines.map(x => string(x.model) ?? string(object(x.turn).model)).find(Boolean);
+    const responseId = lines.map(x => string(x.response_id)).find(Boolean) ?? (thread && string(final?.id) ? `${thread}:${String(final!.id)}` : null);
+    return { ...base, status: 'complete', detail: 'codex exec completed', text: string(final?.text) ?? '', responseId,
+      visibleModel: nativeModel ?? requestedModel ?? null, modelEvidence: nativeModel ? 'native' : 'requested-only', cached, cacheEvidence };
   }
   const init = lines.find(x => x.type === 'system' && x.subtype === 'init');
   const result = lines.findLast(x => x.type === 'result');
-  const messages = lines.filter(x => x.type === 'assistant');
-  const models = new Set(messages.map(x => x.message?.model).filter(Boolean));
-  if (init?.model) models.add(init.model);
-  if (init?.tools?.length || init?.mcp_servers?.length || messages.some(x => x.message?.content?.some((b: any) => b.type === 'tool_use')))
-    return { ...base, detail: 'isolation violation: Claude exposed or used tools/MCP' };
-  if (result?.is_error || result?.subtype !== 'success') return { ...base, detail: `Claude result: ${result?.subtype ?? 'missing'}` };
-  return { ...base, status: 'complete', detail: 'Claude print completed', text: result.result ?? '', responseId: result.session_id ?? null,
-    visibleModel: models.size === 1 ? [...models][0] : null };
+  const messages = lines.filter(x => x.type === 'assistant').map(x => object(x.message));
+  const models = [string(init?.model), ...messages.map(x => string(x.model))].filter((v): v is string => !!v);
+  const expected = requestedModel ?? models[0]?.replace(/-\d{8}$/, '');
+  const model = expected && models.length && models.every(x => modelMatches(expected, x)) ? models.at(-1)! : null;
+  if (Array.isArray(init?.tools) && init.tools.length || Array.isArray(init?.mcp_servers) && init.mcp_servers.length
+    || messages.some(x => Array.isArray(x.content) && x.content.some((b: unknown) => object(b).type === 'tool_use')))
+    return { ...base, cached, cacheEvidence, detail: 'isolation violation: Claude exposed or used tools/MCP' };
+  if (result?.is_error || result?.subtype !== 'success') return { ...base, cached, cacheEvidence, detail: 'Claude result failed or missing' };
+  const messageIds = [...new Set(messages.flatMap(x => string(x.id) ? [String(x.id)] : []))];
+  // With tools disabled there must be one completion, not a bundle concealing a replayed message.
+  return { ...base, status: 'complete', detail: 'Claude print completed', text: string(result.result) ?? '', responseId: messageIds.length === 1 ? messageIds[0]! : null,
+    sessionId: string(result.session_id), visibleModel: model, modelEvidence: 'native', cached, cacheEvidence };
 }
 
 async function run(cmd: string, args: string[], input: string, cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<ProcessOutput> {
@@ -87,44 +116,63 @@ export class CliReviewDriver implements ReviewDriver {
   private timeoutMs: number;
   private cancelled = false;
   constructor(timeoutMs = 300_000) { this.timeoutMs = timeoutMs; }
-  async invoke(request: ReviewRequest): Promise<ReviewResponse> {
+  /** Zero generations; authentication output is summarized without email addresses or credential contents. */
+  async checkLogin(target: Reviewer): Promise<{ cli: string; available: boolean; detail: string }> {
+    const result = await this.execute(target);
+    return { cli: target.cli, available: result.status === 'complete', detail: result.detail };
+  }
+  async invoke(request: ReviewRequest): Promise<ReviewResponse> { return this.execute(request.target, request); }
+  private async execute(target: Reviewer, request?: ReviewRequest): Promise<ReviewResponse> {
     if (this.cancelled) throw new Error('review batch cancelled');
     if (process.platform !== 'darwin') throw new Error('CLI review isolation is implemented for macOS only');
     const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'wayfinder-review-')));
     try {
       const work = join(scratch, 'work'); const runtime = join(scratch, 'runtime');
       mkdirSync(work); mkdirSync(runtime, { mode: 0o700 });
-      const target = request.target;
       const resolved = spawnSync('/usr/bin/which', [target.cli], { encoding: 'utf8' }).stdout?.trim();
       if (!resolved) throw new Error(`${target.cli} is not installed; no substitute`);
       const bin = realpathSync(resolved);
-      // No inherited ANTHROPIC_API_KEY, OPENAI_API_KEY, auth tokens, proxy hooks, NODE_OPTIONS or user CLI overrides.
-      const env: NodeJS.ProcessEnv = { PATH: `${dirname(resolved)}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: homedir(), TMPDIR: runtime, LANG: 'en_US.UTF-8' };
-      let cmd = bin; let args = reviewArgs(target);
-      if (target.cli === 'codex') {
-        const home = join(runtime, 'home'); const codexHome = join(home, '.codex');
-        mkdirSync(codexHome, { recursive: true, mode: 0o700 });
-        // Let the signed-in CLI read its own login. The controller neither opens nor copies the file.
-        const auth = join(homedir(), '.codex', 'auth.json');
-        symlinkSync(auth, join(codexHome, 'auth.json'));
-        env.HOME = home; env.CODEX_HOME = codexHome;
-        args = ['-p', codexReviewSandbox(scratch, runtime, dirname(dirname(bin)), auth), bin, ...args];
-        cmd = '/usr/bin/sandbox-exec';
+      const env: NodeJS.ProcessEnv = { PATH: `${dirname(process.execPath)}:${dirname(resolved)}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: homedir(), TMPDIR: runtime, LANG: 'en_US.UTF-8' };
+      // User identity and already-exported proxy settings only; never inspect personal settings files for them.
+      for (const key of ['USER', 'LOGNAME', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'])
+        if (process.env[key]) env[key] = process.env[key];
+      const authFile = target.cli === 'codex' ? join(homedir(), '.codex', 'auth.json') : undefined;
+      // Native keychain access needs this one file; no personal settings or keychain contents are handled here.
+      const keychain = target.cli === 'claude' ? join(homedir(), 'Library/Keychains/login.keychain-db') : undefined;
+      const prefix = ['-p', reviewSandbox(scratch, runtime, dirname(dirname(bin)), authFile, keychain), bin];
+      const cmd = '/usr/bin/sandbox-exec'; let args = reviewArgs(target); let authArgs: string[];
+      let authEnv = env;
+      if (target.cli === 'claude') {
+        env.CLAUDE_CONFIG_DIR = join(runtime, 'claude'); mkdirSync(env.CLAUDE_CONFIG_DIR);
+        env.CLAUDE_SECURESTORAGE_CONFIG_DIR = ''; // The launcher's shared daily keychain route, never a copied keychain entry.
+        env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1'; env.DISABLE_AUTOUPDATER = '1';
+        authArgs = ['--safe-mode', '--restricted', '--setting-sources', 'user', 'auth', 'status'];
+      } else {
+        const home = join(runtime, 'home'); const statusHome = join(runtime, 'login-status');
+        mkdirSync(home); mkdirSync(statusHome);
+        env.HOME = home; env.CODEX_HOME = dirname(authFile!);
+        // Generation uses the native shared store directly. A disposable symlink is ONLY for read-only login status.
+        // The status command loads config and does not expose exec's --ignore-user-config, so its config directory is empty.
+        symlinkSync(authFile!, join(statusHome, 'auth.json'));
+        authEnv = { ...env, CODEX_HOME: statusHome };
+        authArgs = ['--no-daemon', 'login', 'status']; // This CLI rejects --strict-config on login; its config directory is fresh and empty.
+        args.splice(args.length - 1, 0, '-c', `sqlite_home=${JSON.stringify(join(runtime, 'state'))}`, '-c', `log_dir=${JSON.stringify(join(runtime, 'logs'))}`);
       }
-      // Check the signed-in subscription through the CLI, not by opening a credential file.
-      const authArgs = target.cli === 'claude' ? ['--safe-mode', '--setting-sources', '', 'auth', 'status']
-        : [...args.slice(0, 2), bin, 'login', 'status'];
-      const auth = await run(cmd, authArgs, '', work, env, 30_000);
-      if (auth.cancelled) { this.cancelled = true; return { ...decodeResponse(target.cli, auth), invocation: { command: cmd, args } }; }
+      const auth = await run(cmd, [...prefix, ...authArgs], '', work, authEnv, 30_000);
+      if (auth.cancelled) { this.cancelled = true; return { ...decodeResponse(target.cli, auth), invocation: { command: cmd, args: [...prefix, ...args] } }; }
       let signedIn = false;
       if (target.cli === 'claude') {
-        try { const status = JSON.parse(auth.stdout); signedIn = status.loggedIn === true && status.authMethod === 'claude.ai'; } catch { /* fail closed */ }
+        try { const status = object(JSON.parse(auth.stdout)); signedIn = status.loggedIn === true && status.authMethod === 'claude.ai'; } catch { /* fail closed */ }
       } else signedIn = /Logged in using ChatGPT/i.test(auth.stdout + auth.stderr);
-      if (auth.code !== 0 || !signedIn) return { status: 'unavailable', detail: `${target.cli} subscription login unavailable in isolated mode`,
-        text: '', stdout: '', stderr: '', responseId: null, visibleModel: null, cached: false, invocation: { command: cmd, args } };
-      const response = await run(cmd, args, request.input, work, env, this.timeoutMs);
+      const diagnostic = /api.?key|token|bearer|secret|@/i.test(auth.stderr) ? 'native auth diagnostic omitted'
+        : reportReason(auth.stderr).trim().split('\n').slice(0, 3).join(' ');
+      const base: ReviewResponse = { status: signedIn && auth.code === 0 ? 'complete' : 'unavailable',
+        detail: signedIn && auth.code === 0 ? 'isolated subscription login available (no generation)' : `isolated subscription login unavailable (exit ${auth.code})${diagnostic ? `: ${diagnostic}` : ''}`,
+        text: '', stdout: '', stderr: '', responseId: null, visibleModel: null, cached: false, invocation: { command: cmd, args: [...prefix, ...args] } };
+      if (base.status !== 'complete' || !request) return base;
+      const response = await run(cmd, [...prefix, ...args], request.input, work, env, this.timeoutMs);
       this.cancelled = response.cancelled ?? false;
-      return { ...decodeResponse(target.cli, response), invocation: { command: cmd, args } };
+      return { ...decodeResponse(target.cli, response, target.model), invocation: base.invocation! };
     } finally { rmSync(scratch, { recursive: true, force: true }); }
   }
 }

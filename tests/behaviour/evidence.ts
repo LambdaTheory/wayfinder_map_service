@@ -1,6 +1,6 @@
 // The evidence contract for one Attempt (spec R3). Drivers normalize native client output into
-// this record; verdicts read only this record. Raw native files stay in the private run directory.
-import type { ReviewSummary } from './reviews.ts';
+// this record; verdicts read its evidence and append separately hashed review annotations. Raw native files stay private.
+import type { ReviewSummary } from './review-types.ts';
 
 export const attemptSchema = 'wayfinder-behaviour-attempt/1';
 

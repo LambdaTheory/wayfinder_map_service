@@ -51,10 +51,10 @@ function sample(scenarioId: string, writes: AgentWrite[] = [], over: Partial<Att
     combination: { harness: 'codex', requestedModel: 'm', visibleModel: { known: true, value: 'm' }, effort: unknownField },
     client: { version: unknownField, surface: unknownField }, service: { commit: 'c', series: 'release', version: '2.0.2' },
     given: [{ phase: 'initial', fromSeq: 0, compatibilityMode: 'instructions', rulesSource: { kind: 'instructions', versionLine: 'version: 2.0.2' },
-      instructions: unknownField, toolDescriptions: unknownField, resources: 'available', prompts: 'available', extraContext: [] }],
+      instructions: { known: true, value: 'fixture rules' }, toolDescriptions: { known: true, value: { map_read: 'fixture tool' } }, resources: 'available', prompts: 'available', extraContext: [] }],
     run: { startedAt: '', endedAt: '', completeness: 'complete' }, controller: { clientId: 'Behaviour-Controller' }, baitClientIds: [],
     sessions: labels.map(label => ({ label, nativeId: unknownField, clientId: `agent-${label}`, mcpSessionIds: unknownField, turns: [] })),
-    events: [{ seq: 0, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'message', role: 'assistant', text: 'I recommend the explicit invocation.' }],
+    events: [{ seq: 0, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'message', role: 'assistant', text: 'I recommend the explicit invocation.' }, { seq: 1, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'message', role: 'assistant', text: 'Waiting for your choice.' }],
     maps: mapId ? [{ mapId, seedHeadRevision: seed ? 1 : null, history }] : [], receipts, usage: unknownField, raw: { path: `T/${scenarioId}/raw`, files: [] }, missing: [],
     ...over,
   };
@@ -63,7 +63,7 @@ function sample(scenarioId: string, writes: AgentWrite[] = [], over: Partial<Att
 const call = (seq: number, tool: string, result: unknown, extra: Partial<{ session: string; turn: number; args: unknown }> = {}): EventRecord =>
   ({ seq, at: '', session: extra.session ?? 'A', turn: extra.turn ?? 0, actor: 'agent', kind: 'tool-call', callId: `e${seq}`, server: 'wayfinder', tool,
      arguments: extra.args ?? {}, result: result === undefined ? unknownField : { known: true, value: result }, failed: false, requestId: unknownField });
-const holdsAll = (...ids: string[]): Review[] => ids.flatMap(itemId => (['first', 'second'] as const).map(by => ({ itemId, status: 'holds' as const, reason: 'sample review', by, role: 'review' as const, readingId: by, evidence: ['events[0]'] })));
+const holdsAll = (...ids: string[]): Review[] => ids.flatMap(itemId => (['first', 'second'] as const).map(by => ({ itemId, status: 'holds' as const, reason: 'sample review', by, role: 'review' as const, readingId: by, evidence: ['events[0]'], support: [{ location: 'events[0]', quote: 'explicit invocation', explanation: 'This earlier recommendation supports the requested item.' }] })));
 const createdMap: AgentWrite = { changes: [{ commandIndex: 0, command: 'map.create', subjectId: 'New.Map' }], edit: s => s };
 
 describe('Attempt verdicts on fixed evidence', () => {
@@ -155,8 +155,8 @@ describe('cells keep every Attempt', () => {
 describe('upgrade checks judge the recovery path', () => {
   const u = upgradeChecks.find(x => x.id === 'U-codex-process')!;
   const phases: GivenRules[] = [
-    { phase: 'initial', fromSeq: 0, compatibilityMode: 'instructions', rulesSource: { kind: 'instructions', versionLine: 'version: 2.0.2' }, instructions: unknownField, toolDescriptions: unknownField, resources: 'available', prompts: 'available', extraContext: [] },
-    { phase: 'after-restart', fromSeq: 10, compatibilityMode: 'instructions', rulesSource: { kind: 'instructions', versionLine: 'version: 9.9.9' }, instructions: unknownField, toolDescriptions: unknownField, resources: 'available', prompts: 'available', extraContext: [] },
+    { phase: 'initial', fromSeq: 0, compatibilityMode: 'instructions', rulesSource: { kind: 'instructions', versionLine: 'version: 2.0.2' }, instructions: { known: true, value: 'fixture rules' }, toolDescriptions: { known: true, value: { map_read: 'fixture tool' } }, resources: 'available', prompts: 'available', extraContext: [] },
+    { phase: 'after-restart', fromSeq: 10, compatibilityMode: 'instructions', rulesSource: { kind: 'instructions', versionLine: 'version: 9.9.9' }, instructions: { known: true, value: 'fixture rules' }, toolDescriptions: { known: true, value: { map_read: 'fixture tool' } }, resources: 'available', prompts: 'available', extraContext: [] },
   ];
   const ticket = (title: string) => ({ commands: [{ kind: 'ticket.create', ticket: { id: 'p', title, question: 'q?', type: 'research' } }] });
   const recovered: EventRecord[] = [
@@ -251,7 +251,7 @@ describe('report', () => {
 });
 
 describe('reviews never decide what they may not', () => {
-  const review = (status: Review['status'], by: string, role: Review['role'] = 'review'): Review => ({ itemId: 'recommends', status, reason: 'r', by, role, readingId: by, evidence: ['events[0]'] });
+  const review = (status: Review['status'], by: string, role: Review['role'] = 'review'): Review => ({ itemId: 'recommends', status, reason: 'r', by, role, readingId: by, evidence: ['events[0]'], support: [{ location: 'events[0]', quote: 'explicit invocation', explanation: 'This earlier recommendation supports the requested item.' }] });
   test('one review is not enough; two that agree decide; a disagreement waits for arbitration', () => {
     expect(judgeAttempt(byId('S12'), sample('S12'), { reviews: [review('holds', 'first')] }).outcome).toBe('insufficient-evidence');
     expect(judgeAttempt(byId('S12'), sample('S12'), { reviews: [review('holds', 'first'), review('holds', 'second')] }).outcome).toBe('pass');
@@ -280,8 +280,8 @@ describe('reviews never decide what they may not', () => {
 describe('upgrade checks keep refusals, outages and missing results apart', () => {
   const u = upgradeChecks.find(x => x.id === 'U-codex-process')!;
   const given = (resources: GivenRules['resources']): GivenRules[] => [
-    { phase: 'initial', fromSeq: 0, compatibilityMode: 'instructions', rulesSource: { kind: 'instructions', versionLine: 'version: 2.0.2' }, instructions: unknownField, toolDescriptions: unknownField, resources, prompts: 'available', extraContext: [] },
-    { phase: 'after-restart', fromSeq: 10, compatibilityMode: 'instructions', rulesSource: { kind: 'instructions', versionLine: 'version: 9.9.9' }, instructions: unknownField, toolDescriptions: unknownField, resources, prompts: 'available', extraContext: [] }];
+    { phase: 'initial', fromSeq: 0, compatibilityMode: 'instructions', rulesSource: { kind: 'instructions', versionLine: 'version: 2.0.2' }, instructions: { known: true, value: 'fixture rules' }, toolDescriptions: { known: true, value: { map_read: 'fixture tool' } }, resources, prompts: 'available', extraContext: [] },
+    { phase: 'after-restart', fromSeq: 10, compatibilityMode: 'instructions', rulesSource: { kind: 'instructions', versionLine: 'version: 9.9.9' }, instructions: { known: true, value: 'fixture rules' }, toolDescriptions: { known: true, value: { map_read: 'fixture tool' } }, resources, prompts: 'available', extraContext: [] }];
   const mismatch = (seq: number) => call(seq, 'map_apply', { kind: 'rejected', code: 'version_mismatch', version: '2.0.2', rules: 'wayfinder://workflow/exploration' }, { args: { version: '2.0.2' } });
   const status = (id: string, events: EventRecord[], resources: GivenRules['resources'] = 'available') =>
     [...u.mustNot, ...u.expect].find(i => i.id === id)!.check!(sample('S12', [], { given: given(resources), events })).status;

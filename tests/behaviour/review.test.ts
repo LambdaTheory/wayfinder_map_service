@@ -8,11 +8,12 @@ import { attemptSchema } from './evidence.ts';
 import type { AttemptRecord } from './evidence.ts';
 import { library } from './library.ts';
 import { buildReport, renderMarkdown } from './report.ts';
-import { codexReviewSandbox, decodeResponse, reviewArgs } from './review-cli.ts';
+import { CliReviewDriver, codexReviewSandbox, decodeResponse, reviewArgs } from './review-cli.ts';
 import { reviewDirectories, reviewPlan } from './review-run.ts';
-import { reviewAttempt, reviewersFor, reviewItems } from './review.ts';
-import type { ReviewDriver, ReviewRequest, ReviewResponse } from './review.ts';
-import type { Review } from './reviews.ts';
+import { reviewAttempt, reviewersFor, reviewItems } from './model-review.ts';
+import type { ReviewDriver, ReviewRequest, ReviewResponse } from './model-review.ts';
+import { decideReviews, evidenceHash, missingForReview, reportReason, reviewProblem } from './review-verdict.ts';
+import type { Review, ReviewSummary } from './review-verdict.ts';
 import { judgeAttempt } from './verdict.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'wayfinder-review-test-'));
@@ -22,7 +23,7 @@ const unknown = { known: false as const, reason: 'synthetic fixture' };
 function sample(): AttemptRecord {
   return { schema: attemptSchema, attemptId: 'B/S12-1', batchId: 'B', subject: { kind: 'scenario', id: 'S12', version: scenario.version }, entry: 'mcp-only',
     combination: { harness: 'codex', requestedModel: 'gpt-6-astra', visibleModel: { known: true, value: 'gpt-6-astra' }, effort: { known: true, value: 'xhigh' } },
-    client: { version: unknown, surface: unknown }, service: { commit: 'fixture', series: 'release', version: '2.0.2' }, given: [],
+    client: { version: unknown, surface: unknown }, service: { commit: 'fixture', series: 'release', version: '2.0.2' }, given: [{ phase: 'initial', fromSeq: 0, compatibilityMode: 'instructions', rulesSource: { kind: 'instructions', versionLine: 'version: 2.0.2' }, instructions: { known: true, value: 'fixture rules' }, toolDescriptions: { known: true, value: { map_read: 'fixture tool' } }, resources: 'available', prompts: 'available', extraContext: [] }],
     run: { startedAt: '', endedAt: '', completeness: 'complete' }, controller: { clientId: 'controller' }, baitClientIds: [],
     sessions: [{ label: 'A', nativeId: unknown, clientId: 'A', mcpSessionIds: unknown,
       turns: [{ index: 0, input: 'What next?', startedAt: '', endedAt: '', durationMs: 0 }] }],
@@ -47,7 +48,7 @@ class Fake implements ReviewDriver {
     if (request.kind !== 'availability') this.reading++;
     const items = request.kind === 'availability' ? [] : JSON.parse(request.input.slice(request.input.indexOf('\n{') + 1)).items;
     const text = request.kind === 'availability' ? 'AVAILABLE' : JSON.stringify({ items: items.map((i: { id: string }) => ({ itemId: i.id,
-      status: 'holds', reason: 'The recommendation appears at event 10 before the final waiting message.', evidence: ['events[0]'] })) });
+      status: 'holds', reason: 'The recommendation appears at event 10 before the final waiting message.', evidence: ['events[0]'], support: [{ location: 'events[0]', quote: 'explicitly invoking Wayfinder', explanation: `This observation supports item ${i.id}.` }] })) });
     return this.edit(request, { status: 'complete', detail: 'fake generation', text, stdout: text, stderr: '', responseId: `native-${this.requests.length}`,
       visibleModel: request.target.model, cached: false }, this.reading);
   }
@@ -136,7 +137,7 @@ describe('independent reviews over complete Attempt evidence', () => {
     });
     const { result, verdict } = await judged(fake, a);
     expect(verdict.outcome).toBe('insufficient-evidence');
-    expect(result.pending.some(p => p.next === 'human')).toBe(true);
+    expect(result.pending.some(p => p.next === 'retry')).toBe(true);
   });
   test('a concrete violation survives missing evidence and a later passing review round', async () => {
     const a = sample(); a.missing = ['events.tool-call'];
@@ -159,7 +160,7 @@ describe('independent reviews over complete Attempt evidence', () => {
     });
     const { verdict, result } = await judged(fake, a);
     expect(verdict.outcome).toBe('insufficient-evidence');
-    expect(result.pending[0]!.reason).toContain('recorded agent activity');
+    expect(result.pending[0]!.reason).toContain('valid independent readings');
   });
   test('script decisions and human/paused items never go to the model', () => {
     expect(reviewItems(scenario, sample()).map(i => i.id)).toEqual(['recommends', 'status-narration']);
@@ -189,8 +190,8 @@ describe('manual review command and report integration', () => {
     expect(report.cells[0]!.verdict.outcome).toBe('pass');
     expect(renderMarkdown(report)).toContain('events[0]');
     expect(renderMarkdown(report)).toContain(record.modelReviews[0].path);
-    await reviewDirectories([dirs[0]!], new Fake(), 'approved-retry', 5);
-    expect(JSON.parse(readFileSync(join(dirs[0]!, 'attempt.json'), 'utf8')).modelReviews).toHaveLength(2);
+    await expect(reviewDirectories([dirs[0]!], new Fake(), 'approved-retry', 5, true)).rejects.toThrow('No retryable items');
+    expect(JSON.parse(readFileSync(join(dirs[0]!, 'attempt.json'), 'utf8')).modelReviews).toHaveLength(1);
   });
   test('stale reviews do not decide edited evidence, nor does an old Scenario get re-judged', async () => {
     const a = sample(); const { result } = await judged(new Fake(), a);
@@ -215,6 +216,31 @@ describe('manual review command and report integration', () => {
     expect(JSON.parse(readFileSync(join(dir, 'attempt.json'), 'utf8')).modelReviews).toBeUndefined();
     const rounds = readdirSync(join(dir, 'model-reviews'));
     expect(readdirSync(join(dir, 'model-reviews', rounds[0]!))).toContain('result.json');
+    expect(() => reviewPlan([dir], true)).toThrow('Unattached review round');
+  });
+  test('approval provenance is durable before the first driver invocation', async () => {
+    const dir = directory();
+    const fake = new Fake((_, out) => {
+      const rounds = readdirSync(join(dir, 'model-reviews'));
+      const plan = JSON.parse(readFileSync(join(dir, 'model-reviews', rounds[0]!, 'review-plan.json'), 'utf8'));
+      expect(plan).toMatchObject({ batch: 'approved-early', callCeiling: 5, retry: false });
+      expect(plan.plan[0].attemptId).toBe('B/S12-1');
+      return out;
+    });
+    await reviewDirectories([dir], fake, 'approved-early', 5);
+    expect(fake.requests).toHaveLength(4);
+  });
+  test('one JSON fence is accepted without extra calls', async () => {
+    const fake = new Fake((req, out) => req.kind === 'availability' ? out : { ...out, text: '```json\n' + out.text + '\n```' });
+    expect((await judged(fake)).verdict.outcome).toBe('pass');
+    expect(fake.requests).toHaveLength(4);
+  });
+  test('private diagnostic paths stay in raw output, outside reportable reasons', async () => {
+    const fake: ReviewDriver = { async invoke() { throw new Error('failed at /Users/fixture/private/state'); } };
+    const a = sample(); const dir = directory(a); const result = await reviewAttempt(scenario, a, fake, dir);
+    expect(JSON.stringify(result)).not.toContain('/Users/');
+    expect(readFileSync(join(dirname(join(dir, result.path)), '1-availability.output.json'), 'utf8')).toContain('/Users/fixture');
+    expect(reportReason('reason /Users/fixture/private/file')).toBe('reason <private-path>');
   });
 });
 
@@ -236,7 +262,7 @@ describe('native CLI contract without model calls', () => {
     const claude = reviewArgs({ cli: 'claude', model: 'claude-sonnet-5-5' });
     for (const flag of ['--safe-mode', '--restricted', '--strict-mcp-config', '--no-session-persistence', '--disable-slash-commands']) expect(claude).toContain(flag);
     expect(claude[claude.indexOf('--tools') + 1]).toBe('');
-    expect(claude[claude.indexOf('--setting-sources') + 1]).toBe('');
+    expect(claude[claude.indexOf('--setting-sources') + 1]).toBe('user');
     expect(claude).not.toContain('--fallback-model');
     const codex = reviewArgs({ cli: 'codex', model: 'gpt-6.1-sol' });
     for (const flag of ['--no-daemon', '--ignore-user-config', '--ignore-rules', '--ephemeral', 'project_doc_max_bytes=0', 'skip_host_skill_discovery', 'read-only']) expect(codex).toContain(flag);
@@ -244,15 +270,178 @@ describe('native CLI contract without model calls', () => {
   });
   test('uses native Claude model/session metadata and rejects exposed tools', () => {
     const rows = [{ type: 'system', subtype: 'init', model: 'claude-sonnet-5-5', tools: [], mcp_servers: [] },
-      { type: 'assistant', message: { model: 'claude-sonnet-5-5', content: [] } },
+      { type: 'assistant', message: { id: 'msg-native', model: 'claude-sonnet-5-5', content: [] } },
       { type: 'result', subtype: 'success', session_id: 'native', result: 'AVAILABLE' }];
     const out = { stdout: rows.map(x => JSON.stringify(x)).join('\n'), stderr: '', code: 0, timedOut: false };
-    expect(decodeResponse('claude', out)).toMatchObject({ status: 'complete', responseId: 'native', visibleModel: 'claude-sonnet-5-5' });
+    expect(decodeResponse('claude', out)).toMatchObject({ status: 'complete', responseId: 'msg-native', visibleModel: 'claude-sonnet-5-5' });
     expect(decodeResponse('claude', { ...out, stdout: out.stdout.replace('"tools":[]', '"tools":["Bash"]') }).detail).toContain('isolation violation');
+    const snapshot = out.stdout.replace('"model":"claude-sonnet-5-5","content"', '"model":"claude-sonnet-5-5-20261001","content"');
+    expect(decodeResponse('claude', { ...out, stdout: snapshot }, 'claude-sonnet-5-5').visibleModel).toBe('claude-sonnet-5-5-20261001');
+    const replay = out.stdout.replace('"type":"assistant"', '"type":"assistant","isReplay":true');
+    expect(decodeResponse('claude', { ...out, stdout: replay })).toMatchObject({ cached: true, responseId: 'msg-native', cacheEvidence: 'replayed' });
+    const prefixCache = out.stdout.replace('"type":"assistant"', '"type":"assistant","cache_read_input_tokens":100');
+    expect(decodeResponse('claude', { ...out, stdout: prefixCache }).cached).toBe(false);
   });
-  test('Codex native model/session header is required by the review layer', () => {
-    const r = decodeResponse('codex', { stdout: 'AVAILABLE', stderr: 'model: gpt-6.1-sol\nsession id: native\n', code: 0, timedOut: false });
-    expect(r).toMatchObject({ text: 'AVAILABLE', visibleModel: 'gpt-6.1-sol', responseId: 'native' });
+  test('Codex JSON retains native thread/item identity and reports when the served model is absent', () => {
+    const rows = [{type:'thread.started', thread_id:'native'}, {type:'item.completed',item:{id:'item-0',type:'agent_message',text:'AVAILABLE'}}, {type:'turn.completed'}];
+    const stdout = rows.map(x => JSON.stringify(x)).join('\n');
+    const r = decodeResponse('codex', { stdout, stderr: '', code: 0, timedOut: false }, 'gpt-6.1-sol');
+    expect(r).toMatchObject({ text: 'AVAILABLE', visibleModel: 'gpt-6.1-sol', responseId: 'native:item-0', modelEvidence: 'requested-only' });
     expect(decodeResponse('codex', { stdout: '', stderr: 'model not available', code: 1, timedOut: false }).status).toBe('unavailable');
+    expect(decodeResponse('codex', { stdout: stdout.replace('agent_message', 'mcp_tool_call'), stderr: '', code: 0, timedOut: false }).status).toBe('error');
+  });
+  test.skipIf(process.platform !== 'darwin')('native refresh can update only the shared login file, never a disposable copy or neighbouring settings', () => {
+    const shared = realpathSync(mkdtempSync(join(root, 'fake-shared-login-'))); const auth = join(shared, 'auth.json');
+    writeFileSync(auth, 'synthetic old login'); writeFileSync(join(shared, 'config.toml'), 'synthetic settings');
+    const scratch = realpathSync(mkdtempSync(join(root, 'refresh-'))); const runtime = join(scratch, 'runtime'); mkdirSync(runtime);
+    const profile = codexReviewSandbox(scratch, runtime, dirname(process.execPath), auth);
+    const probe = `const fs=require('node:fs');
+      if(fs.readFileSync(${JSON.stringify(auth)},'utf8')!=='synthetic old login') process.exit(2);
+      fs.writeFileSync(${JSON.stringify(auth)},'synthetic refreshed login');
+      for(const op of ['read','write']) { let denied=false;try{op==='read'?fs.readFileSync(${JSON.stringify(join(shared, 'config.toml'))}):fs.writeFileSync(${JSON.stringify(join(shared, 'config.toml'))},'bad')}catch(e){denied=e.code==='EPERM'}if(!denied)process.exit(3);}`;
+    const result = spawnSync('/usr/bin/sandbox-exec', ['-p', profile, process.execPath, '-e', probe], { encoding: 'utf8' });
+    expect(result.stderr).toBe(''); expect(result.status).toBe(0);
+    rmSync(scratch, { recursive: true });
+    expect(readFileSync(auth, 'utf8')).toBe('synthetic refreshed login');
+  });
+});
+
+describe('PR 93 independent-review regressions', () => {
+  const reading = (id: string, result: Review['status'], roundId: string, role: Review['role'] = 'review'): Review => ({
+    itemId: 'recommends', status: result, reason: 'The earlier event recommends the explicit invocation.', by: 'fixture',
+    role, readingId: id, roundId, evidence: ['events[0]'], support: [{ location: 'events[0]', quote: 'explicitly invoking Wayfinder', explanation: 'The earlier recommendation is the behaviour this item requires.' }],
+  });
+  const round = (a: AttemptRecord, roundId: string, reviews: Review[]): ReviewSummary => ({
+    schema: 'wayfinder-model-review/1', roundId, evidenceHash: evidenceHash(a), path: `model-reviews/${roundId}/result.json`, reviews, pending: [],
+  });
+  test('a later agreeing round cannot clear an undecided arbitration', () => {
+    const a = sample();
+    a.modelReviews = [round(a, 'first', [reading('1', 'holds', 'first'), reading('2', 'violated', 'first'), reading('3', 'undecided', 'first', 'arbitration')]),
+      round(a, 'later', [reading('4', 'holds', 'later'), reading('5', 'holds', 'later')])];
+    expect(judgeAttempt(scenario, a).outcome).toBe('insufficient-evidence');
+  });
+  test('one earlier violation reading cannot disappear behind a later agreeing round', () => {
+    const a = sample(); a.modelReviews = [round(a, 'first', [reading('1', 'violated', 'first')]),
+      round(a, 'later', [reading('2', 'holds', 'later'), reading('3', 'holds', 'later')])];
+    expect(judgeAttempt(scenario, a).outcome).toBe('insufficient-evidence');
+  });
+  test('rejected readings are retained without counting as the two readings required for arbitration', async () => {
+    const fake = new Fake((req, out) => {
+      if (req.kind !== 'review') return out;
+      const json = JSON.parse(out.text); json.items.forEach((i: Review) => { i.status = 'violated'; i.evidence = ['events[999]']; });
+      return { ...out, text: JSON.stringify(json) };
+    });
+    const { result, verdict } = await judged(fake);
+    expect(fake.requests.some(r => r.kind === 'arbitration')).toBe(false);
+    expect(result.reviews.filter(r => r.role === 'review').every(r => r.status === 'violated')).toBe(true);
+    expect(verdict.outcome).toBe('insufficient-evidence');
+  });
+  test.each(['receipt-padding', 'turn-padding', 'one-message'] as const)('%s cannot bypass the final-reply evidence boundary', async mode => {
+    const a = sample();
+    a.receipts = [{ callId: 'unmatched', session: 'A', turn: 0, tool: 'map_apply', mapId: 'M', outcome: { kind: 'committed', revision: 2 } }];
+    if (mode === 'one-message') a.events[0] = { seq: 10, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'command', command: 'true', exitCode: 0 };
+    const fake = new Fake((req, out) => {
+      if (req.kind === 'availability') return out;
+      const json = JSON.parse(out.text); json.items.forEach((i: Review) => { i.evidence = ['events[1]', ...(mode === 'one-message' ? []
+        : [mode === 'receipt-padding' ? 'receipts[0]' : 'sessions[0].turns[0]'])]; });
+      return { ...out, text: JSON.stringify(json) };
+    });
+    expect((await judged(fake, a)).verdict.outcome).toBe('insufficient-evidence');
+  });
+  test.each(['given[0].instructions', 'given[0].toolDescriptions', 'sessions[0].turns[0].input'])('%s blocks a behavioural holds', async marker => {
+    const a = sample(); a.missing = [marker];
+    expect((await judged(new Fake(), a)).verdict.outcome).toBe('insufficient-evidence');
+  });
+  test('an unknown command result blocks a behavioural holds', async () => {
+    const a = sample(); a.events.push({ seq: 12, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'command', command: 'probe', exitCode: null });
+    expect((await judged(new Fake(), a)).verdict.outcome).toBe('insufficient-evidence');
+  });
+  test('unchanged evidence cannot start another ordinary round', async () => {
+    const dir = directory(); await reviewDirectories([dir], new Fake(), 'approved', 5);
+    const second = new Fake(); await expect(reviewDirectories([dir], second, 'approved-again', 5)).rejects.toThrow();
+    expect(second.requests).toHaveLength(0);
+  });
+  test('native IDs are not reusable in another round', async () => {
+    const a = sample(); const first = await judged(new Fake(), a); a.modelReviews = [first.result];
+    const second = await judged(new Fake(), a);
+    expect(second.result.reviews).toHaveLength(0);
+    expect(second.result.pending.some(p => /duplicate|replay/i.test(p.reason))).toBe(true);
+  });
+  test('two saved invalid readings plus one good arbitration cannot establish holds', () => {
+    const a = sample(); const reviews = [reading('1', 'violated', 'first'), reading('2', 'holds', 'first'), reading('3', 'holds', 'first', 'arbitration')];
+    reviews[0]!.evidence = ['events[999]']; reviews[1]!.rejected = 'invalid original output';
+    expect(decideReviews('recommends', reviews, a)).toMatchObject({ next: 'review' });
+  });
+  test('an explicit retry arbitrates all earlier violation claims instead of voting them away', async () => {
+    const a = sample(); a.modelReviews = [round(a, 'first', [reading('old', 'violated', 'first')])];
+    const dir = directory(a); const fake = new Fake();
+    const [result] = await reviewDirectories([dir], fake, 'approved-retry', 5, true);
+    expect(fake.requests).toHaveLength(5);
+    expect(fake.requests[4]!.input).toContain('"readingId": "old"');
+    expect(result!.reviews.find(r => r.role === 'arbitration' && r.itemId === 'recommends')?.basedOn).toContain('old');
+    expect(judgeAttempt(scenario, JSON.parse(readFileSync(join(dir, 'attempt.json'), 'utf8'))).outcome).toBe('pass');
+  });
+  test('retry skips human-locked items and cannot change their verdict', async () => {
+    const a = sample(); a.modelReviews = [round(a, 'first', [reading('1', 'holds', 'first'), reading('2', 'violated', 'first'), reading('3', 'undecided', 'first', 'arbitration')])];
+    const dir = directory(a); const fake = new Fake();
+    expect(reviewPlan([dir], true)[0]!.items).toEqual(['status-narration']);
+    await reviewDirectories([dir], fake, 'approved-quality-retry', 5, true);
+    expect(judgeAttempt(scenario, JSON.parse(readFileSync(join(dir, 'attempt.json'), 'utf8'))).outcome).toBe('insufficient-evidence');
+  });
+  test('replayed IDs cannot replace earlier rejected claims or valid violation readings', () => {
+    const a = sample(); const bad = reading('1', 'violated', 'first'); bad.rejected = 'bad citation';
+    expect(decideReviews('recommends', [bad, reading('1', 'holds', 'second'), reading('2', 'holds', 'second')], a)).toMatchObject({ next: 'review' });
+    delete bad.rejected;
+    expect(decideReviews('recommends', [bad, reading('1', 'holds', 'second'), reading('2', 'holds', 'second')], a)).toMatchObject({ next: 'arbitration' });
+  });
+  test('a real matched receipt needs quoted item-specific support, not just a padded locator', () => {
+    const a = sample();
+    a.events.unshift({ seq: 9, at: '', session: 'A', turn: 0, actor: 'agent', kind: 'tool-call', callId: 'call-1', server: 'wayfinder', tool: 'map_apply', arguments: {}, result: { known: true, value: 'committed' }, failed: false, requestId: unknown });
+    a.receipts = [{ callId: 'call-1', session: 'A', turn: 0, tool: 'map_apply', mapId: 'M', outcome: { kind: 'committed', revision: 2 } }];
+    const r = reading('1', 'holds', 'first'); r.evidence = ['events[2]', 'receipts[0]'];
+    expect(reviewProblem(r, a)).toContain('item-relevant');
+    r.support = [{ location: 'receipts[0]', quote: 'committed', explanation: '' }];
+    expect(reviewProblem(r, a)).toContain('item-relevant');
+    r.support[0]!.explanation = 'The committed receipt corroborates the action required by this item.';
+    expect(reviewProblem(r, a)).toBeNull();
+  });
+  test('missing dependencies distinguish quality counts, toolsOnly rules and unknown markers', () => {
+    const a = sample(); a.missing = ['given[0].instructions', 'usage', 'client.version'];
+    expect(missingForReview('recommends', a)).toEqual(['given[0].instructions']);
+    expect(missingForReview('status-narration', a)).toEqual(['given[0].instructions']);
+    a.given[0]!.compatibilityMode = 'toolsOnly'; a.given[0]!.instructions = unknown;
+    expect(missingForReview('recommends', a)).toEqual([]);
+    a.missing.push('maps', 'events.command.exitCode');
+    expect(missingForReview('status-narration', a)).toEqual([]);
+    a.missing.push('unexpected.trace.gap');
+    expect(missingForReview('status-narration', a)).toEqual(['unexpected.trace.gap']);
+    a.missing.push('sessions[0].turns[0].input');
+    expect(missingForReview('status-narration', a)).toContain('sessions[0].turns[0].input');
+  });
+  test.skipIf(process.platform !== 'darwin')('Claude native process is isolated, not just given isolation flag names', async () => {
+    const install = mkdtempSync(join(root, 'fake-cli-')); const binDir = join(install, 'bin'); mkdirSync(binDir); const bin = join(binDir, 'claude');
+    const privateFixture = join(root, 'private-context.txt'); writeFileSync(privateFixture, 'private fixture');
+    writeFileSync(bin, `#!${process.execPath}
+const fs = require('node:fs'); const net = require('node:net');
+if (process.argv.includes('status')) { console.log(JSON.stringify({loggedIn:true, authMethod:'claude.ai'})); process.exit(0); }
+try { fs.writeFileSync(process.cwd() + '/must-not-write', 'bad'); console.log('workspace write was allowed'); process.exit(23); } catch (e) { if (e.code !== 'EPERM') throw e; }
+if (!process.env.CLAUDE_CONFIG_DIR || process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR !== '') process.exit(24);
+if (fs.readdirSync(process.env.CLAUDE_CONFIG_DIR).length || process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY !== '1') process.exit(27);
+for(const path of [${JSON.stringify(privateFixture)}]) {
+ try { fs.readFileSync(path); process.exit(28); } catch(e) { if(e.code!=='EPERM') throw e; }
+}
+const socket = net.connect(18766, '127.0.0.1');
+socket.on('connect', () => { socket.destroy(); process.exit(25); });
+socket.on('error', e => { if (e.code !== 'EPERM') process.exit(26);
+ console.log(JSON.stringify({type:'system',subtype:'init',model:'claude-sonnet-5-5',tools:[],mcp_servers:[]}));
+ console.log(JSON.stringify({type:'assistant',message:{id:'msg-fixture',model:'claude-sonnet-5-5',content:[]}}));
+ console.log(JSON.stringify({type:'result',subtype:'success',session_id:'session-fixture',result:'AVAILABLE'})); });
+`, { mode: 0o700 });
+    const previous = process.env.PATH; process.env.PATH = `${binDir}:${previous ?? ''}`;
+    try {
+      const response = await new CliReviewDriver().invoke({ id: 'fixture', kind: 'availability', target: { cli: 'claude', model: 'claude-sonnet-5-5' }, input: 'No real model.' });
+      expect(response.status, response.stdout + response.stderr).toBe('complete');
+      expect(response.invocation?.command).toBe('/usr/bin/sandbox-exec');
+    } finally { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; }
   });
 });
