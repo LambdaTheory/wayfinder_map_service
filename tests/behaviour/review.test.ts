@@ -89,6 +89,21 @@ describe('independent reviews over complete Attempt evidence', () => {
     expect(readdirSync(dirname(join(dir, result.path))).filter(x => x.endsWith('.input.json'))).toHaveLength(4);
     expect(readdirSync(dirname(join(dir, result.path))).filter(x => x.endsWith('.output.json'))).toHaveLength(4);
   });
+  test('the prompt\'s synthetic JSON output example satisfies the unchanged evidence validator', async () => {
+    const fake = new Fake((req, out) => {
+      if (req.kind === 'availability') return out;
+      const packet = JSON.parse(req.input.slice(req.input.indexOf('\n{') + 1));
+      const example = packet.syntheticCitationExample;
+      const a = sample(); a.events = [{ ...a.events[0]!, kind: 'message', role: 'assistant', text: example.sources.reply.text }];
+      const entry = example.output.items[0];
+      expect(Object.keys(entry).sort()).toEqual(['evidence', 'itemId', 'reason', 'status', 'support']);
+      expect(entry.support).toHaveLength(2);
+      expect(entry.support[1].quote).toBe(turnWriteEvidence(a)[0]![0]!.statement);
+      expect(reviewProblem({ ...entry, by: 'fixture', role: 'review', readingId: 'synthetic-example' }, a)).toBeNull();
+      return out;
+    });
+    expect((await judged(fake)).verdict.outcome).toBe('pass');
+  });
   test('disagreement goes to the stronger model with both readings and the full evidence', async () => {
     const fake = new Fake((req, out, n) => req.kind === 'availability' ? out : status(out, n === 1 ? 'holds' : 'violated'));
     const { result, verdict } = await judged(fake);
@@ -454,6 +469,63 @@ describe('final replies with independent same-turn evidence', () => {
     expect(result.pending).toEqual([]);
     expect(judgeAttempt(f11, { ...a, modelReviews: [result] }).outcome).toBe('pass');
     expect(fake.requests.map(r => r.kind)).toEqual(['availability', 'availability', 'review', 'review']);
+  });
+  test.each(['complete', 'final-only', 'listed-proof', 'pretty-tool-quote', 'wrong-item-key', 'invalid-json'] as const)(
+    'synthetic read-only F11 review: %s preserves the existing acceptance boundary', async shape => {
+      const { a, reply } = fixture('event', 'holds');
+      a.events[0]!.seq = 9; a.events[1]!.seq = 10; // Locators still use array positions, not native seq values.
+      const dir = directory(a); let raw = '';
+      const fake = new Fake((req, out) => {
+        if (req.kind === 'availability') return out;
+        const packet = JSON.parse(req.input.slice(req.input.indexOf('\n{') + 1));
+        expect(packet.citationGuide.events).toEqual(['events[0]', 'events[1]']);
+        expect(packet.citationGuide.noWrites).toEqual([{ location: 'turnWrites[0][0]', session: 'A', turn: 0,
+          quote: turnWriteEvidence(a)[0]![0]!.statement }]);
+        const proof = packet.citationGuide.noWrites[0];
+        const entry = { itemId: 'asks-scope', status: 'holds',
+          reason: 'The agent only read the scope, answered the permission question and asked before any change; turnWrites records no committed receipts and unchanged catalog heads.',
+          evidence: [reply, proof.location], support: [
+            { location: reply, quote: (a.events[1] as { text: string }).text, explanation: 'The final reply answers the question and asks before moving scope.' },
+            { location: proof.location, quote: proof.quote, explanation: 'The whole-catalog no-write proof independently confirms no Map changed in the same session and turn.' },
+          ] };
+        if (shape === 'final-only' || shape === 'listed-proof') entry.support = entry.support.slice(0, 1);
+        if (shape === 'final-only') entry.evidence = [reply];
+        if (shape === 'complete' || shape === 'pretty-tool-quote') {
+          entry.evidence.push('events[0]');
+          entry.support.push({ location: 'events[0]', quote: shape === 'complete' ? '"tool":"map_read"' : '"tool": "map_read"',
+            explanation: 'The recorded tool call reads the permission scope discussed in the reply.' });
+        }
+        const { itemId, ...rest } = entry;
+        raw = shape === 'invalid-json' ? '{"items":[' : JSON.stringify({ items: [shape === 'wrong-item-key' ? { id: itemId, ...rest } : entry] });
+        return { ...out, text: raw, stdout: raw };
+      });
+      const result = await reviewAttempt(f11, a, fake, dir, { itemIds: ['asks-scope'] });
+      expect(result.reviews).toHaveLength(2);
+      expect(fake.requests.map(r => r.kind)).toEqual(['availability', 'availability', 'review', 'review']);
+      const verdict = judgeAttempt(f11, { ...a, modelReviews: [result] });
+      if (shape === 'complete') {
+        expect(result.pending).toEqual([]); expect(result.reviews.every(r => !r.rejected)).toBe(true);
+        expect(verdict.outcome).toBe('pass');
+      } else {
+        const reason = shape === 'wrong-item-key' || shape === 'invalid-json' ? 'invalid or incomplete review JSON' : 'review needs quoted, item-relevant independent evidence';
+        expect(result.reviews.every(r => r.rejected?.includes(reason))).toBe(true);
+        expect(verdict.outcome).toBe('insufficient-evidence');
+        const saved = JSON.parse(readFileSync(join(dirname(join(dir, result.path)), '4-review.output.json'), 'utf8'));
+        expect(saved.text).toBe(raw); // Rejected native text is retained, never silently repaired.
+      }
+    });
+  test('the prompt lists receipts and individual Revisions and offers no no-write quotation for a writing turn', async () => {
+    const { a } = fixture('event', 'holds'); createMap(a, 0);
+    const fake = new Fake((req, out) => {
+      if (req.kind === 'availability') return out;
+      const packet = JSON.parse(req.input.slice(req.input.indexOf('\n{') + 1));
+      expect(packet.citationGuide.receipts).toEqual(['receipts[0]']);
+      expect(packet.citationGuide.revisions).toContain('maps[1].history[0]');
+      expect(packet.citationGuide.noWrites).toEqual([]);
+      expect(packet.turnWrites[0][0]).toBeNull();
+      return out;
+    });
+    await reviewAttempt(f11, a, fake, directory(a), { itemIds: ['asks-scope'] });
   });
 });
 
