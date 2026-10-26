@@ -1,30 +1,31 @@
 import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, test } from 'vitest';
-import { prepareCreate, prepareApply } from '../../../src/create.ts';
-import { revisionFromPrepared } from '../../../src/revision-record.ts';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+import { captureDomain } from './domain.ts';
+const { prepareCreate, prepareApply, revisionFromPrepared } = captureDomain();
 import type { Command, Revision, NonEmpty } from '../../../src/types.ts';
 import { captureProblem } from './capture.ts';
 import type { CaptureInput, Reproduction } from './capture.ts';
 import { openCaptureDatabase, readRevisions } from './database.ts';
-import { apply, create, replayVisible, seedAuthor, visibleMap } from './seed.ts';
+import { applySeedCommands, createSeedState, replayVisible, seedAuthor, visibleMap } from './seed.ts';
 import { validateScenario } from '../scenario.ts';
 import { F11 } from '../scenarios/safety.ts';
 import { connectController, historyCredentials } from '../runner/controller.ts';
 import { newToken, startService } from '../runner/service.ts';
 import { agentRevisions } from '../checks.ts';
 import type { AttemptRecord } from '../evidence.ts';
+import { captureInventory } from './inventory.ts';
 
 const dirs: string[] = [];
 const directory = () => { const dir = mkdtempSync(join(tmpdir(), 'wayfinder-capture-')); dirs.push(dir); return dir; };
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 /** Synthetic records only: no service, credentials or real conversations. */
-export function sampleHistory(): Revision[] {
+function sampleHistory(): Revision[] {
   const first = prepareCreate({ id: 'Capture.Map' as Revision['mapId'], title: 'Before', destination: 'Decide', author: seedAuthor });
   if (first.kind !== 'ok') throw new Error('fixture create failed');
   const records = [revisionFromPrepared(first.value)];
@@ -103,15 +104,34 @@ describe('capture from a read-only database', () => {
     expect(validateScenario(result.scenario)).toEqual([]);
   });
 
-  test('reads an active WAL snapshot without changing database or WAL bytes', () => {
+  test('rejects an active WAL source without changing database or WAL bytes', () => {
     const path = database();
     const writer = new DatabaseSync(path);
     try {
       writer.exec('PRAGMA journal_mode=WAL; UPDATE catalog SET title=title');
       const before = [path, path + '-wal'].map(p => readFileSync(p));
-      captureProblem(path, input());
+      expect(() => captureProblem(path, input())).toThrow(/private.*copy/i);
       expect([path, path + '-wal'].map(p => readFileSync(p))).toEqual(before);
     } finally { writer.close(); }
+  });
+
+  test('review: rejects a closed WAL source before SQLite can create sidecars', () => {
+    const path = database();
+    const writer = new DatabaseSync(path);
+    writer.exec('PRAGMA journal_mode=WAL');
+    writer.close();
+    const names = readdirSync(join(path, '..'));
+    expect(names).toEqual(['source.sqlite']);
+    const bytes = readFileSync(path);
+    expect(() => captureProblem(path, input())).toThrow(/private.*copy/i);
+    expect(readdirSync(join(path, '..'))).toEqual(names);
+    expect(readFileSync(path)).toEqual(bytes);
+  });
+
+  test.each(['-journal', '-wal', '-shm'])('review: rejects a source with a %s sidecar before opening', suffix => {
+    const path = database();
+    writeFileSync(path + suffix, 'synthetic sidecar');
+    expect(() => captureProblem(path, input())).toThrow(/private.*copy/i);
   });
 
   test('captures the selected prior Revision instead of the current head', () => {
@@ -131,6 +151,16 @@ describe('capture from a read-only database', () => {
     expect(result.seed.maps[0]!.notes).toContain('<private-evidence>/proof.txt');
     expect(() => captureProblem(path, input({ redactions: [] }))).toThrow(/Unredacted/);
     expect(() => captureProblem(path, input({ sessionRef: '/Users/else/private.jsonl' }))).toThrow(/Unredacted/);
+  });
+
+  test.each([
+    [{ id: 'first', value: 'token-A', replacement: 'token-B' }, { id: 'second', value: 'token-B', replacement: '<redacted>' }],
+    [{ id: 'path', value: '/private/proof-sensitive.html', replacement: '<private-evidence>/proof-sensitive.html' },
+      { id: 'filename', value: 'proof-sensitive.html', replacement: 'proof.html' }],
+  ])('review: a chained replacement cannot reintroduce secrets into the audit record', (first, second) => {
+    const rules = [first, second];
+    const path = database();
+    expect(() => captureProblem(path, input({ humanWords: rules[0]!.value, redactions: [...input().redactions, ...rules] }))).toThrow(/replacement.*private literal/i);
   });
 
   test('requires purpose-based choices for every Claim, never clears them wholesale', () => {
@@ -160,9 +190,9 @@ describe('history restoration', () => {
     const map = result.seed.maps[0]!;
     expect(map.title).toBe('Before');
     expect(map.history).toHaveLength(27);
-    let state = create(map);
+    let state = createSeedState(map);
     for (const [i, step] of map.history!.entries()) {
-      state = apply(state, step.commands as Command[]);
+      state = applySeedCommands(state, step.commands as Command[]);
       const expected = JSON.parse(JSON.stringify(source[i + 1]!.state).replaceAll('/Users/synthetic/private/proof.txt', '<private-evidence>/proof.txt'));
       expect(state).toEqual(expected);
       expect(step.author).toBe(source[i + 1]!.author.clientId);
@@ -175,8 +205,8 @@ describe('history restoration', () => {
     const map = result.seed.maps[0]!;
     expect(map.history).toHaveLength(28);
     expect(map.history!.at(-1)).toMatchObject({ author: 'controller', commands: [{ kind: 'claim.clear', ticketId: 'q', expectedClaimantId: 'current-q' }] });
-    let state = create(map);
-    for (const step of map.history!) state = apply(state, step.commands as Command[]);
+    let state = createSeedState(map);
+    for (const step of map.history!) state = applySeedCommands(state, step.commands as Command[]);
     expect(state.tickets.find(t => t.id === 'q')!.claim).toBe(null);
     expect(state.tickets.find(t => t.id === 'other')!.claim).toBe('another-session');
     expect(result.record.conversion.join()).toMatch(/additional Controller Revision/);
@@ -198,6 +228,37 @@ describe('history restoration', () => {
     expect(() => captureProblem(path, { ...request, historyOverrides: [{ ...override, commands: [{ kind: 'map.update', patch: { notes: 'Wrong' } }] }] })).toThrow(/differs/);
   });
 
+  test('review: acquire A, release A, acquire B requires documented command evidence', () => {
+    const records = sampleHistory().slice(0, 2);
+    const last = records.at(-1)!;
+    const commands = [{ kind: 'claim.acquire', ticketId: 'q', claimantId: 'transient-A' },
+      { kind: 'claim.release', ticketId: 'q', claimantId: 'transient-A' },
+      { kind: 'claim.acquire', ticketId: 'q', claimantId: 'final-B' }] as Command[];
+    const result = prepareApply(last.state, { mapId: last.mapId, expectedRevision: 2, author: seedAuthor, commands: commands as unknown as NonEmpty<Command> });
+    if (result.kind !== 'prepared') throw new Error('fixture');
+    records.push(revisionFromPrepared(result.change));
+    const path = database(records);
+    const request = input({ revision: 3, restores: 'history', claims: [{ ticketId: 'q', action: 'keep', reason: 'Claim lifecycle is the test purpose' }] });
+    expect(() => captureProblem(path, request)).toThrow(/ambiguous/);
+    const captured = captureProblem(path, { ...request, historyOverrides: [{ revision: 3, commands,
+      evidence: 'synthetic/call-3', reason: 'The first Claimant is absent from the final Revision state' }] });
+    expect(captured.seed.maps[0]!.history![1]!.commands).toEqual(commands);
+  });
+
+  test('review: a source client named controller cannot silently become the Controller role', () => {
+    const records = sampleHistory().slice(0, 2);
+    records[1] = { ...records[1]!, author: { ...seedAuthor, clientId: 'controller' as Revision['author']['clientId'] } };
+    expect(() => captureProblem(database(records), input({ revision: 2, restores: 'history', claims: [] }))).toThrow(/controller.*reserved/i);
+  });
+
+  test('review: historical credentials cannot collide with Controller or active session client IDs', () => {
+    const map = { mapId: 'Collision', title: 'T', destination: 'D', notes: '', tickets: [],
+      history: [{ author: 'Active.Controller', commands: [] }] };
+    expect(() => historyCredentials([map], ['Active.Controller'])).toThrow(/collision/i);
+    map.history[0]!.author = 'Behaviour.batch.attempt.A';
+    expect(() => historyCredentials([map], ['Active.Controller', 'Behaviour.batch.attempt.A'])).toThrow(/collision/i);
+  });
+
   test('creation-only history and nonempty omitted extensions are refused explicitly', () => {
     expect(() => captureProblem(database(sampleHistory().slice(0, 1)), input({ revision: 1, restores: 'history', claims: [] }))).toThrow(/Creation-only/);
     const records = structuredClone(sampleHistory());
@@ -211,6 +272,7 @@ describe('verdict and reproduction intake', () => {
     const result = captureProblem(database(), input({ reproductions: [attempt('1'), attempt('2')] }));
     expect(result.record.reproduction.status).toBe('not-reproduced-twice');
     expect(result.record.library.retain).toBe(true);
+    expect(result.scenario.source.refs.join()).toContain('Reproduction status: not-reproduced-twice');
     expect(result.scenario.mustNot).toHaveLength(1);
     expect(result.scenario.expect).toHaveLength(1);
     expect(validateScenario(result.scenario)).toEqual([]);
@@ -238,10 +300,17 @@ describe('verdict and reproduction intake', () => {
     expect(undecided.scenario.mustNot).toEqual([]);
     expect(undecided.record.verdict.status).toBe('paused');
     expect(undecided.record.library.structuralErrors.length).toBeGreaterThan(0);
+    const inventory = directory();
+    for (const [id, bundle] of [['MissingWords', missing], ['Undecided', undecided]] as const) {
+      mkdirSync(join(inventory, id));
+      writeFileSync(join(inventory, id, 'capture.json'), JSON.stringify({ ...bundle.record, scenarioId: id }));
+    }
+    expect(captureInventory(inventory).map(r => [r.id, r.status])).toEqual([['MissingWords', 'paused-draft'], ['Undecided', 'paused-draft']]);
+    expect(captureInventory().some(r => r.id === 'F11' && r.status === 'admitted')).toBe(true);
   });
 });
 
-test('F11 public fixture regenerates identically through new capture, without reading private incident material', () => {
+test('F11 public fixture regenerates identically through new capture as a consistency check, without reading private incident material', () => {
   const fixture = F11.seed.maps[0]!;
   const trace = JSON.parse(readFileSync(new URL('../captures/f11.json', import.meta.url), 'utf8')) as {
     source: { revisionBefore: number; humanWords: string; sessionRef: string; originalCombination: string };
@@ -266,7 +335,8 @@ test('F11 public fixture regenerates identically through new capture, without re
     redactions: [{ id: 'synthetic-private-prefix', value: '/Users/synthetic/private', replacement: '<private-evidence>' }] }));
   expect(result.seed.maps[0]).toEqual(fixture);
   expect(result.scenario.turns).toEqual(F11.turns);
-  expect(result.record.redactions.reduce((count, r) => count + r.occurrences, 0)).toBe(25);
+  expect(result.record.conversion.some(c => c.startsWith('Added replay context before the verbatim human words:'))).toBe(true);
+  expect(result.record.redactions.reduce((count, redaction) => count + redaction.occurrences, 0)).toBe(25);
   expect(visibleMap(replayVisible(result.seed.maps[0]!))).toEqual(fixture);
 });
 
@@ -288,6 +358,20 @@ test('manual CLI writes a reusable bundle once, never overwrites it and never le
   expect(readRevisions(path, 'Capture.Map', 28, false)).toHaveLength(1);
 });
 
+test('capture modules can be imported without a build; only conversion loads the built domain', () => {
+  const root = directory();
+  const behaviour = join(root, 'tests/behaviour');
+  mkdirSync(join(behaviour, 'seeds'), { recursive: true });
+  cpSync(fileURLToPath(new URL('./', import.meta.url)), join(behaviour, 'capture'), { recursive: true });
+  for (const file of ['scenario.ts', 'evidence.ts', 'seeds/steps.ts']) {
+    cpSync(fileURLToPath(new URL('../' + file, import.meta.url)), join(behaviour, file));
+  }
+  expect(existsSync(join(root, 'dist'))).toBe(false);
+  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', 'await import(process.argv[1])', join(behaviour, 'capture/capture.ts')], { encoding: 'utf8' });
+  expect(result.stderr).toBe('');
+  expect(result.status).toBe(0);
+});
+
 test('history seed replays on a disposable service with original client labels, checked head and no agent-attributed seeding', async () => {
   const capture = captureProblem(database(), input({ restores: 'history' }));
   const map = capture.seed.maps[0]!;
@@ -295,7 +379,7 @@ test('history seed replays on a disposable service with original client labels, 
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const dir = mkdtempSync(join(root, 'capture-'));
   const owner = { clientId: 'Behaviour-Controller', token: newToken() };
-  const historical = historyCredentials([map]);
+  const historical = historyCredentials([map], [owner.clientId]);
   const service = await startService(dir, owner, Object.values(historical));
   const ctl = await connectController(service.port, owner.token, Object.fromEntries(Object.entries(historical).map(([label, c]) => [label, c.token])));
   try {
@@ -320,5 +404,56 @@ test('history seed replays on a disposable service with original client labels, 
     const contentOnly = { mapId: 'OptionalReferences', title: 'T', destination: 'D', notes: '', tickets: [], fog: [{ id: 'f', text: 'Unknown' }],
       history: [{ author: 'controller', commands: [{ kind: 'content.add', section: 'fog', item: { id: 'f', text: 'Unknown', references: [] } }] }] };
     expect(await ctl.seed(contentOnly)).toBe(2);
+
+    const lost = structuredClone(map);
+    lost.mapId = 'LostReply';
+    const realFetch = globalThis.fetch;
+    let dropped = false;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (...args) => {
+      const response = await realFetch(...args);
+      const body = args[1]?.body;
+      if (!dropped && typeof body === 'string') {
+        const request = JSON.parse(body) as { params?: { name?: string; arguments?: { mapId?: string } } };
+        if (request.params?.name === 'map_apply' && request.params.arguments?.mapId === 'LostReply') {
+          await response.clone().text(); // The server committed before the simulated response loss.
+          dropped = true;
+          throw new TypeError('synthetic committed seed reply lost');
+        }
+      }
+      return response;
+    });
+    let recoveredHead = 0;
+    try {
+      await expect(ctl.seed(lost, revision => { recoveredHead = revision; })).rejects.toThrow(/synthetic committed seed reply lost/);
+      const written = (await ctl.exportCatalog()).find(m => m.mapId === 'LostReply')!;
+      expect(dropped).toBe(true);
+      expect(written.history.at(-1)!.revision).toBe(2);
+      expect(recoveredHead).toBe(2);
+      expect(agentRevisions({ ...evidence, maps: [{ ...written, seedHeadRevision: recoveredHead }] })).toEqual([]);
+    } finally { fetchSpy.mockRestore(); }
+
+    const incorrectText = structuredClone(contentOnly);
+    incorrectText.mapId = 'IncorrectMapText';
+    const textSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (...args) => {
+      const response = await realFetch(...args);
+      const body = args[1]?.body;
+      if (typeof body === 'string') {
+        const request = JSON.parse(body) as { params?: { name?: string; arguments?: { mapId?: string } } };
+        if (request.params?.name === 'map_read' && request.params.arguments?.mapId === 'IncorrectMapText') {
+          const result = await response.json() as { result: { structuredContent: { revision: { state: { title: string } } } } };
+          result.result.structuredContent.revision.state.title = 'Unexpected title';
+          return new Response(JSON.stringify(result), { status: response.status, headers: response.headers });
+        }
+      }
+      return response;
+    });
+    try { await expect(ctl.seed(incorrectText)).rejects.toThrow(/head differs/); }
+    finally { textSpy.mockRestore(); }
   } finally { await ctl.close(); await service.stop(); rmSync(dir, { recursive: true, force: true }); }
 }, 30_000);
+
+test('review: README describes history support instead of refusing B04 seeds', () => {
+  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+  expect(readme).not.toMatch(/refuses[^\n]*history seeds/);
+  expect(readme).toMatch(/historical author/i);
+});

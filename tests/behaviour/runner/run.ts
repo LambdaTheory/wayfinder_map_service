@@ -119,13 +119,15 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   const seedHeads: Record<string, number> = {};
   const opened = new Set<string>();
   let skills: string[] = [];
+  let seedingComplete = false;
   try {
-    const historical = historyCredentials(s.seed.maps);
+    const historical = historyCredentials(s.seed.maps, [controller.clientId, ...sessions.map(x => x.credential.clientId)]);
     for (const [label, credential] of Object.entries(historical)) secrets[`history-token-${label}`] = credential.token;
     service = await startService(join(dir, 'service'), controller, [...sessions.map(x => x.credential), ...Object.values(historical)]);
     openDatabases(service.pid).forEach(d => opened.add(d));
     ctl = await connectController(service.port, controller.token, Object.fromEntries(Object.entries(historical).map(([label, c]) => [label, c.token])));
     for (const map of s.seed.maps) seedHeads[map.mapId] = await ctl.seed(map, revision => { seedHeads[map.mapId] = revision; });
+    seedingComplete = true;
     const workdir = prepareWorkdir(scratch, s.seed.fixtures, fixturesRoot);
     const profile = writeProfile(scratch, o.codex.bin);
     let seq = 0;
@@ -170,7 +172,9 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
   let maps: AttemptRecord['maps'] = [];
   try {
     if (!ctl) throw new Error('no Controller connection');
-    maps = (await ctl.exportCatalog()).map(m => ({ mapId: m.mapId, seedHeadRevision: seedHeads[m.mapId] ?? null, history: m.history }));
+    maps = (await ctl.exportCatalog()).map(m => ({ mapId: m.mapId,
+      // No agent turn starts until all seeding succeeds. This also recovers a committed write whose reply AND immediate reread were lost.
+      seedHeadRevision: seedingComplete ? seedHeads[m.mapId] ?? null : m.history.at(-1)?.revision ?? null, history: m.history }));
   } catch (error) { missing.push('maps'); detail = `${detail ?? ''} catalog export failed: ${String(error instanceof Error ? error.message : error)}`.trim(); }
   await ctl?.close().catch(() => undefined);
   const stopped = await service?.stop();

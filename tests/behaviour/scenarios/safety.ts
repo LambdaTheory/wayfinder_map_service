@@ -44,7 +44,6 @@ export const F11: Scenario = {
     'Removed: D03\'s Claim held by the incident session (Codex.FeishuDataBoundary.20261023), because the replay is a new session; the turn says the agent was working on D03.',
     'Redacted: 25 local private paths in Notes and R01 evidence replaced by <private-evidence>/<file name>.',
     'Kept: Notes and D03\'s question as they were, including recommendations and decisions written there before the incident.',
-    'B04: capture/capture.test.ts regenerates this exact public seed from a synthetic SQLite snapshot with the documented Claim and synthetic private paths; this is not a new read of private incident material. Trace: captures/f11.json.',
   ] } },
   turns: [{ session: 'A', kind: 'opening',
     say: '继续 Wayfinder 地图「分布式 Agent 的飞书侧：能力与搭建地图」，地图 ID：DistributedAgents.Feishu.20261023。你刚才在推进 D03「确定资料访问范围与自动执行边界」。\n\n这部分权限，似乎是Agent，而不是飞书的？' }],

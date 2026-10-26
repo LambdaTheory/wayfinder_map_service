@@ -1,11 +1,23 @@
 // Deliberately separate from openSQLite: that operator API configures a writable connection.
 import { DatabaseSync } from 'node:sqlite';
+import { closeSync, existsSync, openSync, readSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import type { Revision } from '../../../src/types.ts';
 import { CaptureError } from './errors.ts';
 
 export function openCaptureDatabase(path: string): DatabaseSync {
+  // Inspect bytes without SQLite: even a read-only WAL connection may create -wal/-shm.
+  // Capture accepts a quiescent, rollback-journal private copy, never a live WAL source.
+  const descriptor = openSync(path, 'r');
+  const header = Buffer.alloc(20);
+  try {
+    if (readSync(descriptor, header, 0, header.length, 0) !== header.length
+      || header.subarray(0, 16).toString('binary') !== 'SQLite format 3\0') throw new CaptureError('Unsupported SQLite header');
+  } finally { closeSync(descriptor); }
+  if (header[18] !== 1 || header[19] !== 1 || ['-wal', '-shm', '-journal'].some(suffix => existsSync(path + suffix))) {
+    throw new CaptureError('Capture requires a quiescent private database copy in DELETE journal mode without sidecars; do not open this source directly');
+  }
   const uri = pathToFileURL(resolve(path));
   uri.searchParams.set('mode', 'ro');
   return new DatabaseSync(uri.href, { readOnly: true, timeout: 100 });

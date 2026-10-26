@@ -3,12 +3,13 @@
 import { createHttpTestClient } from '../../helpers/mcp-http-client.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import type { WireRevision, WireState } from '../evidence.ts';
-import type { SeedMap, SeedTicket } from '../scenario.ts';
+import type { SeedMap } from '../scenario.ts';
+import { visibleSeedSteps, wireSettlement } from '../seeds/steps.ts';
 import { newToken } from './service.ts';
 import type { Credential } from './service.ts';
 
 type Structured = Record<string, unknown> & { kind: string };
-export const seedClaimant = 'behaviour-seed';
+export { seedClaimant } from '../seeds/steps.ts';
 
 export interface Controller {
   /** The release the service states in its instructions, which the Controller's own writes attest. */
@@ -22,9 +23,10 @@ export interface Controller {
 }
 
 /** Historical authors are independent credentials; none is handed to an agent under test. */
-export function historyCredentials(maps: SeedMap[]): Record<string, Credential> {
-  return Object.fromEntries([...new Set(maps.flatMap(m => (m.history ?? []).map(h => h.author)))].filter(a => a !== 'controller')
-    .map(author => [author, { clientId: author, token: newToken() }]));
+export function historyCredentials(maps: SeedMap[], reservedClientIds: string[]): Record<string, Credential> {
+  const authors = [...new Set(maps.flatMap(m => (m.history ?? []).map(h => h.author)))].filter(a => a !== 'controller');
+  if (authors.some(author => reservedClientIds.includes(author))) throw new Error('Historical author client ID collision with Controller or agent session');
+  return Object.fromEntries(authors.map(author => [author, { clientId: author, token: newToken() }]));
 }
 
 export async function connectController(port: number, token: string, historyTokens: Record<string, string> = {}): Promise<Controller> {
@@ -58,36 +60,34 @@ export async function connectController(port: number, token: string, historyToke
   return {
     version, instructions, toolDescriptions,
     async seed(map, onRevision = () => undefined) {
-      if (map.history?.some(h => h.author !== 'controller' && !Object.hasOwn(historyTokens, h.author))) throw new Error('No credential for historical author');
-      const created = await call('map_create', { version, mapId: map.mapId, title: map.title, destination: map.destination, notes: map.notes });
-      if (created.kind !== 'committed') throw new Error(`seed create refused: ${JSON.stringify(created)}`);
-      let revision = created.revision as number;
-      onRevision(revision);
-      if (map.history) {
-        for (const step of map.history) {
-          revision = await apply(map.mapId, revision, step.commands, step.author);
+      try {
+        if (map.history?.some(h => h.author !== 'controller' && !Object.hasOwn(historyTokens, h.author))) throw new Error('No credential for historical author');
+        const created = await call('map_create', { version, mapId: map.mapId, title: map.title, destination: map.destination, notes: map.notes });
+        if (created.kind !== 'committed') throw new Error(`seed create refused: ${JSON.stringify(created)}`);
+        let revision = created.revision as number;
+        onRevision(revision);
+        if (map.history) {
+          for (const step of map.history) {
+            revision = await apply(map.mapId, revision, step.commands, step.author);
+            onRevision(revision);
+          }
+          const head = (await call('map_read', { mapId: map.mapId })).revision as WireRevision;
+          if (!isDeepStrictEqual(expectedHead(map), observedHead(head.state))) throw new Error('History seed head differs from expected Map text, Tickets or content');
+          return revision;
+        }
+        for (const commands of visibleSeedSteps(map)) {
+          revision = await apply(map.mapId, revision, commands);
           onRevision(revision);
         }
-        const head = (await call('map_read', { mapId: map.mapId })).revision as WireRevision;
-        if (!isDeepStrictEqual(expectedHead(map), observedHead(head.state))) throw new Error('History seed head differs from expected Tickets or content');
         return revision;
+      } catch (error) {
+        // The write may have committed before its reply was lost. Recover the boundary, but retain setup failure.
+        try {
+          const current = await call('map_read', { mapId: map.mapId });
+          if (current.kind === 'found') onRevision((current.revision as WireRevision).revision);
+        } catch { /* runAttempt's final catalog export recovers it if this read also fails. */ }
+        throw error;
       }
-      const content = (section: string, items: SeedMap['fog'] = []) => items.map(item =>
-        ({ kind: 'content.add', section, item: { id: item.id, text: item.text, references: item.references ?? [] } }));
-      const batch = [
-        ...map.tickets.map(t => ({ kind: 'ticket.create', ticket: { id: t.id, title: t.title, question: t.question, type: t.type } })),
-        ...map.tickets.flatMap(t => (t.prerequisites ?? []).map(p => ({ kind: 'dependency.add', dependentId: t.id, prerequisiteId: p }))),
-        ...content('fog', map.fog), ...content('scopeExclusions', map.scopeExclusions),
-      ];
-      if (batch.length) { revision = await apply(map.mapId, revision, batch); onRevision(revision); }
-      for (const t of settleOrder(map.tickets)) {
-        revision = await apply(map.mapId, revision, [{ kind: 'claim.acquire', ticketId: t.id, claimantId: seedClaimant },
-          { kind: 'ticket.settle', ticketId: t.id, ticketType: t.type, claimantId: seedClaimant, settlement: wireSettlement(t.settlement!) }]);
-        onRevision(revision);
-      }
-      const claims = map.tickets.filter(t => t.claim).map(t => ({ kind: 'claim.acquire', ticketId: t.id, claimantId: t.claim }));
-      if (claims.length) { revision = await apply(map.mapId, revision, claims); onRevision(revision); }
-      return revision;
     },
     async exportCatalog() {
       const ids: string[] = [];
@@ -112,34 +112,23 @@ export async function connectController(port: number, token: string, historyToke
 }
 
 function expectedHead(map: SeedMap) {
-  return { tickets: map.tickets.map(t => ({ ...t, prerequisites: [...(t.prerequisites ?? [])].sort(), claim: t.claim ?? null,
+  const text = { title: map.title, destination: map.destination, notes: map.notes };
+  for (const step of map.history ?? []) for (const value of step.commands) {
+    const command = value as { kind?: string; patch?: Partial<typeof text> };
+    if (command.kind === 'map.update') for (const key of ['title', 'destination', 'notes'] as const) {
+      if (command.patch?.[key] !== undefined) text[key] = command.patch[key];
+    }
+  }
+  return { ...text, tickets: map.tickets.map(t => ({ ...t, prerequisites: [...(t.prerequisites ?? [])].sort(), claim: t.claim ?? null,
     ...(t.settlement ? { settlement: wireSettlement(t.settlement) } : {}) })),
     fog: (map.fog ?? []).map(c => ({ ...c, references: c.references ?? [] })),
     scopeExclusions: (map.scopeExclusions ?? []).map(c => ({ ...c, references: c.references ?? [] })) };
 }
 
 function observedHead(state: WireState) {
-  return { tickets: state.tickets.map(t => ({ id: t.id, title: t.title, question: t.question, type: t.type,
+  return { title: state.title, destination: state.destination, notes: state.notes,
+    tickets: state.tickets.map(t => ({ id: t.id, title: t.title, question: t.question, type: t.type,
     prerequisites: [...t.prerequisites].sort(), claim: t.claim,
     ...(t.settlement ? { settlement: wireSettlement((({ introducedAtRevision: _, ...s }) => s)(t.settlement)) } : {}) })),
     fog: state.fog, scopeExclusions: state.scopeExclusions };
-}
-
-/** A seed Settlement in the input shape `ticket.settle` takes: every Evidence item and the Settlement carry extensions. */
-function wireSettlement(s: NonNullable<SeedTicket['settlement']>) {
-  return { ...s, evidence: s.evidence.map(e => ({ extensions: {}, ...e })), extensions: {} };
-}
-
-/** Settled seed Tickets in prerequisite order, so every Settlement finds its prerequisites settled. */
-function settleOrder(tickets: SeedTicket[]): SeedTicket[] {
-  const settled = tickets.filter(t => t.settlement);
-  const done = new Set<string>();
-  const out: SeedTicket[] = [];
-  while (out.length < settled.length) {
-    const next = settled.find(t => !done.has(t.id) && (t.prerequisites ?? []).every(p => done.has(p)));
-    if (!next) throw new Error('seed settlements form a cycle or wait on an open prerequisite');
-    done.add(next.id);
-    out.push(next);
-  }
-  return out;
 }
