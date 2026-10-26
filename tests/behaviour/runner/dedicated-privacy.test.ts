@@ -28,7 +28,7 @@ attack('a degraded service cannot make the real launcher pass the Controller cre
   const service = await startService(serviceDir, controller, []);
   let degrade = false;
   const proxy = createServer((req, res) => {
-    if (degrade && req.headers.authorization !== `Bearer ${controller.token}`) { res.writeHead(401); res.end(); return; }
+    if (degrade && req.headers.authorization !== `Bearer ${readFileSync(join(serviceDir, 'wayfinder-token'), 'utf8').trim()}`) { res.writeHead(401); res.end(); return; }
     const upstream = httpRequest({ host: '127.0.0.1', port: service.port, path: req.url, method: req.method,
       headers: { ...req.headers, host: `127.0.0.1:${service.port}` } }, reply => { res.writeHead(reply.statusCode!, reply.headers); reply.pipe(res); });
     upstream.once('error', () => { res.writeHead(502); res.end(); }); req.pipe(upstream);

@@ -34,6 +34,8 @@ The fresh Batch directory is under `~/Library/Caches/wayfinder-behaviour-tests/`
 
 Each run records database creation and `lsof` observations of its own process: opened SQLite paths, listener ports and absence of connections to daily ports. It measures the 18766 listener PIDs before and after without connecting to that service. Unavailable inventories stay unknown. These are observations at the recorded checkpoints, not a continuous audit or access to the real database. Preserve `raw/isolation.json`, `raw/database-creation.json` and the Batch isolation fields with the evidence.
 
+Controller, historical-author, observer and relay-to-service requests use the shared explicit-direct HTTP transport with private empty-proxy agents. Node environment proxy settings, including JSON configuration files, cannot redirect these credential-bearing requests; the command does not mutate the global agent or rely on a bypass list. `proxy-privacy.test.ts` verifies the actual fake-tunnel CLI in fresh processes under all five proxy activation routes, with an unauthenticated positive control and a synthetic captured turn. This does not change tunnel ownership or native ChatGPT network routing.
+
 ## Exclusive tunnel ownership
 
 The command reads only the `tunnel` UUID and absolute `credentials-file` path from `~/.cloudflared/config.yml` (`--config` selects another configuration). It supports plain or quoted scalar values for those keys and fails on unsupported syntax. It never opens or copies the credential file. Only `cloudflared` reads that file and its normal account certificate.

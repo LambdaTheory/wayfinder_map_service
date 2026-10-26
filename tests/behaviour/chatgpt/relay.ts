@@ -2,6 +2,7 @@
 import { createServer, request } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { freePort, reservedPorts } from '../runner/service.ts';
+import { directAgent } from '../runner/direct-http.ts';
 
 export interface Exchange { id: string; at: string; httpMethod: string; request: Record<string, unknown>; response: unknown; status: number; sessionId: string | null }
 export type RefusalReason = 'path_mismatch' | 'origin_present' | 'method_not_allowed' | 'body_too_large' | 'body_interrupted'
@@ -47,10 +48,11 @@ export interface Relay {
 export async function startRelay(servicePort: number, token: string, observe: (e: Exchange) => void,
   observeRefusals: (refusals: readonly RelayRefusal[]) => void): Promise<Relay> {
   if (reservedPorts.includes(servicePort)) throw new Error('Everyday service ports are forbidden');
+  const agent = directAgent();
   let counter = 0;
   const refusals: RelayRefusal[] = [];
   const state: Relay = { port: await freePort(), token, active: false, inFlight: 0, beforeForward: async () => {},
-    onFailure: () => { state.active = false; }, stop: async () => close(server) };
+    onFailure: () => { state.active = false; }, stop: async () => { agent.destroy(); await close(server); } };
   const fail = (error: unknown) => {
     state.active = false;
     try { state.onFailure(error instanceof Error ? error : new Error('relay observation failed')); } catch { /* exit handler still owns cleanup */ }
@@ -143,7 +145,7 @@ export async function startRelay(servicePort: number, token: string, observe: (e
       catch (error) { fail(error); respond(outgoing, 500); }
       finally { state.inFlight--; }
     };
-    const upstream = request({ hostname: '127.0.0.1', port: servicePort, path: '/mcp', method: incoming.method, headers }, response => {
+    const upstream = request({ agent, hostname: '127.0.0.1', port: servicePort, path: '/mcp', method: incoming.method, headers }, response => {
       const forwarded: Record<string, string | string[]> = {};
       for (const key of ['content-type', 'content-length', 'mcp-session-id', 'mcp-protocol-version']) {
         if (response.headers[key] !== undefined) forwarded[key] = response.headers[key]!;
@@ -168,7 +170,7 @@ export async function startRelay(servicePort: number, token: string, observe: (e
     void handle(incoming, outgoing).catch(error => { fail(error); respond(outgoing, 500); });
   });
   server.requestTimeout = 30_000;
-  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(state.port, '127.0.0.1', resolve); });
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(state.port, '127.0.0.1', resolve); }).catch(error => { agent.destroy(); throw error; });
   return state;
 }
 
