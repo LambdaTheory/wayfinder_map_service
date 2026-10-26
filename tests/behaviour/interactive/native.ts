@@ -12,6 +12,8 @@ const content = (v: unknown): string => typeof v === 'string' ? v : Array.isArra
   ? v.map(b => string(object(b).text)).filter(Boolean).join('\n') : '';
 const known = <T>(value: T): Field<T> => ({ known: true, value });
 const absent = (reason: string): Field<never> => ({ known: false, reason });
+const errorFlag = (value: unknown) => value === true || (typeof value === 'string' && value.trim().toLowerCase() === 'true');
+const rejection = (value: string) => /^(?:error: )?user (?:rejected|denied|cancelled|canceled)/i.test(value.trim());
 
 export interface NativeEvidence {
   events: EventRecord[];
@@ -38,9 +40,11 @@ export function normalizeNative(client: InteractiveClient, text: string, file: s
   let effort: Field<string> = absent('effort unavailable');
   let active: { index: number; startedAt: string; input: string; id: string } | null = null;
   const models = new Set<string>(); const efforts = new Set<string>();
-  const setModel = (value: unknown) => { if (typeof value === 'string' && value) { models.add(value); model = known(value); if (models.size > 1) missing.add('combination.model-mismatch'); } };
+  const setModel = (value: unknown) => { if (typeof value === 'string' && value) { models.add(value); model = models.size === 1 ? known(value) : absent('native model changed during the run'); } };
   const setEffort = (value: unknown) => { if (typeof value === 'string' && value) { efforts.add(value); effort = efforts.size === 1 ? known(value) : absent('native effort changed during the run'); } };
   const timestamps: string[] = [];
+  const uncertainTurns = new Set<number>();
+  const markUncertain = () => { if (active) uncertainTurns.add(active.index); };
   let nextTurn = 0; let previousTime = -Infinity;
   const calls = new Map<string, Extract<EventRecord, { kind: 'tool-call' }>>();
   const setId = (id: string) => {
@@ -69,11 +73,11 @@ export function normalizeNative(client: InteractiveClient, text: string, file: s
     previousTime = time; timestamps.push(at);
     const add = (event: Omit<EventRecord, 'seq' | 'at' | 'session' | 'turn'>) => {
       const seq = events.length;
-      events.push({ ...event, seq, at, session: 'A', turn: active?.index ?? null } as EventRecord);
+      events.push({ ...event, seq, at, session: 'A', turn: active && !uncertainTurns.has(active.index) ? active.index : null } as EventRecord);
       locations[seq] = `${file}:${offset + 1}`;
     };
-    const message = (role: 'assistant' | 'user', value: string) => {
-      if (value) add({ kind: 'message', actor: role === 'assistant' ? 'agent' : 'script-human', role, text: value } as EventRecord);
+    const message = (role: 'assistant' | 'user', value: string, inputSource?: Extract<EventRecord, { kind: 'message' }>['inputSource']) => {
+      if (value) add({ kind: 'message', actor: role === 'assistant' ? 'agent' : 'script-human', role, text: value, ...(inputSource ? { inputSource } : {}) } as EventRecord);
     };
     const call = (id: string, name: string, args: unknown) => {
       if (!id || calls.has(id)) { missing.add('native.integrity'); return; }
@@ -91,12 +95,13 @@ export function normalizeNative(client: InteractiveClient, text: string, file: s
         ?? (Array.isArray(decoded) ? parsed(content(decoded)) : obj.content ? parsed(content(obj.content)) : decoded);
       c.result = /wayfinder/i.test(c.server) && ['map_create', 'map_apply'].includes(c.tool) && classifyResult(unwrapped) === 'transport-failure'
         ? absent('write result is not decodable; inspect the raw native result') : known(unwrapped);
-      c.failed = failed || obj.is_error === true || /^(?:error: )?user (?:rejected|denied|cancelled|canceled)/i.test(content(value));
+      c.failed = failed || errorFlag(obj.is_error) || rejection(content(value));
       // A question answer is an input at the result's time, not at the earlier call's time.
       if (!c.failed && questionTool(c.tool) === 'blocking') {
         const answers = object(decoded).answers;
-        if (answers && typeof answers === 'object' && Object.keys(answers).length) message('user', JSON.stringify(answers));
-        else if (/^User has answered your questions:/i.test(content(value))) message('user', content(value));
+        const source = { kind: 'question-tool' as const, tool: c.tool, callId: c.callId };
+        if (answers && typeof answers === 'object' && Object.keys(answers).length) message('user', JSON.stringify(answers), source);
+        else if (/^User has answered your questions:/i.test(content(value))) message('user', content(value), source);
       }
       // Completed work is timed at the result, so work finishing after an answer cannot prove preparation.
       if (questionTool(c.tool) === null) { c.at = at; locations[c.seq] = `${file}:${offset + 1}`; }
@@ -119,7 +124,7 @@ export function normalizeNative(client: InteractiveClient, text: string, file: s
           message(p.role, body);
           if (p.role === 'user') rememberInput(body);
         } else if (p.type === 'function_call' || p.type === 'custom_tool_call') call(string(p.call_id), string(p.name), p.arguments ?? p.input);
-        else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') result(string(p.call_id), p.output, p.is_error === true);
+        else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') result(string(p.call_id), p.output, errorFlag(p.is_error));
         else if (p.type !== 'reasoning' && p.type !== 'message') missing.add('native.unhandled');
       } else if (row.type !== 'session_meta') missing.add('native.unhandled');
     } else {
@@ -130,21 +135,29 @@ export function normalizeNative(client: InteractiveClient, text: string, file: s
       }
       const m = object(row.message);
       setModel(m.model);
-      if (row.isMeta === true || row.isCompactSummary === true || /^\[Request interrupted by user/.test(content(m.content))) continue;
+      if (/^\[Request interrupted by user/.test(content(m.content).trim())) {
+        if (active) end(at);
+        continue;
+      }
+      if (row.isMeta === true || row.isCompactSummary === true) continue;
       if (row.type === 'user' || row.type === 'assistant') {
         const blocks = Array.isArray(m.content) ? m.content : [{ type: 'text', text: m.content }];
-        const humanText = row.type === 'user' && blocks.some(b => object(b).type === 'text');
+        const toolResults = blocks.some(b => object(b).type === 'tool_result');
+        const humanText = row.type === 'user' && !toolResults && !rejection(content(m.content)) && blocks.some(b => object(b).type === 'text');
+        // A missing end marker is not proof that a second human text was delivered mid-turn.
+        // Keep this uncertainty on the affected events; no invented Claude delivery marker is accepted.
+        if (humanText) markUncertain();
         if (humanText && !active) start(at, string(row.uuid), content(m.content));
         for (const b of blocks.map(object)) {
-          if (b.type === 'text') message(row.type === 'user' ? 'user' : 'assistant', string(b.text));
+          if (b.type === 'text') { if (row.type === 'assistant' || humanText) message(row.type === 'user' ? 'user' : 'assistant', string(b.text)); }
           else if (b.type === 'tool_use' && row.type === 'assistant') call(string(b.id), string(b.name), b.input);
-          else if (b.type === 'tool_result' && row.type === 'user') result(string(b.tool_use_id), b.content, b.is_error === true);
+          else if (b.type === 'tool_result' && row.type === 'user') result(string(b.tool_use_id), b.content, errorFlag(b.is_error));
           else if (b.type !== 'thinking' && b.type !== 'redacted_thinking') missing.add('native.unhandled');
         }
         if (m.stop_reason === 'end_turn') end(at);
       } else if (row.type === 'system' && row.subtype === 'turn_duration') {
         if (active) end(at); // Often accompanies the already recorded end_turn.
-      } else if (row.type === 'queue-operation') { if (active) missing.add('native.boundaries'); }
+      } else if (row.type === 'queue-operation') markUncertain();
       else if (row.type !== 'file-history-snapshot') missing.add('native.unhandled');
     }
   }
@@ -157,7 +170,7 @@ export function normalizeNative(client: InteractiveClient, text: string, file: s
   // Commands, reads, delegation and file changes remain in tool arguments/results. Do not claim exhaustive classes.
   for (const kind of ['command', 'file-read', 'file-change', 'delegation', 'resource-read']) missing.add(`events.${kind}`);
   const sources = events.map(e => ({ event: e, source: locations[e.seq]! })).sort((a, b) => Date.parse(a.event.at) - Date.parse(b.event.at));
-  sources.forEach(({ event, source }, seq) => { event.seq = seq; locations[seq] = source; });
+  sources.forEach(({ event, source }, seq) => { event.seq = seq; locations[seq] = source; if (event.turn === null) missing.add(`events[${seq}].turn`); });
   return { events: sources.map(s => s.event), session: { label: 'A', nativeId, clientId, mcpSessionIds: absent('not correlated with protocol journal'), turns },
     locations, missing: [...missing], model, version, effort,
     range: timestamps.length && !missing.has('native.integrity') ? known({ startedAt: timestamps[0]!, endedAt: timestamps.at(-1)! }) : absent('native timestamp range unavailable') };

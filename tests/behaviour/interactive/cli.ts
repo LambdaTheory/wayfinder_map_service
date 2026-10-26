@@ -1,5 +1,5 @@
 // Offline import only: this command never starts a model or discovers any client home.
-import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { attemptSchema } from '../evidence.ts';
@@ -11,6 +11,7 @@ import { digest, reviewInput, verifyReviews } from './reviews.ts';
 import type { ReviewArtifact } from './reviews.ts';
 import type { Assessment } from './acceptance.ts';
 import { normalizeNative } from './native.ts';
+import { privateText, writePrivate } from './privacy.ts';
 
 /** Inputs are explicit files inside this private run, never paths into another run or a personal log directory. */
 export function localFile(root: string, name: string): string {
@@ -47,17 +48,24 @@ export function importAttempt(root: string, nativeFile: string, assessment: Asse
     if (!c.probe.capturePath) throw new Error('probe needs its Controller capture');
     const pc = JSON.parse(readFileSync(localFile(root, c.probe.capturePath), 'utf8')) as AttemptRecord & { requestedEffort?: string };
     if (!native.model.known || !native.effort.known || !native.version.known || !native.session.nativeId.known) continue;
-    if (!probe.range.known || !probe.session.nativeId.known || !native.session.nativeId.known || probe.session.nativeId.value === native.session.nativeId.value
-      || !probe.version.known || !native.version.known || probe.version.value !== native.version.value || probe.version.value !== c.clientVersion
-      || !probe.model.known || !native.model.known || probe.model.value !== native.model.value || probe.model.value !== capture.combination.requestedModel
-      || !probe.effort.known || !native.effort.known || probe.effort.value !== native.effort.value
+    if (native.model.value !== capture.combination.requestedModel || native.effort.value !== capture.requestedEffort) continue;
+    if (pc.schema !== attemptSchema || pc.sessions.length !== 1 || !probe.session.nativeId.known || probe.session.nativeId.value === native.session.nativeId.value) {
+      throw new Error('probe must have its own B01 capture and a distinct native session');
+    }
+    if (!probe.version.known || probe.version.value !== native.version.value || probe.version.value !== c.clientVersion) throw new Error('probe client version does not match the acceptance run and confirmation');
+    if (!probe.model.known || probe.model.value !== native.model.value || !probe.effort.known || probe.effort.value !== native.effort.value
       || pc.requestedEffort !== capture.requestedEffort || probe.effort.value !== capture.requestedEffort
-      || pc.combination.harness !== capture.combination.harness || pc.combination.requestedModel !== capture.combination.requestedModel || pc.entry !== capture.entry
-      || !pc.client.surface.known || !capture.client.surface.known || pc.client.surface.value !== capture.client.surface.value || pc.client.surface.value !== c.surface
-      || !Number.isFinite(Date.parse(c.probe.endedAt)) || Date.parse(probe.range.value.endedAt) > Date.parse(c.probe.endedAt)
+      || pc.combination.harness !== capture.combination.harness || pc.combination.requestedModel !== capture.combination.requestedModel || pc.entry !== capture.entry) {
+      throw new Error('probe Combination or Entry does not match the acceptance run');
+    }
+    if (!pc.client.surface.known || !capture.client.surface.known || pc.client.surface.value !== capture.client.surface.value || pc.client.surface.value !== c.surface) throw new Error('probe surface does not match the acceptance run and confirmation');
+    const times = [c.probe.endedAt, c.checkedAt, pc.run.startedAt, pc.run.endedAt, capture.run.startedAt];
+    if (!probe.range.known || times.some(time => !Number.isFinite(Date.parse(time)))
+      || Date.parse(probe.range.value.endedAt) > Date.parse(c.probe.endedAt)
       || Date.parse(c.probe.endedAt) >= Date.parse(capture.run.startedAt) || Date.parse(probe.range.value.endedAt) > Date.parse(c.checkedAt)
+      || Date.parse(pc.run.endedAt) >= Date.parse(capture.run.startedAt)
       || Date.parse(probe.range.value.startedAt) < Date.parse(pc.run.startedAt) || Date.parse(probe.range.value.endedAt) > Date.parse(pc.run.endedAt)) {
-      throw new Error('probe native identity, version, Combination, surface or timestamps do not match the earlier confirmed run');
+      throw new Error('probe timestamps must fit its earlier Controller capture and precede confirmation and acceptance');
     }
     if (!c.probe.locations.length || c.probe.locations.some(location => {
       const match = /^(.*):(\d+)$/.exec(location);
@@ -128,12 +136,12 @@ export function main(args: string[]) {
   if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new Error('output must be a fresh child of the private run');
   if (parent !== root) throw new Error('output parent must be the private run');
   mkdirSync(out, { mode: 0o700 }); // Never replace an earlier assessment or verdict.
-  writeFileSync(join(out, 'result.json'), JSON.stringify(result, null, 2), { mode: 0o600 });
-  writeFileSync(join(out, 'attempt.json'), JSON.stringify(result.record, null, 2), { mode: 0o600 });
-  if ('reviewInput' in result) writeFileSync(join(out, 'review-input.json'), result.reviewInput, { mode: 0o600 });
+  writePrivate(join(out, 'result.json'), result, {});
+  writePrivate(join(out, 'attempt.json'), result.record, {});
+  if ('reviewInput' in result) writePrivate(join(out, 'review-input.json'), result.reviewInput, {});
   for (const { ability, attempt, verdict } of result.verdicts) {
-    writeFileSync(join(out, `${ability}.attempt.json`), JSON.stringify(attempt, null, 2), { mode: 0o600 });
-    console.log(`${ability}: ${verdict.outcome}${verdict.reasons.length ? ` — ${verdict.reasons.join('; ')}` : ''}${verdict.gaps.length ? ` — ${verdict.gaps.join('; ')}` : ''}`);
+    writePrivate(join(out, `${ability}.attempt.json`), attempt, {});
+    console.log(privateText(`${ability}: ${verdict.outcome}${verdict.reasons.length ? ` — ${verdict.reasons.join('; ')}` : ''}${verdict.gaps.length ? ` — ${verdict.gaps.join('; ')}` : ''}`, {}));
   }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

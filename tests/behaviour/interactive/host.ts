@@ -14,6 +14,7 @@ import { W1, W7 } from '../scenarios/pace.ts';
 import { isolationSnapshot, isolationMeasurements, openDatabases } from './isolation.ts';
 import type { IsolationSnapshot } from './isolation.ts';
 import { privateText, writePrivate } from './privacy.ts';
+import { claudeProxyEnvironment, proxyVariables, syncCodexLogin } from './subscription.ts';
 import type { Field } from '../evidence.ts';
 import type { InteractiveClient } from './native.ts';
 
@@ -21,8 +22,12 @@ const q = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const json = (file: string, value: unknown) => writeFileSync(file, JSON.stringify(value, null, 2), { mode: 0o600 });
 export const cacheRoot = () => join(homedir(), 'Library/Caches/wayfinder-behaviour-tests');
 
-/** Subscription only: link the single Codex login file without reading/copying it; Claude uses a setup-token. */
-export function launcher(scratch: string, client: InteractiveClient, bin: string, port: number, token: string, model: string, effort: string, subscriptionHome = homedir()): string {
+export interface LaunchOptions {
+  scratch: string; client: InteractiveClient; bin: string; port: number; token: string; model: string; effort: string;
+  subscriptionHome: string; proxyEnv?: Record<string, string>;
+}
+/** Subscription only. Authentication and proxy source paths must be explicit, including in tests. */
+export function launcher({ scratch, client, bin, port, token, model, effort, subscriptionHome, proxyEnv = {} }: LaunchOptions): string {
   const home = join(scratch, 'home'); const work = join(scratch, 'work');
   for (const dir of [home, work, join(home, '.codex'), join(home, '.claude'), join(home, 'tmp')]) mkdirSync(dir, { recursive: true, mode: 0o700 });
   const profile = join(scratch, 'sandbox.sb');
@@ -40,12 +45,14 @@ export function launcher(scratch: string, client: InteractiveClient, bin: string
   const env = ['PATH=' + (process.env.PATH ?? '/usr/bin:/bin'), 'HOME=' + home, 'TMPDIR=' + join(home, 'tmp'),
     'CODEX_HOME=' + join(home, '.codex'), 'CLAUDE_CONFIG_DIR=' + join(home, '.claude'), 'LANG=en_US.UTF-8', 'TERM=xterm-256color',
     'WAYFINDER_TOKEN=' + token, 'DISABLE_AUTOUPDATER=1', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY=1'];
-  // Credential values are inherited from the operator at execution, never printed or stored by this launcher.
+  if (client === 'claude') for (const key of proxyVariables) if (proxyEnv[key] !== undefined) env.push(`${key}=${proxyEnv[key]}`);
+  // The subscription token is inherited at execution; private proxy settings remain only in this scratch script.
   const auth = client === 'codex' ? '' : 'CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:?Kun must approve claude setup-token first}"';
   return `#!/bin/sh\nset -eu\nunset CODEX_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY\ncd ${q(work)}\nexec env -i ${env.map(q).join(' ')} ${auth} /usr/bin/sandbox-exec -f ${q(profile)} ${[bin, ...args].map(q).join(' ')}\n`;
 }
 
-export async function host(args: string[], observe: (paths: string[]) => IsolationSnapshot = isolationSnapshot) {
+export async function host(args: string[], options: { subscriptionHome: string; observe?: (paths: string[]) => IsolationSnapshot; inheritedEnv?: NodeJS.ProcessEnv }) {
+  const observe = options.observe ?? isolationSnapshot;
   const [batch, attempt, client, model, effort, scenarioId, executable] = args;
   if (args.length !== 7 || !batch || !attempt || !/^[A-Za-z0-9_-]+$/.test(`${batch}${attempt}`)
     || (client !== 'codex' && client !== 'claude') || !model || !effort || !['W1', 'W7'].includes(scenarioId ?? '') || !executable) {
@@ -60,7 +67,7 @@ export async function host(args: string[], observe: (paths: string[]) => Isolati
   const raw = join(dir, 'raw'); mkdirSync(raw, { mode: 0o700 });
   const controllerCredential = { clientId: `${attempt}-controller`, token: newToken() };
   const agent = { clientId: `${attempt}-${client}-A`, token: newToken() };
-  const secrets = { controller: controllerCredential.token, agent: agent.token };
+  const secrets: Record<string, string> = { controller: controllerCredential.token, agent: agent.token };
   const scenario = scenarioId === 'W1' ? W1 : W7;
   const startedAt = new Date().toISOString();
   const absent = (reason: string) => ({ known: false as const, reason });
@@ -89,6 +96,8 @@ export async function host(args: string[], observe: (paths: string[]) => Isolati
   try {
     scratch = mkdtempSync('/private/tmp/wayfinder-interactive-');
     const bin = realpathSync(executable);
+    const proxyEnv = client === 'claude' ? claudeProxyEnvironment(options.subscriptionHome, options.inheritedEnv ?? process.env) : {};
+    for (const [key, value] of Object.entries(proxyEnv)) secrets[`proxy-${key}`] = value;
     capture.service.commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkoutRoot, encoding: 'utf8' }).trim();
     before = observe([dir, scratch]);
     phase = 'service';
@@ -102,7 +111,8 @@ export async function host(args: string[], observe: (paths: string[]) => Isolati
     writePrivate(join(dir, 'controller-rules.json'), { instructions: controller.instructions, toolDescriptions: controller.toolDescriptions,
       note: 'Observed by the Controller only; this does not claim the client saw them.' }, secrets);
     const launchPath = join(scratch, 'launch.sh');
-    writeFileSync(launchPath, launcher(scratch, client, bin, service.port, agent.token, model, effort), { mode: 0o700 });
+    writeFileSync(launchPath, launcher({ scratch, client, bin, port: service.port, token: agent.token, model, effort,
+      subscriptionHome: options.subscriptionHome, proxyEnv }), { mode: 0o700 });
     console.log(`Private Attempt: ${dir}\nClient command (approved Batch only): ${q(launchPath)}\nOpening line: ${scenario.turns[0]!.say}\nStop the client before finishing here. The host has a 60-minute ceiling.`);
     capture.run.completeness = 'cancelled';
     const status = await readline.question('Client exited; enter complete, precondition-not-met, launch-failed, timeout, rate-limited, cancelled, driver-failed, or service-failed: ', { signal: abort.signal });
@@ -143,19 +153,31 @@ export async function host(args: string[], observe: (paths: string[]) => Isolati
         writePrivate(join(raw, 'service.log'), service.logs(), secrets);
         if (existsSync(service.protocolReport)) writePrivate(service.protocolReport, readFileSync(service.protocolReport, 'utf8'), secrets);
       }
-      if (scratch) rmSync(scratch, { recursive: true, force: true });
+      let loginSync: unknown = { status: 'not-applicable' };
+      let syncFailed = false;
+      if (scratch && client === 'codex') {
+        try { loginSync = syncCodexLogin(scratch, options.subscriptionHome); }
+        catch {
+          syncFailed = true; capture.run.completeness = 'driver-failed';
+          capture.run.detail = 'Codex login synchronization failed; scratch retained for coordinator recovery before any new run';
+          loginSync = { status: 'failed', retainedScratch: scratch };
+        }
+      }
+      if (scratch && !syncFailed) rmSync(scratch, { recursive: true, force: true });
       rmSync(join(dir, 'credentials.json'), { force: true });
       capture.run.endedAt = new Date().toISOString();
       if (!capture.maps.length) capture.missing.push('maps');
       if (!capture.raw.files.length) capture.missing.push('events');
       writePrivate(join(dir, 'capture.json'), capture, secrets);
       writePrivate(join(dir, 'isolation.json'), { serviceStopped: stopped ? { known: true, value: stopped } : { known: false, reason: 'service never started' },
+        codexLoginSync: loginSync,
         scratchRemoved: scratch ? !existsSync(scratch) : null, credentialsRemoved: !existsSync(join(dir, 'credentials.json')),
         port: service?.port, database: service?.databasePath, measurements: isolationMeasurements(before, after, opened, service?.databasePath),
         clientExit: { known: false, reason: 'manually launched client exit is operator-attested' } }, secrets);
+      if (syncFailed) throw new Error(capture.run.detail);
     }
   }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  host(process.argv.slice(2)).catch(error => { console.error(String(error)); process.exitCode = 1; });
+  host(process.argv.slice(2), { subscriptionHome: homedir() }).catch(error => { console.error(String(error)); process.exitCode = 1; });
 }

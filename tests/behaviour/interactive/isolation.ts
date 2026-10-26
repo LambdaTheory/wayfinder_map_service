@@ -56,7 +56,11 @@ export function isolationSnapshot(runPaths: string[], configRoot = homedir(), qu
 export function isolationMeasurements(before: IsolationSnapshot, after: IsolationSnapshot, opened: Field<string[]>, ownDatabase?: string) {
   const configsKnown = Object.keys(before.configs).length > 0 && Object.keys(after.configs).length > 0 && [...Object.values(before.configs), ...Object.values(after.configs)].every(v => v.known);
   const dailyPaths = before.everyday.known ? before.everyday.value.flatMap(s => s.databases.map(d => d.path)) : [];
-  return { before, after,
+  // Configuration may itself contain secrets. Hashes are comparison inputs only, never retained evidence.
+  const publicSnapshot = (snapshot: IsolationSnapshot) => ({ everyday: snapshot.everyday,
+    configs: Object.fromEntries(Object.entries(snapshot.configs).map(([name, field]) => [name, field.known
+      ? known({ exists: field.value.exists, containsRunPath: field.value.containsRunPath }) : field])) });
+  return { before: publicSnapshot(before), after: publicSnapshot(after),
     personalConfigurationUnchanged: configsKnown ? known(JSON.stringify(before.configs) === JSON.stringify(after.configs)) : unknown('one or more configuration snapshots unavailable'),
     runPathsInPersonalConfiguration: configsKnown ? known(Object.values(after.configs).some(v => v.known && v.value.containsRunPath)) : unknown('configuration snapshot unavailable'),
     everydaySnapshotUnchanged: before.everyday.known && after.everyday.known ? known(JSON.stringify(before.everyday) === JSON.stringify(after.everyday)) : unknown('everyday service snapshot unavailable'),

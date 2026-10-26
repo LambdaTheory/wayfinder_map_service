@@ -3,22 +3,22 @@
   "scenario": "W7",
   "confirmations": {
     "async-question": {
-      "status": "supported",
+      "status": "unverified",
       "clientVersion": "synthetic-1",
       "surface": "interactive-cli",
       "checkedAt": "2026-01-01T01:02:00.000Z",
       "documentation": [
         "https://code.claude.com/docs/en/hooks"
       ],
-      "reason": "Synthetic support assertion for adapter tests only; not a real client capability claim.",
+      "reason": "The native question ended before the answer; no verified Claude mid-turn delivery decoder is available.",
       "probe": {
         "path": "claude-probe.jsonl",
-        "sha256": "48420f725b88923bbfe7454376908eca8de5f7f944b8a1e011c3398f98522a29",
+        "sha256": "b056709f4306807a037eed4817411dc0e841c2336059f8324c2c000550e5d30b",
         "endedAt": "2026-01-01T01:01:00.000Z",
         "locations": [
           "claude-probe.jsonl:1"
         ],
-        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface.",
+        "reading": "Synthetic native evidence only; asynchronous delivery is not established by these records.",
         "capturePath": "claude-probe-capture.json",
         "selection": {
           "question": 1,
@@ -42,12 +42,12 @@
       "reason": "Synthetic support assertion for adapter tests only; not a real client capability claim.",
       "probe": {
         "path": "claude-probe.jsonl",
-        "sha256": "48420f725b88923bbfe7454376908eca8de5f7f944b8a1e011c3398f98522a29",
+        "sha256": "b056709f4306807a037eed4817411dc0e841c2336059f8324c2c000550e5d30b",
         "endedAt": "2026-01-01T01:01:00.000Z",
         "locations": [
           "claude-probe.jsonl:1"
         ],
-        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface.",
+        "reading": "Synthetic native evidence only; asynchronous delivery is not established by these records.",
         "capturePath": "claude-probe-capture.json",
         "selection": {
           "question": 1,
@@ -71,12 +71,12 @@
       "reason": "Synthetic support assertion for adapter tests only; not a real client capability claim.",
       "probe": {
         "path": "claude-probe.jsonl",
-        "sha256": "48420f725b88923bbfe7454376908eca8de5f7f944b8a1e011c3398f98522a29",
+        "sha256": "b056709f4306807a037eed4817411dc0e841c2336059f8324c2c000550e5d30b",
         "endedAt": "2026-01-01T01:01:00.000Z",
         "locations": [
           "claude-probe.jsonl:1"
         ],
-        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface.",
+        "reading": "Synthetic native evidence only; asynchronous delivery is not established by these records.",
         "capturePath": "claude-probe-capture.json",
         "selection": {
           "question": 1,
@@ -100,12 +100,12 @@
       "reason": "Synthetic support assertion for adapter tests only; not a real client capability claim.",
       "probe": {
         "path": "claude-probe.jsonl",
-        "sha256": "48420f725b88923bbfe7454376908eca8de5f7f944b8a1e011c3398f98522a29",
+        "sha256": "b056709f4306807a037eed4817411dc0e841c2336059f8324c2c000550e5d30b",
         "endedAt": "2026-01-01T01:01:00.000Z",
         "locations": [
           "claude-probe.jsonl:1"
         ],
-        "reading": "Synthetic operator reading: all four mechanisms are available in this invented surface.",
+        "reading": "Synthetic native evidence only; asynchronous delivery is not established by these records.",
         "capturePath": "claude-probe-capture.json",
         "selection": {
           "question": 1,
@@ -129,5 +129,5 @@
     "preparationUse": "Base supports mobile entry"
   },
   "reviews": [],
-  "verdictVersion": 2
+  "verdictVersion": 3
 }

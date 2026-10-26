@@ -8,7 +8,7 @@ import type { VerifiedReviews } from './reviews.ts';
 import { questionTool } from './tools.ts';
 import { W1, W7 } from '../scenarios/pace.ts';
 
-export const interactiveVerdictVersion = 2;
+export const interactiveVerdictVersion = 3;
 export const abilities = ['async-question', 'prepare-while-waiting', 'adjust-recommendation', 'continue-same-turn'] as const;
 export type Ability = typeof abilities[number];
 export interface Confirmation {
@@ -58,7 +58,8 @@ function workOutput(e: EventRecord): string | null {
   if (['exec_command', 'functions.exec_command', 'Bash'].includes(e.tool)) {
     const args = e.arguments && typeof e.arguments === 'object' ? e.arguments as Record<string, unknown> : {};
     const command = args.cmd ?? args.command;
-    if (typeof command !== 'string' || !/^(?:cat|head|tail|rg|grep|sed|wc)\s/.test(command.trim()) || /[\n;&|`$<>]/.test(command)) return null;
+    if (typeof command !== 'string' || !/^(?:cat|head|tail|rg|grep|wc)\s/.test(command.trim()) || /[\n;&|`$<>]/.test(command)
+      || /(?:^|\s)(?:--(?:pre|follow)|-[A-Za-z]*[ifF])/.test(command)) return null;
     if (!value || typeof value !== 'object') return null;
     const result = value as Record<string, unknown>;
     const output = result.stdout ?? result.output;
@@ -86,11 +87,20 @@ export function structure(a: AttemptRecord, ability: Ability, selected: Selectio
   const found = events as EventRecord[];
   if (!question(found[0]!) || !human(found[names.indexOf('answer')]!)) return check('unknown', 'The question or answer locator has the wrong native event kind.', locators);
   const asked = found[0]!;
+  const answer = found[names.indexOf('answer')]!;
   if (ability === 'async-question' && asked.kind === 'tool-call' && questionTool(asked.tool) === 'blocking') {
     return check('violated', 'A blocking question tool cannot establish asynchronous questioning.', locators);
   }
+  if (ability === 'async-question' && answer.kind === 'message' && answer.inputSource?.kind === 'question-tool'
+    && questionTool(answer.inputSource.tool) === 'blocking') {
+    return check('violated', 'The selected answer came from a blocking question tool, not asynchronous human delivery.', locators);
+  }
   if (names.includes('preparation')) {
-    const output = workOutput(found[names.indexOf('preparation')]!);
+    const prepared = found[names.indexOf('preparation')]!;
+    if (prepared.turn === null || !a.sessions.some(s => s.label === prepared.session && s.turns.some(t => t.index === prepared.turn))) {
+      return check('unknown', 'Preparation is not inside an observed native turn.', locators);
+    }
+    const output = workOutput(prepared);
     if (!output || !selected.preparationFinding?.trim() || !output.includes(selected.preparationFinding)) {
       return check('unknown', 'Preparation needs a cited finding in a completed read result, not a launch, control event or wait.', locators);
     }
@@ -113,7 +123,6 @@ export function structure(a: AttemptRecord, ability: Ability, selected: Selectio
     if (together.some(e => e.turn === null) || !a.sessions[0]?.turns.some(t => t.index === together[0]!.turn)) return check('unknown', 'No completed native turn brackets the selected events.', locators);
     if (together.some(e => e.turn !== together[0]!.turn || e.session !== together[0]!.session)) return check('violated', 'The native record ended the turn before the required behaviour.', locators);
   }
-  const answer = found[names.indexOf('answer')]!;
   if (ability === 'continue-same-turn' && a.events.some(e => e.seq > answer.seq && e.seq < found.at(-1)!.seq && human(e))) {
     return check('violated', 'Another human message intervened before continuation.', locators);
   }

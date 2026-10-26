@@ -7,7 +7,7 @@ import type { Ability, Assessment } from './acceptance.ts';
 
 export const digest = (text: string) => createHash('sha256').update(text).digest('hex');
 /** One input bundle covers all four items, so two independent model invocations suffice per Attempt. */
-export function reviewInput(record: AttemptRecord, assessment: Assessment, _ability?: Ability): string {
+export function reviewInput(record: AttemptRecord, assessment: Assessment): string {
   return JSON.stringify({ attemptId: record.attemptId, batchId: record.batchId, subject: record.subject,
     combination: record.combination, client: record.client, run: record.run, verdictVersion: assessment.verdictVersion,
     criteria, selection: assessment.selection, missing: record.missing, events: record.events }, null, 2);
@@ -31,7 +31,8 @@ export interface ReviewArtifact {
 }
 export interface VerifiedReviews { readonly verified: true }
 const verified = new WeakMap<VerifiedReviews, { binding: string; readings: Review[] }>();
-const binding = (record: AttemptRecord, assessment: Assessment) => digest(abilities.map(a => reviewInput(record, assessment, a)).join('\n'));
+const binding = (record: AttemptRecord, assessment: Assessment) => digest(reviewInput(record, assessment));
+const equivalentText = (text: string) => text.normalize('NFKC').toLocaleLowerCase('en-US').replace(/[\p{P}\p{Z}\s]+/gu, '');
 
 /** This is the only producer of a review handle. JSON cannot fabricate a handle or a human verdict. */
 export function verifyReviews(record: AttemptRecord, assessment: Assessment, artifacts: ReviewArtifact[]): VerifiedReviews {
@@ -41,6 +42,7 @@ export function verifyReviews(record: AttemptRecord, assessment: Assessment, art
     if (group.filter(a => a.role === 'review').length > 2 || group.filter(a => a.role === 'arbitration').length > 1) throw new Error('at most two independent readings and one arbitration per item');
     const seenReviewers = new Set<string>(); const seenSessions = new Set<string>(); const seenOutputs = new Set<string>();
     const reviewOutputs: string[] = [];
+    const reviewStatuses: ReviewOutput['status'][] = [];
     for (const artifact of group.sort((a, b) => Number(a.role === 'arbitration') - Number(b.role === 'arbitration'))) {
       if (!['review', 'arbitration'].includes(artifact.role)) throw new Error('human verdicts cannot be imported from files');
       if (!artifact.reviewer?.trim() || !artifact.sessionId?.trim() || !artifact.model?.trim()) throw new Error('review identity is incomplete');
@@ -48,7 +50,7 @@ export function verifyReviews(record: AttemptRecord, assessment: Assessment, art
       const expectedModel = record.combination.harness === 'claude' ? artifact.role === 'review' ? 'gpt-6.1-sol' : 'gpt-6-astra'
         : artifact.role === 'review' ? 'claude-sonnet-5-5' : 'claude-opus-5-5';
       if (artifact.model !== expectedModel) throw new Error('review model does not match the approved R4 route');
-      if (artifact.input !== reviewInput(record, assessment, ability)) throw new Error('review input does not match this Attempt and selected native evidence');
+      if (artifact.input !== reviewInput(record, assessment)) throw new Error('review input does not match this Attempt and selected native evidence');
       const parsed = JSON.parse(artifact.output) as ReviewOutput | { items: (ReviewOutput & { ability: Ability })[] };
       const output = 'items' in parsed ? parsed.items.find(item => item.ability === ability) : parsed;
       if (!output) throw new Error('review bundle omitted the capability');
@@ -60,11 +62,13 @@ export function verifyReviews(record: AttemptRecord, assessment: Assessment, art
         const content = event?.kind === 'message' ? event.text : event?.kind === 'tool-call' ? `${JSON.stringify(event.arguments)} ${event.result.known ? typeof event.result.value === 'string' ? event.result.value : JSON.stringify(event.result.value) : ''}` : '';
         if (!required.includes(citation.seq) || !event || !citation.quote?.trim() || !content.includes(citation.quote)) throw new Error('review quote is unrelated to selected native evidence');
       }
-      const canonical = JSON.stringify({ status: output.status, reason: output.reason.trim(), evidence: [...output.evidence].sort((a, b) => a.seq - b.seq) });
+      const canonical = JSON.stringify({ status: output.status, reason: equivalentText(output.reason),
+        evidence: [...output.evidence].map(e => ({ seq: e.seq, quote: equivalentText(e.quote) })).sort((a, b) => a.seq - b.seq) });
       if (seenReviewers.has(artifact.reviewer) || seenSessions.has(artifact.sessionId) || seenOutputs.has(canonical)) throw new Error('duplicate reviewer, review session or output cannot count as independent');
       seenReviewers.add(artifact.reviewer); seenSessions.add(artifact.sessionId); seenOutputs.add(canonical);
       if (artifact.role === 'arbitration' && (reviewOutputs.length !== 2 || JSON.stringify(artifact.basis) !== JSON.stringify(reviewOutputs))) throw new Error('arbitration needs both independent review outputs');
-      if (artifact.role === 'review') reviewOutputs.push(artifact.output);
+      if (artifact.role === 'arbitration' && reviewStatuses[0] !== 'undecided' && reviewStatuses[0] === reviewStatuses[1]) throw new Error('agreeing settled reviews cannot be arbitrated; only disagreement or undecided readings qualify');
+      if (artifact.role === 'review') { reviewOutputs.push(artifact.output); reviewStatuses.push(output.status); }
       readings.push({ itemId: `${ability}.content`, role: artifact.role, by: `${artifact.vendor}/${artifact.model}/${artifact.reviewer}/${artifact.sessionId}`,
         status: output.status, reason: output.reason });
     }

@@ -23,8 +23,13 @@ function fixture(client: InteractiveClient, kind = 'supported') {
   const assessment = JSON.parse(read(`${client}-assessment.json`)) as Assessment;
   assessment.reviews = abilities.flatMap(a => [1, 2].map(i => ({ itemId: `${a}.content`, role: 'review' as const, by: `synthetic-reader-${i}`, status: 'holds' as const, reason: 'Synthetic review for a unit test.' })));
   const native = normalizeNative(client, read(`${client}-${kind}.jsonl`), `${client}-${kind}.jsonl`, `synthetic-${client}-credential`);
-  const record = { ...JSON.parse(read(`${client}-capture.json`)), combination: { harness: client, requestedModel: 'synthetic-model', visibleModel: native.model, effort: native.effort }, events: native.events, sessions: [native.session],
+  let record = { ...JSON.parse(read(`${client}-capture.json`)), combination: { harness: client, requestedModel: 'synthetic-model', visibleModel: native.model, effort: native.effort }, events: native.events, sessions: [native.session],
     client: { version: native.version, surface: { known: true, value: 'interactive-cli' } }, missing: native.missing } as AttemptRecord;
+  // Judge unit tests explicitly assume confirmed support. This B01 fixture is not native-adapter evidence.
+  if (client === 'claude') {
+    assessment.confirmations['async-question'].status = 'supported';
+    if (kind === 'supported') record = JSON.parse(read('claude-same-turn-unit.json')) as AttemptRecord;
+  }
   const probes = new Set([assessment.confirmations['async-question'].probe!.sha256]);
   return { assessment, record, probes, native };
 }
@@ -38,7 +43,7 @@ function artifactsFor(record: AttemptRecord, assessment: Assessment): ReviewArti
     const evidence = names.flatMap(n => { const seq = assessment.selection[n as keyof Assessment['selection']]; const e = record.events.find(e => e.seq === seq);
       return e ? [{ seq: e.seq, quote: e.kind === 'message' ? e.text.slice(0, 20) : e.kind === 'tool-call' && e.result.known ? (typeof e.result.value === 'string' ? e.result.value : JSON.stringify(e.result.value)).slice(0, 20) : e.kind }] : []; });
     return { ability, role: r.role, reviewer: r.by, sessionId: r.by, vendor: record.combination.harness === 'claude' ? 'openai' : 'anthropic',
-      model: record.combination.harness === 'claude' ? 'gpt-6.1-sol' : 'claude-sonnet-5-5', input: reviewInput(record, assessment, ability),
+      model: record.combination.harness === 'claude' ? 'gpt-6.1-sol' : 'claude-sonnet-5-5', input: reviewInput(record, assessment),
       output: JSON.stringify({ status: r.status, reason: `${r.reason} Independent synthetic reading ${i}.`, evidence }) };
   });
 }
@@ -51,12 +56,12 @@ const outcomes = (value: ReturnType<typeof assess>) => value.verdicts.map(v => v
 for (const client of ['codex', 'claude'] as const) describe(client, () => {
   it('imports intermediate messages, completed work, input and explicit native turns', () => {
     const { native } = fixture(client);
-    expect(native.session.turns).toHaveLength(1);
-    expect(native.events.map(e => e.turn)).toEqual([0, 0, 0, 0, 0, 0]);
+    expect(native.session.turns).toHaveLength(client === 'codex' ? 1 : 2);
+    expect(native.events.map(e => e.turn)).toEqual(client === 'codex' ? [0, 0, 0, 0, 0, 0] : [0, 0, 0, 1, 1, 1]);
     expect(native.locations[2]).toMatch(/supported.jsonl:\d+$/);
     expect(native.events[2]).toMatchObject({ kind: 'tool-call', result: { known: true }, at: '2026-01-01T02:00:06.000Z' });
   });
-  it('passes all four only after substantive native evidence and content review', () => {
+  it('passes all four only with explicit B01 evidence and content review', () => {
     const { record, assessment, probes } = fixture(client);
     expect(outcomes(assess(record, assessment, probes))).toEqual(abilities.map(() => 'pass'));
     assessment.reviews = [];
@@ -129,7 +134,7 @@ for (const client of ['codex', 'claude'] as const) describe(client, () => {
     const record = JSON.parse(readFileSync(join(dir, 'judged/async-question.attempt.json'), 'utf8')) as AttemptRecord;
     expect(record.subject.id).toBe('B09Async'); expect(record.events).toHaveLength(6);
     expect(() => main([dir, `${client}-supported.jsonl`, `${client}-assessment.json`, join(dir, 'judged')])).toThrow();
-    assessment.confirmations['async-question'].probe!.sha256 = createHash('sha256').update('wrong').digest('hex');
+    assessment.confirmations['prepare-while-waiting'].probe!.sha256 = createHash('sha256').update('wrong').digest('hex');
     expect(() => importAttempt(dir, `${client}-supported.jsonl`, assessment)).toThrow('hash mismatch');
     expect(() => localFile(dir, '../elsewhere')).toThrow();
   });
@@ -152,7 +157,7 @@ it('a tool started before the answer but completed afterwards is not preparation
 it('manual launchers isolate HOME/configuration, use their own credential and contain no model execution until invoked', () => {
   for (const client of ['codex', 'claude'] as const) {
     const dir = temporary();
-    const script = launcher(dir, client, process.execPath, 23456, 'synthetic-token', 'synthetic-model', 'high');
+    const script = launcher({ scratch: dir, client, bin: process.execPath, port: 23456, token: 'synthetic-token', model: 'synthetic-model', effort: 'high', subscriptionHome: temporary() });
     expect(script).toContain('env -i'); expect(script).toContain('/usr/bin/sandbox-exec');
     expect(script).toContain(`HOME=${dir}/home`); expect(script).toContain('WAYFINDER_TOKEN=synthetic-token');
     expect(script).not.toContain('18766/mcp');
@@ -161,23 +166,28 @@ it('manual launchers isolate HOME/configuration, use their own credential and co
   }
 });
 
-it('the manual host seeds and stops only a fresh cached service without executing a client', async () => {
+it.each(['', 'refresh', 'failure'])('the manual host stops only its own service and preserves subscription state (%s)', async mode => {
   const { spawn } = await import('node:child_process');
   const { cacheRoot } = await import('./host.ts');
   const attempt = `fixture-${process.pid}-${Date.now()}`;
   const dir = join(cacheRoot(), `B09Fixture-${attempt}`); dirs.push(dir);
   const result = await new Promise<{ code: number | null; output: string }>((resolve, reject) => {
     const child = spawn(process.execPath, [fileURLToPath(new URL('../fixtures/interactive/fake-host.mjs', import.meta.url)), 'B09Fixture', attempt,
-      'codex', 'synthetic-model', 'high', 'W7', process.execPath], { stdio: ['pipe', 'pipe', 'pipe'] });
+      'codex', 'synthetic-model', 'high', 'W7', process.execPath], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, B09_SYNTHETIC_REFRESH: mode } });
     let output = ''; let answered = false;
     const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(output)); }, 20_000);
     child.stdout.on('data', data => { output += data; if (!answered && output.includes('Client exited; enter')) { answered = true; child.stdin.write('complete\n'); } });
     child.stderr.on('data', data => { output += data; });
     child.on('error', reject); child.on('close', code => { clearTimeout(timer); resolve({ code, output }); });
   });
-  expect(result, result.output).toMatchObject({ code: 0 });
+  expect(result, result.output).toMatchObject({ code: mode === 'failure' ? 1 : 0 });
   const isolation = JSON.parse(readFileSync(join(dir, 'isolation.json'), 'utf8'));
-  expect(isolation).toMatchObject({ serviceStopped: { known: true }, scratchRemoved: true, credentialsRemoved: true });
+  expect(isolation).toMatchObject({ serviceStopped: { known: true }, scratchRemoved: mode !== 'failure', credentialsRemoved: true });
+  expect(isolation.codexLoginSync.status).toBe(mode === 'failure' ? 'failed' : mode === 'refresh' ? 'synced' : 'linked');
+  if (mode === 'failure') {
+    const retained = isolation.codexLoginSync.retainedScratch; dirs.push(retained);
+    expect(readFileSync(join(retained, 'home/.codex/auth.json'), 'utf8')).toBe('synthetic-refreshed-login');
+  }
   expect(isolation.measurements).toHaveProperty('before');
   expect(isolation.measurements).toHaveProperty('after');
   expect(isolation.measurements.servedOwnDatabase).toEqual({ known: true, value: true });
@@ -226,8 +236,8 @@ it('invalid support values and missing capture times cannot bypass the capabilit
 
 it('uses subscription authentication and clears API-key billing routes', () => {
   const dir = temporary();
-  const codex = launcher(dir, 'codex', process.execPath, 23456, 'synthetic-token', 'synthetic-model', 'high');
-  const claude = launcher(temporary(), 'claude', process.execPath, 23456, 'synthetic-token', 'synthetic-model', 'high');
+  const codex = launcher({ scratch: dir, client: 'codex', bin: process.execPath, port: 23456, token: 'synthetic-token', model: 'synthetic-model', effort: 'high', subscriptionHome: temporary() });
+  const claude = launcher({ scratch: temporary(), client: 'claude', bin: process.execPath, port: 23456, token: 'synthetic-token', model: 'synthetic-model', effort: 'high', subscriptionHome: temporary() });
   expect(codex).not.toContain('CODEX_API_KEY=');
   expect(claude).not.toContain('ANTHROPIC_API_KEY=');
   expect(claude).toContain('CLAUDE_CODE_OAUTH_TOKEN');
@@ -235,7 +245,7 @@ it('uses subscription authentication and clears API-key billing routes', () => {
 });
 
 it('launches interactive Codex in its own process with supported flags', () => {
-  const script = launcher(temporary(), 'codex', process.execPath, 23456, 'synthetic-token', 'synthetic-model', 'high');
+  const script = launcher({ scratch: temporary(), client: 'codex', bin: process.execPath, port: 23456, token: 'synthetic-token', model: 'synthetic-model', effort: 'high', subscriptionHome: temporary() });
   expect(script).toContain('--no-daemon');
   expect(script).not.toContain('--ignore-user-config');
 });
@@ -386,7 +396,7 @@ it('measures changed configuration and reports missing isolation observations as
 it('links only the subscription login path, without copying or reading it', async () => {
   const { lstatSync, readlinkSync } = await import('node:fs');
   const dir = temporary(); const loginRoot = temporary();
-  launcher(dir, 'codex', process.execPath, 23456, 'synthetic-token', 'synthetic-model', 'high', loginRoot);
+  launcher({ scratch: dir, client: 'codex', bin: process.execPath, port: 23456, token: 'synthetic-token', model: 'synthetic-model', effort: 'high', subscriptionHome: loginRoot });
   const path = join(dir, 'home/.codex/auth.json');
   expect(lstatSync(path).isSymbolicLink()).toBe(true); expect(readlinkSync(path)).toBe(join(loginRoot, '.codex/auth.json'));
   const profile = readFileSync(join(dir, 'sandbox.sb'), 'utf8');
@@ -432,4 +442,175 @@ it('does not count injected context as a human answer or ignore ambiguous queued
   rows.find(r => r.type === 'user').isMeta = true;
   const native = normalizeNative('claude', rows.map(r => JSON.stringify(r)).join('\n'), 'meta.jsonl', 'fake');
   expect(native.events.filter(e => e.kind === 'message' && e.actor === 'script-human')).toHaveLength(1);
+});
+
+it('keeps one placeholder for the same token in Bearer headers and ordinary references', async () => {
+  const { privateText } = await import('./privacy.ts');
+  expect(privateText('Authorization: Bearer synthetic-secret and synthetic-secret', { agent: 'synthetic-secret' }))
+    .toBe('Authorization: Bearer <agent> and <agent>');
+});
+
+it('does not arbitrate two settled agreeing reviews', () => {
+  const f = fixture('codex'); const artifacts = artifactsFor(f.record, f.assessment);
+  const reviews = artifacts.slice(0, 2);
+  reviews.forEach(a => { const value = JSON.parse(a.output); value.status = 'violated'; a.output = JSON.stringify(value); });
+  const arbitration: ReviewArtifact = { ...reviews[0]!, role: 'arbitration', reviewer: 'arb', sessionId: 'arb', model: 'claude-opus-5-5',
+    basis: reviews.map(a => a.output), output: JSON.stringify({ ...JSON.parse(reviews[0]!.output), status: 'holds', reason: 'Synthetic contrary arbitration.' }) };
+  expect(() => verifyReviews(f.record, f.assessment, [...reviews, arbitration])).toThrow(/agree|disagree/);
+});
+
+it('does not count punctuation or whitespace changes as an independent review', () => {
+  const f = fixture('codex'); const artifacts = artifactsFor(f.record, f.assessment).slice(0, 2);
+  const output = JSON.parse(artifacts[0]!.output); output.reason = `  ${output.reason} .\n`;
+  artifacts[1]!.output = JSON.stringify(output);
+  expect(() => verifyReviews(f.record, f.assessment, artifacts)).toThrow(/duplicate/);
+});
+
+it('ends the Claude turn on interruption before the next human answer', () => {
+  const rows = read('claude-supported.jsonl').trim().split('\n').map(line => JSON.parse(line));
+  rows.splice(5, 0, { ...rows[1], timestamp: '2026-01-01T02:00:06.500Z', uuid: 'interrupt',
+    message: { role: 'user', content: '[Request interrupted by user]' } });
+  const native = normalizeNative('claude', rows.map(row => JSON.stringify(row)).join('\n'), 'interrupted.jsonl', 'fake');
+  const question = native.events.find(e => e.seq === 1)!; const answer = native.events.find(e => e.seq === 3)!;
+  expect(answer.turn).not.toBe(question.turn);
+});
+
+it.each(['codex', 'claude'] as const)('an assistant question followed by a blocking %s answer is not asynchronous', client => {
+  let rows = read(`${client}-supported.jsonl`).trim().split('\n').map(line => JSON.parse(line)).filter(row => row.uuid !== 'prepared-boundary');
+  const tool = client === 'codex' ? 'request_user_input' : 'AskUserQuestion';
+  if (client === 'codex') {
+    rows = rows.flatMap(row => row.payload?.type === 'message' && row.payload?.role === 'user' && JSON.stringify(row).includes('Yes, access')
+      ? [{ ...row, payload: { type: 'function_call', call_id: 'question', name: tool, arguments: '{}' } },
+        { ...row, payload: { type: 'function_call_output', call_id: 'question', output: JSON.stringify({ answers: { carrier: 'Yes, access must be mobile-only.' } }) } }] : [row]);
+  } else {
+    rows = rows.flatMap(row => row.uuid === 'id-7'
+      ? [{ ...row, type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'question', name: tool, input: {} }] } },
+        { ...row, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'question', content: 'User has answered your questions: mobile only' }] } }] : [row]);
+  }
+  const native = normalizeNative(client, rows.map(row => JSON.stringify(row)).join('\n'), 'blocking.jsonl', 'fake');
+  const f = fixture(client); f.record.events = native.events; f.record.sessions = [native.session]; f.record.missing = native.missing;
+  const answer = native.events.find(e => e.kind === 'message' && e.actor === 'script-human' && (e.text.includes('mobile-only') || e.text.startsWith('User has answered')))!;
+  const next = native.events.filter(e => e.kind === 'message' && e.actor === 'agent').slice(-2);
+  Object.assign(f.assessment.selection, { answer: answer.seq, revisedRecommendation: next[0]!.seq, continuation: next[1]!.seq });
+  expect(assess(f.record, f.assessment, f.probes).verdicts[0]!.verdict.outcome).toBe('fail');
+});
+
+it('string error flags do not produce synthetic human answers', () => {
+  const rows = [
+    { timestamp: '2026-01-01T00:00:00Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'one' } },
+    { timestamp: '2026-01-01T00:00:01Z', type: 'response_item', payload: { type: 'function_call', call_id: 'q', name: 'request_user_input', arguments: '{}' } },
+    { timestamp: '2026-01-01T00:00:02Z', type: 'response_item', payload: { type: 'function_call_output', call_id: 'q', output: JSON.stringify({ is_error: 'true', answers: { carrier: 'Base' } }) } },
+  ];
+  expect(normalizeNative('codex', rows.map(row => JSON.stringify(row)).join('\n'), 'error.jsonl', 'fake').events.filter(e => e.kind === 'message')).toHaveLength(0);
+});
+
+it('preserves a newer synthetic Codex refresh and backs up the old login before cleanup', async () => {
+  const { mkdirSync, utimesSync, statSync } = await import('node:fs');
+  const { syncCodexLogin } = await import('./subscription.ts');
+  const scratch = temporary(); const daily = temporary();
+  mkdirSync(join(scratch, 'home/.codex'), { recursive: true }); mkdirSync(join(daily, '.codex'));
+  const own = join(scratch, 'home/.codex/auth.json'); const destination = join(daily, '.codex/auth.json');
+  writeFileSync(destination, 'synthetic-old-login'); writeFileSync(own, 'synthetic-refreshed-login');
+  utimesSync(destination, 1, 1); utimesSync(own, 2, 2);
+  const result = syncCodexLogin(scratch, daily);
+  expect(readFileSync(destination, 'utf8')).toBe('synthetic-refreshed-login');
+  expect(result.status).toBe('synced');
+  expect(readFileSync(result.backup!, 'utf8')).toBe('synthetic-old-login');
+  expect(statSync(destination).mode & 0o777).toBe(0o600); expect(statSync(result.backup!).mode & 0o777).toBe(0o600);
+});
+
+it('Claude receives only the six proxy keys, with terminal environment taking precedence', async () => {
+  const { mkdirSync } = await import('node:fs'); const { claudeProxyEnvironment } = await import('./subscription.ts');
+  const home = temporary(); mkdirSync(join(home, '.claude'));
+  writeFileSync(join(home, '.claude/settings.json'), JSON.stringify({ env: { HTTPS_PROXY: 'http://synthetic-settings:1',
+    http_proxy: 'http://synthetic-settings:2', NO_PROXY: 'localhost', ANTHROPIC_API_KEY: 'synthetic-disallowed', OTHER: 'synthetic-disallowed' } }));
+  expect(claudeProxyEnvironment(home, { HTTPS_PROXY: 'http://synthetic-terminal:3', CODEX_API_KEY: 'synthetic-disallowed' }))
+    .toEqual({ HTTPS_PROXY: 'http://synthetic-terminal:3', http_proxy: 'http://synthetic-settings:2', NO_PROXY: 'localhost' });
+});
+
+it.each(['disagree', 'undecided'])('allows bound arbitration only for %s readings', kind => {
+  const f = fixture('codex'); const reviews = artifactsFor(f.record, f.assessment).slice(0, 2);
+  const changed = JSON.parse(reviews[1]!.output); changed.status = kind === 'disagree' ? 'violated' : 'undecided';
+  reviews[1]!.output = JSON.stringify(changed);
+  const arb: ReviewArtifact = { ...reviews[0]!, role: 'arbitration', reviewer: 'arb', sessionId: 'arb', model: 'claude-opus-5-5',
+    basis: reviews.map(a => a.output), output: JSON.stringify({ ...JSON.parse(reviews[0]!.output), reason: 'Synthetic arbitration with both readings.' }) };
+  expect(() => verifyReviews(f.record, f.assessment, [...reviews, arb])).not.toThrow();
+});
+
+it('does not follow an unchanged login link or replace a newer daily synthetic login', async () => {
+  const { mkdirSync, symlinkSync, unlinkSync, utimesSync, readdirSync } = await import('node:fs');
+  const { syncCodexLogin } = await import('./subscription.ts');
+  const scratch = temporary(); const daily = temporary();
+  mkdirSync(join(scratch, 'home/.codex'), { recursive: true }); mkdirSync(join(daily, '.codex'));
+  const own = join(scratch, 'home/.codex/auth.json'); const target = join(daily, '.codex/auth.json');
+  symlinkSync(target, own);
+  expect(syncCodexLogin(scratch, daily)).toEqual({ status: 'linked' }); // Target deliberately does not exist.
+  unlinkSync(own); writeFileSync(own, 'synthetic-old'); writeFileSync(target, 'synthetic-new');
+  utimesSync(own, 1, 1); utimesSync(target, 2, 2);
+  expect(syncCodexLogin(scratch, daily)).toEqual({ status: 'daily-newer' });
+  expect(readFileSync(target, 'utf8')).toBe('synthetic-new'); expect(readdirSync(join(daily, '.codex'))).toEqual(['auth.json']);
+});
+
+it('a failed login sync preserves the refreshed synthetic file for recovery', async () => {
+  const { mkdirSync } = await import('node:fs'); const { syncCodexLogin } = await import('./subscription.ts');
+  const scratch = temporary(); const daily = temporary(); mkdirSync(join(scratch, 'home/.codex'), { recursive: true });
+  const own = join(scratch, 'home/.codex/auth.json'); writeFileSync(own, 'synthetic-refresh');
+  expect(() => syncCodexLogin(scratch, daily)).toThrow();
+  expect(readFileSync(own, 'utf8')).toBe('synthetic-refresh');
+});
+
+it('the generated Claude launcher preserves the proxy allowlist without arbitrary environment keys', () => {
+  const script = launcher({ scratch: temporary(), client: 'claude', bin: process.execPath, port: 23456, token: 'synthetic-token',
+    model: 'synthetic-model', effort: 'high', subscriptionHome: temporary(), proxyEnv: { HTTPS_PROXY: 'http://synthetic-proxy:1', NO_PROXY: 'localhost',
+      ANTHROPIC_API_KEY: 'synthetic-excluded', OTHER: 'synthetic-excluded' } });
+  expect(script).toContain('HTTPS_PROXY=http://synthetic-proxy:1'); expect(script).toContain('NO_PROXY=localhost');
+  expect(script).not.toContain('synthetic-excluded');
+});
+
+it('a rejection notice beside a failed Claude tool result is not human input', () => {
+  const rows = read('claude-supported.jsonl').trim().split('\n').map(line => JSON.parse(line));
+  const row = rows.find(row => row.uuid === 'id-6'); row.message.content[0].is_error = 'true';
+  row.message.content.push({ type: 'text', text: 'User rejected tool use' });
+  expect(normalizeNative('claude', rows.map(row => JSON.stringify(row)).join('\n'), 'rejected.jsonl', 'fake').events
+    .some(e => e.kind === 'message' && e.text === 'User rejected tool use')).toBe(false);
+});
+
+it.each(['sed -i "" s/a/b/w\\ /dev/stdout facts.txt', 'rg --pre ./x.sh mobile', 'tail -f facts.txt'])('does not label an executing or open-ended command as a completed read: %s', cmd => {
+  const f = fixture('codex');
+  Object.assign(f.record.events[2]!, { tool: 'exec_command', arguments: { cmd }, result: { known: true, value: { exit_code: 0, output: 'Base supports mobile entry' } } });
+  expect(outcomes(assess(f.record, f.assessment, f.probes)).slice(0, 2)).not.toContain('pass');
+});
+
+it('does not retain personal configuration hashes in the isolation report', async () => {
+  const { mkdirSync } = await import('node:fs'); const { isolationSnapshot, isolationMeasurements } = await import('./isolation.ts');
+  const dir = temporary(); mkdirSync(join(dir, '.codex')); writeFileSync(join(dir, '.codex/config.toml'), 'synthetic-private-setting');
+  const snapshot = isolationSnapshot([], dir, () => ({ known: true, value: '' }));
+  const result = isolationMeasurements(snapshot, snapshot, { known: false, reason: 'not observed' });
+  expect(result.personalConfigurationUnchanged).toEqual({ known: true, value: true });
+  expect(JSON.stringify(result)).not.toContain('sha256'); expect(JSON.stringify(result)).not.toContain('synthetic-private-setting');
+});
+
+it('an uncorrelated second Claude user row cannot establish mid-turn delivery', () => {
+  const rows = read('claude-supported.jsonl').trim().split('\n').map(line => JSON.parse(line)).filter(row => row.uuid !== 'prepared-boundary');
+  const native = normalizeNative('claude', rows.map(row => JSON.stringify(row)).join('\n'), 'uncorrelated.jsonl', 'fake');
+  const f = fixture('claude'); f.record.events = native.events; f.record.sessions = [native.session]; f.record.missing = native.missing;
+  const result = assess(f.record, f.assessment, f.probes);
+  expect([result.verdicts[0]!.verdict.outcome, result.verdicts[3]!.verdict.outcome]).toEqual(['insufficient-evidence', 'insufficient-evidence']);
+});
+
+it('scrubs recognizable credentials from every offline output including review input', () => {
+  const dir = temporary(); cpSync(fixtures, dir, { recursive: true });
+  const capture = JSON.parse(read('codex-capture.json')); capture.run.detail = 'Bearer sk-ant-oat01-synthetic-secret-1234567890';
+  writeFileSync(join(dir, 'capture.json'), JSON.stringify(capture));
+  main([dir, 'codex-supported.jsonl', 'codex-assessment.json', 'scrubbed']);
+  for (const file of ['result.json', 'attempt.json', 'review-input.json', ...abilities.map(a => `${a}.attempt.json`)]) {
+    expect(readFileSync(join(dir, 'scrubbed', file), 'utf8')).not.toContain('synthetic-secret-1234567890');
+  }
+});
+
+it.each(['model', 'effort'])('retains native %s mismatch as an insufficient-evidence result', field => {
+  const dir = temporary(); cpSync(fixtures, dir, { recursive: true }); writeFileSync(join(dir, 'capture.json'), read('codex-capture.json'));
+  const text = read('codex-supported.jsonl').replaceAll(field === 'model' ? 'synthetic-model' : '"effort":"high"', field === 'model' ? 'different-model' : '"effort":"low"');
+  writeFileSync(join(dir, 'codex-supported.jsonl'), text);
+  expect(outcomes(importAttempt(dir, 'codex-supported.jsonl', JSON.parse(read('codex-assessment.json'))))).toEqual(abilities.map(() => 'insufficient-evidence'));
 });
