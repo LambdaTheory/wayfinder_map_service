@@ -40,4 +40,4 @@ On the branch including main `c89262b`:
 - `npm run typecheck` passed.
 - `git diff --check` passed.
 
-No model calls, real credential contents, protected private paths, daily service operations, real database access, or socket probes to 18765/18766 were used. Existing pending real-model Batches and interactive probes remain coordinator-owned and require their existing approvals. PR #94 remains unmerged.
+No model calls, real credential contents, dedicated-agent or private service directories, daily service operations, real database access, or socket probes to 18765/18766 were used. Existing pending real-model Batches and interactive probes remain coordinator-owned and require their existing approvals. PR #94 remains unmerged.
