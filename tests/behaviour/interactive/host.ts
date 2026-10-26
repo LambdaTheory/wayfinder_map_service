@@ -98,7 +98,8 @@ export async function host(args: string[], options: { subscriptionHome: string; 
     scratch = mkdtempSync('/private/tmp/wayfinder-interactive-');
     const bin = realpathSync(executable);
     const proxyEnv = client === 'claude' ? claudeProxyEnvironment(options.subscriptionHome, options.inheritedEnv ?? process.env) : {};
-    for (const [key, value] of Object.entries(proxyEnv)) secrets[`proxy-${key}`] = value;
+    // Bypass hosts are public routing data; redacting them would corrupt loopback MCP evidence.
+    for (const [key, value] of Object.entries(proxyEnv)) if (key.toLowerCase() !== 'no_proxy') secrets[`proxy-${key}`] = value;
     capture.service.commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkoutRoot, encoding: 'utf8' }).trim();
     before = observe([dir, scratch]);
     phase = 'service';

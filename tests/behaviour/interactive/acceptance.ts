@@ -8,7 +8,7 @@ import type { VerifiedReviews } from './reviews.ts';
 import { questionTool } from './tools.ts';
 import { W1, W7 } from '../scenarios/pace.ts';
 
-export const interactiveVerdictVersion = 3;
+export const interactiveVerdictVersion = 4;
 export const abilities = ['async-question', 'prepare-while-waiting', 'adjust-recommendation', 'continue-same-turn'] as const;
 export type Ability = typeof abilities[number];
 export interface Confirmation {
@@ -76,6 +76,18 @@ export const selectedNames = (ability: Ability): (keyof Selection)[] => ability 
     : ability === 'adjust-recommendation' ? ['question', 'answer', 'revisedRecommendation'] : ['question', 'answer', 'continuation'];
 
 export function structure(a: AttemptRecord, ability: Ability, selected: Selection): CheckResult {
+  // A human intervention is proved by ordered events in one session, without any turn inference.
+  // Boundary/model/trace gaps cannot erase that violation; corrupt event ordering still cannot prove it.
+  if (ability === 'continue-same-turn' && !a.missing.includes('native.integrity')) {
+    const answer = a.events.find(e => e.seq === selected.answer);
+    const continuation = a.events.find(e => e.seq === selected.continuation);
+    if (answer && human(answer) && continuation && assistant(continuation) && answer.session !== null && answer.session === continuation.session) {
+      const nudge = a.events.find(e => human(e) && e.session === answer.session && e.seq > answer.seq && e.seq < continuation.seq
+        && Date.parse(e.at) >= Date.parse(answer.at) && Date.parse(e.at) <= Date.parse(continuation.at));
+      if (nudge) return check('violated', 'Another human message intervened before continuation.',
+        [answer, nudge, continuation].map(e => `events[${a.events.indexOf(e)}]`));
+    }
+  }
   if (!a.combination.visibleModel.known || !a.combination.effort.known) return check('unknown', 'Visible model and effort must both be evidenced.', ['combination.visibleModel', 'combination.effort']);
   if (a.missing.some(m => ['events', 'events.message', 'events.tool-call', 'native.integrity', 'native.boundaries', 'native.sidechain', 'native.unhandled', 'sessions.nativeId', 'combination.model-mismatch', 'combination.visibleModel', 'combination.effort'].includes(m))) {
     return check('unknown', 'Native records or turn boundaries are incomplete; no temporal conclusion is safe.', ['missing']);
@@ -122,9 +134,6 @@ export function structure(a: AttemptRecord, ability: Ability, selected: Selectio
   if (together.length) {
     if (together.some(e => e.turn === null) || !a.sessions[0]?.turns.some(t => t.index === together[0]!.turn)) return check('unknown', 'No completed native turn brackets the selected events.', locators);
     if (together.some(e => e.turn !== together[0]!.turn || e.session !== together[0]!.session)) return check('violated', 'The native record ended the turn before the required behaviour.', locators);
-  }
-  if (ability === 'continue-same-turn' && a.events.some(e => e.seq > answer.seq && e.seq < found.at(-1)!.seq && human(e))) {
-    return check('violated', 'Another human message intervened before continuation.', locators);
   }
   return check('holds', 'Native event types, order and turn boundaries support the structural requirement; content still requires review.', locators);
 }

@@ -167,14 +167,14 @@ it('manual launchers isolate HOME/configuration, use their own credential and co
   }
 });
 
-it.each(['', 'refresh', 'failure', 'cancel'])('the manual host stops only its own service and preserves subscription state (%s)', async mode => {
+it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'claude-proxy'])('the manual host stops only its own service and preserves subscription state (%s)', async mode => {
   const { spawn } = await import('node:child_process');
   const { cacheRoot } = await import('./host.ts');
   const attempt = `fixture-${process.pid}-${Date.now()}`;
   const dir = join(cacheRoot(), `B09Fixture-${attempt}`); dirs.push(dir);
   const result = await new Promise<{ code: number | null; output: string }>((resolve, reject) => {
     const child = spawn(process.execPath, [fileURLToPath(new URL('../fixtures/interactive/fake-host.mjs', import.meta.url)), 'B09Fixture', attempt,
-      'codex', 'synthetic-model', 'high', 'W7', process.execPath], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, B09_SYNTHETIC_REFRESH: mode } });
+      mode === 'claude-proxy' ? 'claude' : 'codex', 'synthetic-model', 'high', 'W7', process.execPath], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, B09_SYNTHETIC_REFRESH: mode } });
     let output = ''; let answered = false;
     const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(output)); }, 20_000);
     child.stdout.on('data', data => { output += data; if (!answered && output.includes('Client exited; enter')) { answered = true; if (mode === 'cancel') child.stdin.end(); else child.stdin.write('complete\n'); } });
@@ -184,19 +184,28 @@ it.each(['', 'refresh', 'failure', 'cancel'])('the manual host stops only its ow
   expect(result, result.output).toMatchObject({ code: ['failure', 'cancel'].includes(mode) ? 1 : 0 });
   const isolation = JSON.parse(readFileSync(join(dir, 'isolation.json'), 'utf8'));
   expect(isolation).toMatchObject({ serviceStopped: { known: true }, scratchRemoved: !['failure', 'cancel'].includes(mode), credentialsRemoved: true });
-  expect(isolation.codexLoginSync.status).toBe(mode === 'cancel' ? 'deferred' : mode === 'failure' ? 'failed' : mode === 'refresh' ? 'synced' : 'linked');
+  expect(isolation.codexLoginSync.status).toBe(mode === 'claude-proxy' ? 'not-applicable' : mode === 'cancel' ? 'deferred' : mode === 'failure' ? 'failed' : mode === 'refresh' ? 'synced' : 'linked');
   if (mode === 'failure' || mode === 'cancel') {
     const retained = isolation.codexLoginSync.retainedScratch; dirs.push(retained);
     expect(readFileSync(join(retained, 'home/.codex/auth.json'), 'utf8')).toBe('synthetic-refreshed-login');
   }
   expect(isolation.measurements).toHaveProperty('before');
   expect(isolation.measurements).toHaveProperty('after');
-  expect(isolation.measurements.servedOwnDatabase).toEqual({ known: true, value: true });
+  const opened = isolation.measurements.servedOwnDatabase;
+  if (mode === 'no-open-files') expect(opened.known).toBe(false);
+  // lsof visibility is environment-dependent. An observation must match; absence must remain unknown.
+  expect(opened).toEqual(opened.known ? { known: true, value: true }
+    : { known: false, reason: 'own service open database not observed' });
   expect(isolation).not.toHaveProperty('scope');
   expect([18765, 18766]).not.toContain(isolation.port);
   expect(isolation.database).toContain(`/B09Fixture-${attempt}/db/`);
   const capture = JSON.parse(readFileSync(join(dir, 'capture.json'), 'utf8')) as AttemptRecord;
-  expect(capture.maps).toHaveLength(1); expect(capture.missing).toContain('events');
+  expect(capture.maps).toHaveLength(1);
+  if (mode === 'claude-proxy') {
+    const native = readFileSync(join(dir, 'raw/native-0.jsonl'), 'utf8');
+    expect(native).toContain('http://127.0.0.1:23456/mcp'); expect(native).toContain('http://localhost:23456/mcp');
+    expect(native).not.toContain('synthetic-password'); expect(native).toContain('<proxy-HTTPS_PROXY>');
+  } else expect(capture.missing).toContain('events');
 }, 30_000);
 
 it('all-unsupported preflight produces four gaps without opening any native file', () => {
@@ -277,6 +286,59 @@ it('a rejected question tool supplies no human answer', () => {
   rows.find(r => r.message?.content?.[0]?.type === 'tool_result').message.content = [{ type: 'tool_result', tool_use_id: 'question-1', is_error: true, content: 'User rejected tool use' }];
   const native = normalizeNative('claude', rows.map(r => JSON.stringify(r)).join('\n'), 'rejected.jsonl', 'fake');
   expect(native.events.flatMap(e => e.kind === 'message' && e.role === 'user' ? [e.text] : [])).not.toContain('User rejected tool use');
+});
+
+it.each([false, true])('retains user text beside a Claude tool result, including a rejected result (%s)', rejected => {
+  const rows = read('claude-supported.jsonl').trim().split('\n').map(line => JSON.parse(line));
+  const result = rows.find(r => r.message?.content?.[0]?.type === 'tool_result');
+  result.message.content = [
+    { type: 'tool_result', tool_use_id: 'tool-1', content: rejected ? 'User rejected tool use' : 'Synthetic completed read', is_error: rejected },
+    ...(rejected ? [{ type: 'text', text: 'User rejected tool use' }] : []),
+    { type: 'text', text: 'Keep going: ask me the next Frontier question now.' },
+  ];
+  const native = normalizeNative('claude', rows.map(r => JSON.stringify(r)).join('\n'), 'mixed.jsonl', 'fake');
+  const human = native.events.filter(e => e.kind === 'message' && e.role === 'user');
+  expect(human).toContainEqual(expect.objectContaining({ text: 'Keep going: ask me the next Frontier question now.', turn: null }));
+  expect(human).not.toContainEqual(expect.objectContaining({ text: 'User rejected tool use' }));
+  expect(native.missing.some(m => /^events\[\d+\]\.turn$/.test(m))).toBe(true);
+});
+
+it('does not discard additional user words after a rejection notice', () => {
+  const rows = read('claude-supported.jsonl').trim().split('\n').map(line => JSON.parse(line));
+  const result = rows.find(r => r.message?.content?.[0]?.type === 'tool_result');
+  const text = 'User rejected tool use\nKeep going: ask me the next Frontier question now.';
+  result.message.content.push({ type: 'text', text });
+  expect(normalizeNative('claude', rows.map(r => JSON.stringify(r)).join('\n'), 'mixed.jsonl', 'fake').events)
+    .toContainEqual(expect.objectContaining({ kind: 'message', role: 'user', text }));
+});
+
+it.each([
+  ['codex', false], ['claude', false], ['claude', true],
+] as const)('%s preserves a proved nudge violation despite uncertain turns (mixed result: %s)', (client, mixed) => {
+  const f = fixture(client);
+  const rows = read(`${client}-supported.jsonl`).trim().split('\n').map(line => JSON.parse(line));
+  const text = 'Keep going: ask me the next Frontier question now.';
+  const index = rows.findIndex(r => JSON.stringify(r).includes('For task-entry'));
+  const at = '2026-01-01T02:00:08.500Z';
+  if (client === 'codex') rows.splice(index, 0, { timestamp: at, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });
+  else {
+    const content: Record<string, unknown>[] = [{ type: 'text', text }];
+    if (mixed) {
+      rows.splice(index, 0, { ...rows[1], timestamp: '2026-01-01T02:00:08.250Z', type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'extra-read', name: 'Read', input: { file_path: 'facts.txt' } }] } });
+      content.unshift({ type: 'tool_result', tool_use_id: 'extra-read', content: 'Synthetic read result' });
+    }
+    rows.splice(index + Number(mixed), 0, { ...rows[1], timestamp: at, message: { role: 'user', content } });
+  }
+  const native = normalizeNative(client, rows.map(r => JSON.stringify(r)).join('\n'), 'nudge.jsonl', 'fake');
+  const continuation = native.events.find(e => e.kind === 'message' && e.text.startsWith('For task-entry'))!;
+  f.assessment.selection.continuation = continuation.seq;
+  const record = { ...f.record, events: native.events, sessions: [native.session], missing: native.missing };
+  expect(assessAttempt(record, f.assessment, f.probes).verdicts[3]!.verdict.outcome).toBe('fail');
+  record.missing.push('native.boundaries');
+  expect(assessAttempt(record, f.assessment, f.probes).verdicts[3]!.verdict.outcome).toBe('fail');
+  // Corrupted event order cannot prove a nudge, unlike an unknown turn boundary.
+  record.missing.push('native.integrity');
+  expect(assessAttempt(record, f.assessment, f.probes).verdicts[3]!.verdict.outcome).toBe('insufficient-evidence');
 });
 
 it.each(['visibleModel', 'effort'] as const)('unknown %s blocks all passes', field => {
@@ -396,6 +458,19 @@ it('measures changed configuration and reports missing isolation observations as
   expect(isolationMeasurements(before, unavailable, { known: true, value: [] }).everydaySnapshotUnchanged.known).toBe(false);
 });
 
+it('distinguishes observed own, unexpected and unobserved databases without treating WAL-only output as proof', async () => {
+  const { openDatabases, isolationMeasurements } = await import('./isolation.ts');
+  const snapshot = { configs: {}, everyday: { known: true as const, value: [] } };
+  const measure = (output: string) => isolationMeasurements(snapshot, snapshot,
+    openDatabases(123, () => ({ known: true, value: output })), '/synthetic/maps.sqlite').servedOwnDatabase;
+  expect(measure('p123\nn/synthetic/maps.sqlite\nn/synthetic/maps.sqlite-wal\n')).toEqual({ known: true, value: true });
+  expect(measure('p123\nn/synthetic/unexpected.sqlite\n')).toEqual({ known: true, value: false });
+  expect(measure('')).toEqual({ known: false, reason: 'own service open database not observed' });
+  expect(measure('p123\nn/synthetic/maps.sqlite-wal\n')).toEqual({ known: false, reason: 'own service open database not observed' });
+  const unavailable = openDatabases(123, () => ({ known: false, reason: 'synthetic permission denial' }));
+  expect(isolationMeasurements(snapshot, snapshot, unavailable, '/synthetic/maps.sqlite').servedOwnDatabase.known).toBe(false);
+});
+
 it('links only the subscription login path, without copying or reading it', async () => {
   const { lstatSync, readlinkSync } = await import('node:fs');
   const dir = temporary(); const loginRoot = temporary();
@@ -462,9 +537,9 @@ it('does not arbitrate two settled agreeing reviews', () => {
   expect(() => verifyReviews(f.record, f.assessment, [...reviews, arbitration])).toThrow(/agree|disagree/);
 });
 
-it('does not count punctuation or whitespace changes as an independent review', () => {
+it.each([' .\n', '\u200b', '\u00ad'])('does not count punctuation, whitespace or format controls as an independent review (%j)', suffix => {
   const f = fixture('codex'); const artifacts = artifactsFor(f.record, f.assessment).slice(0, 2);
-  const output = JSON.parse(artifacts[0]!.output); output.reason = `  ${output.reason} .\n`;
+  const output = JSON.parse(artifacts[0]!.output); output.reason = `  ${output.reason}${suffix}`;
   artifacts[1]!.output = JSON.stringify(output);
   expect(() => verifyReviews(f.record, f.assessment, artifacts)).toThrow(/duplicate/);
 });
@@ -498,11 +573,11 @@ it.each(['codex', 'claude'] as const)('an assistant question followed by a block
   expect(assess(f.record, f.assessment, f.probes).verdicts[0]!.verdict.outcome).toBe('fail');
 });
 
-it('string error flags do not produce synthetic human answers', () => {
+it.each(['true', 1, 'yes'])('error flags do not produce synthetic human answers (%j)', flag => {
   const rows = [
     { timestamp: '2026-01-01T00:00:00Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'one' } },
     { timestamp: '2026-01-01T00:00:01Z', type: 'response_item', payload: { type: 'function_call', call_id: 'q', name: 'request_user_input', arguments: '{}' } },
-    { timestamp: '2026-01-01T00:00:02Z', type: 'response_item', payload: { type: 'function_call_output', call_id: 'q', output: JSON.stringify({ is_error: 'true', answers: { carrier: 'Base' } }) } },
+    { timestamp: '2026-01-01T00:00:02Z', type: 'response_item', payload: { type: 'function_call_output', call_id: 'q', output: JSON.stringify({ is_error: flag, answers: { carrier: 'Base' } }) } },
   ];
   expect(normalizeNative('codex', rows.map(row => JSON.stringify(row)).join('\n'), 'error.jsonl', 'fake').events.filter(e => e.kind === 'message')).toHaveLength(0);
 });
@@ -622,6 +697,13 @@ it('keeps stable placeholders in token fields as well as Bearer headers', async 
   const { privateText } = await import('./privacy.ts');
   expect(privateText('{"access_token":"synthetic-secret"} Bearer synthetic-secret synthetic-secret', { agent: 'synthetic-secret' }))
     .toBe('{"access_token":"<agent>"} Bearer <agent> <agent>');
+});
+
+it('only a complete placeholder is exempt from recognizable credential scrubbing', async () => {
+  const { privateText } = await import('./privacy.ts');
+  expect(privateText('Bearer <x>UnknownLoginValue987 refresh_token=<x>UnknownLoginValue987', {}))
+    .toBe('Bearer <credential> refresh_token=<credential>');
+  expect(privateText('Bearer <agent>, refresh_token=<agent>', {})).toBe('Bearer <agent>, refresh_token=<agent>');
 });
 
 it('capture annotations cannot import a human override through the shared saved-review channel', async () => {

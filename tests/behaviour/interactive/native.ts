@@ -12,8 +12,11 @@ const content = (v: unknown): string => typeof v === 'string' ? v : Array.isArra
   ? v.map(b => string(object(b).text)).filter(Boolean).join('\n') : '';
 const known = <T>(value: T): Field<T> => ({ known: true, value });
 const absent = (reason: string): Field<never> => ({ known: false, reason });
-const errorFlag = (value: unknown) => value === true || (typeof value === 'string' && value.trim().toLowerCase() === 'true');
+// Only absent or explicitly false clears the flag; malformed values cannot establish successful input.
+const errorFlag = (value: unknown) => value !== undefined && value !== false
+  && !(typeof value === 'string' && value.trim().toLowerCase() === 'false');
 const rejection = (value: string) => /^(?:error: )?user (?:rejected|denied|cancelled|canceled)/i.test(value.trim());
+const rejectionNotice = (value: string) => /^(?:error: )?user (?:rejected|denied|cancelled|canceled)(?: tool use)?[.!]?$/i.test(value.trim());
 
 export interface NativeEvidence {
   events: EventRecord[];
@@ -142,14 +145,16 @@ export function normalizeNative(client: InteractiveClient, text: string, file: s
       if (row.isMeta === true || row.isCompactSummary === true) continue;
       if (row.type === 'user' || row.type === 'assistant') {
         const blocks = Array.isArray(m.content) ? m.content : [{ type: 'text', text: m.content }];
-        const toolResults = blocks.some(b => object(b).type === 'tool_result');
-        const humanText = row.type === 'user' && !toolResults && !rejection(content(m.content)) && blocks.some(b => object(b).type === 'text');
+        // A tool result can share its row with actual user input. Exclude only recognized rejection
+        // notices, block by block; excluding the whole row would erase a nudge or a contrary answer.
+        const humanText = row.type === 'user' ? blocks.map(object)
+          .filter(b => b.type === 'text' && string(b.text).trim() && !rejectionNotice(string(b.text))).map(b => string(b.text)).join('\n') : '';
         // A missing end marker is not proof that a second human text was delivered mid-turn.
         // Keep this uncertainty on the affected events; no invented Claude delivery marker is accepted.
         if (humanText) markUncertain();
-        if (humanText && !active) start(at, string(row.uuid), content(m.content));
+        if (humanText && !active) start(at, string(row.uuid), humanText);
         for (const b of blocks.map(object)) {
-          if (b.type === 'text') { if (row.type === 'assistant' || humanText) message(row.type === 'user' ? 'user' : 'assistant', string(b.text)); }
+          if (b.type === 'text') { if (row.type === 'assistant' || !rejectionNotice(string(b.text))) message(row.type === 'user' ? 'user' : 'assistant', string(b.text)); }
           else if (b.type === 'tool_use' && row.type === 'assistant') call(string(b.id), string(b.name), b.input);
           else if (b.type === 'tool_result' && row.type === 'user') result(string(b.tool_use_id), b.content, errorFlag(b.is_error));
           else if (b.type !== 'thinking' && b.type !== 'redacted_thinking') missing.add('native.unhandled');

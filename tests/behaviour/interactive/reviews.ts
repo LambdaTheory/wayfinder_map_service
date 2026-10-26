@@ -32,7 +32,7 @@ export interface ReviewArtifact {
 export interface VerifiedReviews { readonly verified: true }
 const verified = new WeakMap<VerifiedReviews, { binding: string; readings: Review[] }>();
 const binding = (record: AttemptRecord, assessment: Assessment) => digest(reviewInput(record, assessment));
-const equivalentText = (text: string) => text.normalize('NFKC').toLocaleLowerCase('en-US').replace(/[\p{P}\p{Z}\s]+/gu, '');
+const equivalentText = (text: string) => text.normalize('NFKC').toLocaleLowerCase('en-US').replace(/[\p{P}\p{Z}\p{Cf}\s]+/gu, '');
 
 /** This is the only producer of a review handle. JSON cannot fabricate a handle or a human verdict. */
 export function verifyReviews(record: AttemptRecord, assessment: Assessment, artifacts: ReviewArtifact[]): VerifiedReviews {
