@@ -14,6 +14,7 @@ import re
 import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -357,16 +358,45 @@ def client_id(harness, model, effort):
     return re.sub(r"[^A-Za-z0-9._:-]", "-", raw)[:128]
 
 
-def agent_token(harness, model, effort):
+def record_entry(identity, harness, method, model, effort, token=None, resume_id=None):
+    """No prompts, argv, working directories or credentials. A new native session ID is not yet known."""
+    def safe(value):
+        return value if isinstance(value, str) and ID_PATTERN.fullmatch(value) and not (token and token in value) else None
+    record = {"schema": "wayfinder-launch/1", "clientId": safe(identity),
+              "credentialFingerprint": hashlib.sha256(token.encode()).hexdigest() if token else None,
+              "startedAt": datetime.now(timezone.utc).isoformat(), "pid": os.getpid(),
+              "entry": "chatgpt" if harness == "chatgpt" else ("matt" if method == "matt" else "dedicated"),
+              "harness": safe(harness), "method": safe(method), "model": safe(model), "effort": safe(effort),
+              "usage": "test" if os.environ.get("WAYFINDER_AGENT_DRY_RUN") else
+                       os.environ.get("WAYFINDER_AGENT_USAGE", "normal"),
+              "nativeSessionId": safe(resume_id), "missing": [] if safe(resume_id) else ["nativeSessionId"]}
+    if record["usage"] not in ("normal", "test", "research"):
+        record["usage"] = "unknown"
+    try:
+        SVC.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(str(SVC / "launches.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        with os.fdopen(fd, "a") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
+                raise OSError("Invalid metadata target")
+            handle.write(json.dumps(record) + "\n")
+    except OSError:
+        try:
+            say('Wayfinder launch metadata missing: 1 observation')
+        except OSError:
+            pass
+
+
+def agent_token(identity):
     """Per-launch credential, so each Revision records the harness, model and effort that wrote it.
     A service built before credentials existed refuses it; then the launch falls back to the shared token."""
     primary = ensure_service(quiet=True)
-    token, sha = register_credential(client_id(harness, model, effort), os.getpid())
+    token, sha = register_credential(identity, os.getpid())
     if probe(token)[0] == 200:
-        return token
+        return token, identity
     release_credential(sha)
     say("! 服务还不支持按来源记录，这次写入会记成 Wayfinder-Launcher。服务换到新代码后（wayfinder restart）就会分开。")
-    return primary
+    return primary, "Wayfinder-Launcher"
 
 
 # ---------------------------------------------------------------- harness setup
@@ -584,7 +614,10 @@ def launch(options, prompt=None, passthrough=(), resume_id=None, cwd=None):
     for method_name in METHODS:
         outputs_dir(method_name).mkdir(parents=True, exist_ok=True)
     cwd = Path(cwd) if cwd else start_cwd(method)
-    token = agent_token(harness, model, effort) if method == "mcp" else None
+    identity = client_id(harness, model, effort)
+    token = None
+    if method == "mcp":
+        token, identity = agent_token(identity)
     if method == "mcp":
         say("✓ Wayfinder 服务 127.0.0.1:{} · 查看页 http://127.0.0.1:{}/".format(PORT, PORT))
     say("✓ 专用 {} · {} · {} · {}".format(HARNESSES[harness]["label"], model, effort, METHODS[method]))
@@ -616,8 +649,10 @@ def launch(options, prompt=None, passthrough=(), resume_id=None, cwd=None):
         argv += list(passthrough)
     if token:
         env["WAYFINDER_TOKEN"] = token
+    env["WAYFINDER_CLIENT_ID"] = identity
     if prompt:
         argv.append(prompt)
+    record_entry(identity, harness, method, model, effort, token, resume_id)
     if os.environ.get("WAYFINDER_AGENT_DRY_RUN"):  # tests: show the launch instead of running it
         print(json.dumps({"cwd": str(cwd), "argv": argv}, ensure_ascii=False))
         return
@@ -795,10 +830,12 @@ def cmd_chatgpt(_args):
     # A service before 2.0.1 refuses the whole credentials file when it sees the toolsOnly field.
     version = probe(primary_token())[1]
     tools_only = bool(re.match(r"\d+\.\d+\.\d+$", version)) and tuple(map(int, version.split("."))) >= (2, 0, 1)
-    token, sha = register_credential("ChatGPT", os.getpid(), tools_only)
+    identity = client_id("ChatGPT", "", "")
+    token, sha = register_credential(identity, os.getpid(), tools_only)
     try:
         if probe(token)[0] != 200:
             die("服务还不支持按来源记录，先 wayfinder restart 换到新代码。")
+        record_entry(identity, "chatgpt", "mcp", None, None, token)
         env = dict(os.environ, WAYFINDER_DATABASE_PATH=database_path(), WAYFINDER_ATTACH_TOKEN=token)
         # Ctrl-C reaches the runner through the terminal; it stops the relay and tunnel, then this cleans up.
         signal.signal(signal.SIGINT, signal.SIG_IGN)

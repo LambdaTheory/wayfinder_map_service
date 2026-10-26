@@ -4,6 +4,11 @@ All notable project changes are recorded here. Historical implementation evidenc
 
 Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Release Version, covers the service and the workflow it carries; `docs/spec/mcp-sqlite.md` §14.3 says which part to raise, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion` (`1.0.0` to `3.0.0` below), and the server reported a fixed `0.1.0`.
 
+## 2.1.0 (2026-10-26)
+
+- Record private call metadata by default for every local MCP service entry, including reads, refusals, Conflicts and failures. Failed metadata writes preserve business results and expose cumulative missing observations.
+- Record dedicated-agent and ChatGPT launcher correlation using the existing Client ID and per-launch credential fingerprint, with explicit gaps for unavailable native session IDs. MCP instructions, tool metadata, results and workflow rules are unchanged apart from the required Release Version.
+
 ## 2.0.2 (2026-10-25)
 
 - Behaviour unchanged. The `wayfinder` launcher (the dedicated Codex and Claude Code entry) moved from the workspace into this repository as `scripts/wayfinder-agent/`, so it is versioned with the service and is the entry the behaviour tests exercise. It serves from the repository it lives in by default (`WAYFINDER_AGENT_CHECKOUT` still overrides), and its instruction files are now `agent-instructions.md` and `agent-instructions.matt.md`, installed into each state directory under the name its harness expects. Upstream Matt skills path is overridable with `WAYFINDER_AGENT_MATT_SKILLS`.

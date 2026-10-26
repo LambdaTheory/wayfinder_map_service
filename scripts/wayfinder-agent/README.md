@@ -68,6 +68,14 @@ wayfinder help
 - 主令牌只给启动器自己探活用，记成 `Wayfinder-Launcher`；谁借了主令牌写图，看得出来。
 - 服务还是旧代码、不认凭据文件时，这次启动退回主令牌并提示，写入记成 `Wayfinder-Launcher`；`restart` 换到新代码后就分开。
 
+## Call correlation (Release Version 2.1.0)
+
+The launcher appends private `wayfinder-launch/1` records to `launches.jsonl` in its service directory for ordinary, test and resumed launches, including the Matt entry and ChatGPT relay. The existing Client ID (`harness:model:effort`, or `ChatGPT`) remains unchanged. Its credential's SHA-256 fingerprint joins the service's default call metadata; two launches of the same Combination have different credentials and MCP session IDs. No second client identity is created. The harness also receives the same `WAYFINDER_CLIENT_ID` in its environment.
+
+Records contain the entry, harness, method, model, effort, launch time and process ID, with no prompt, arguments, working directory, token or private file path. A resumed session records its known `nativeSessionId`; a fresh native ID is not yet available and is explicitly listed in `missing`. A later analyser must obtain it from native client evidence or report the gap, rather than infer authorization from metadata. Revoking a credential does not remove its launch record.
+
+`WAYFINDER_AGENT_USAGE=normal|test|research` records an operator-provided usage label (default `normal`; dry runs use `test`; other values become `unknown`). It is evidence to corroborate, not a trusted verdict. Isolated test launchers should set `test` and the existing state/service/output overrides. A failed launch-log write emits a fixed missing-observation diagnostic and allows the launch to proceed. The service logs calls independently, regardless of launcher or usage label; details are in [the operator guide](../../docs/implementation/local-mcp-service.md#default-call-metadata-release-version-210).
+
 ## ChatGPT 测试
 
 `wayfinder chatgpt` 在前台运行产品仓库的 `scripts/local-chatgpt-test.mjs`，带 `WAYFINDER_ATTACH_TOKEN`：它不另起服务，转发到已在跑的这个服务上，照常每 30 分钟备份，Ctrl-C 关掉转发和 Cloudflare 隧道，服务继续跑。ChatGPT 和专用 Agent 能同时用同一批地图。公开地址没有用户认证，不测就关。需要产品仓库的 client-credentials 改动；没有时命令会停下说明。单独跑 `npm run serv` 仍可用，但它自己起服务，要先 `wayfinder stop`。

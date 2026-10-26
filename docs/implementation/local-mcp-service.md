@@ -10,7 +10,7 @@ Pinned Node **26.3.0** is required. Build with `npm run build`; `src/mcp-service
 npm run --silent start
 ```
 
-The command reads operator environment configuration, never caller-selected paths or authors. Use `--silent` and environment variables, not credential/private-path command arguments; the application emits fixed safe readiness/stopping/stopped or startup-failure messages only. Supply configuration privately in the operator's shell/process environment; do not commit it or include it in reports/Map content. No live token is provided here.
+The command reads operator environment configuration, never caller-selected paths or authors. Use `--silent` and environment variables, not credential/private-path command arguments; console output contains fixed safe lifecycle messages and metadata gap counters. Supply configuration privately in the operator's shell/process environment; do not commit it or include it in reports/Map content. No live token is provided here.
 
 | Variable | Requirement |
 | --- | --- |
@@ -45,6 +45,18 @@ Exactly four tools retain once-only `structuredContent` and their input/output s
 Request-body byte limit is **1,048,576 inclusive** before JSON decoding, including unknown/padding fields and UTF-8 bytes. Declared and streamed/chunked excess gets explicit HTTP 413 without parsing or publication; excess bytes are discarded without accumulating them or resetting an uploading socket before the refusal is consumable. Malformed UTF-8/JSON and protocol batches are rejected. The existing tool boundary enforces **100 commands inclusive**, not pure M1. Headers retain Node's ordinary HTTP parser bounds; the body cap is not an end-to-end latency or memory-budget guarantee.
 
 SIGINT/SIGTERM calls `stop()`: synchronously stops admission (new requests 503), completes admitted work even after disconnect, closes SDK sessions/listener and then storage. Conversation lifetime is independent of process lifetime. Forced termination or transport loss leaves receipt outcome **unknown** until authoritative current/known-history reread. No automatic retry, merge, replay, Claim takeover or memory/GitHub/offline fallback. Safe storage errors preserve busy/non-publication/unknown/restart diagnostics; unusable storage refuses all later operations until explicit process/storage restart. Protocol errors retain their numeric code but discard SDK diagnostic prose/data; exception text, causes/stacks, SQL and request bodies are not logged.
+
+## Default call metadata (Release Version 2.1.0)
+
+Every local service entry appends private JSONL observations to `<databasePath>.calls.jsonl`, including the standalone command, the dedicated launcher and an isolated test service. This is outside the SQLite transaction and does not change a Revision or MCP response. Files must be owner-only (0600), regular and single-link; symlinks and unsafe existing files are refused without changing their permissions. No configuration flag is required. The read-only viewer is outside this MCP call log.
+
+Records use `wayfinder-service-call/1`: `startedAt`, `durationMs`, `clientId`, `credentialFingerprint` (SHA-256 of the operator-issued token, never the token), `mcpSessionId`, `requestId`, `method`, `tool`, `mapId` and `result`. B01's `SessionRecord.mcpSessionIds` joins `mcpSessionId`; a tool event's string `requestId` joins the JSON-RPC request ID converted to a string. Pair these keys: request IDs alone repeat across sessions. Client IDs keep the existing authorship format; the fingerprint distinguishes simultaneous launches of the same Combination. It is correlation evidence, never proof of human authorization.
+
+Tool result classes match B01 (`read`, `committed`, `version-mismatch`, `conflict`, `input-error`, `command-rejected`, `map-exists`, `not-found`, `service-failure`, `transport-failure`). Other successful protocol requests use `ok`. SDK/protocol and authentication failures are recorded too; fields unavailable before authentication/parsing are null. Free-form or malformed IDs, unknown tool names and private paths are not copied. Only bounded ID fields and allowlisted method/tool/result names are recorded; arguments, results, prompts, rules, clientInfo prose, exceptions, SQL and raw credentials are excluded. Tool completion is recorded even when its client disconnected before receiving the result.
+
+`serviceStartedAt` and monotonic `sequence` identify a process's observation order. A failed append increments `missingObservations`, emits a safe `wayfinder-service-call-gap/1` counter to stderr, and leaves the business result unchanged. Subsequent successful records retain the cumulative count. Embedded operators can also read `service.metadataStatus()`; it returns observation and missing-observation counts without content. If stderr also fails, the in-memory counter remains, but neither crash durability nor a working disk can be promised. Readers must treat malformed/truncated lines as gaps. Logs append across restarts; no automatic rotation or deletion is introduced.
+
+See [B07 implementation and verification](service-call-metadata.md) for the launcher join, tests and disposable service evidence.
 
 ## Environment and executable evidence
 
