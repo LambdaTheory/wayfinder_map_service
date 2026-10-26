@@ -224,7 +224,9 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
       const log: (RelayObservation & { turn: number | null })[] = []; relayLogs.set(session.label, log);
       session.route = await startRoute(service.port, session.credential.token, entry => {
         log.push({ turn: session.turn ?? null, ...entry });
-        if (entry.phase === 'cut') controllerEvent('relay-cut', { tool: entry.rpc.params?.name, requestId: entry.rpc.id }, session.turn ?? null, session.label);
+        if (entry.phase === 'cut') controllerEvent('relay-cut', { method: entry.rpc.method,
+          tool: entry.rpc.method === 'tools/call' ? entry.rpc.params?.name : undefined,
+          requestId: entry.rpc.id, scope: entry.scope, trigger: entry.trigger }, session.turn ?? null, session.label);
       });
     }
     const actionRuns = new Map<ControllerAction, Promise<void>>();
@@ -237,7 +239,8 @@ export async function runAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: 
         } else if (a.action === 'cut-agent-route') {
           session.route!.cut();
           controllerEvent('route-fault-mode', { session: session.label, method: 'tools/call', status: 503,
-            forwarded: false, forwardedMethods: ['initialize', 'tools/list', 'resources/*', 'prompts/*'], mode: 'business-calls-only' }, index);
+            forwarded: false, forwardedMethods: ['initialize', 'tools/list', 'resources/*', 'prompts/*'],
+            forwardedWhen: 'envelope contains no tools/call', scope: 'whole-envelope', mode: 'tool-call-envelopes' }, index);
         }
         controllerEvent(a.action, { status: 'completed', ...(mapId ? { mapId } : {}) }, index);
       } catch (error) {

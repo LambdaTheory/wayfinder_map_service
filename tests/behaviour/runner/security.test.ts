@@ -5,7 +5,7 @@ import { chmodSync, copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, expect, test } from 'vitest';
-import { prepareSandbox, prepareSession, runTurn, writeProfile } from './codex.ts';
+import { prepareClient, prepareSandbox, prepareSession, prepareWorkdir, runTurn, writeProfile } from './codex.ts';
 import { newToken, startService } from './service.ts';
 
 const available = spawnSync('which', ['sandbox-exec']).status === 0;
@@ -86,11 +86,19 @@ console.log(JSON.stringify({ inspections, envToken: !!process.env.WAYFINDER_TOKE
 `); chmodSync(driver, 0o755);
   try {
     const profile = writeProfile(control, a, work, driver, { localPorts: [service.port] });
+    const prompt = JSON.stringify({ victimPid: victim.pid, port: service.port, credentials: join(serviceDir, 'credentials.json') });
     const result = await runTurn({ options: { model: 'fake', effort: 'low', bin: driver, sandbox: true, timeoutMs: 5000 },
       session: a, port: 1, workdir: work, profile,
-      prompt: JSON.stringify({ victimPid: victim.pid, port: service.port, credentials: join(serviceDir, 'credentials.json') }) });
+      prompt });
     expect(result.exitCode, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({ inspections: [{ executed: true, bytes: 0 }, { executed: true, bytes: 0 }], envToken: false, status: 401, fileReadable: false });
+    // A future launcher must not depend on runTurn's detached session for process privacy.
+    // spawnSync stays in the caller's session/process group.
+    const attached = spawnSync('sandbox-exec', ['-f', profile.path, driver], { cwd: work, input: prompt,
+      env: { PATH: process.env.PATH, HOME: a.home, CODEX_HOME: a.codexHome, TMPDIR: join(a.home, 'tmp') },
+      encoding: 'utf8', timeout: 5000 });
+    expect(attached.status, attached.stderr).toBe(0);
+    expect(JSON.parse(attached.stdout)).toEqual({ inspections: [{ executed: true, bytes: 0 }, { executed: true, bytes: 0 }], envToken: false, status: 401, fileReadable: false });
     expect(readFileSync(join(serviceDir, 'credentials.json'), 'utf8')).not.toContain(controller.token);
   } finally { victim.kill(); await service.stop(); rmSync(serviceDir, { recursive: true, force: true }); }
 }, 20_000);
@@ -166,7 +174,7 @@ attack('placing a client executable in the scratch cannot grant its parent and e
   expect(unsafe).toBeUndefined();
 });
 
-attack('a mutable hard link cannot import another session file into the working directory', () => {
+attack('a mutable read-only grant refuses a hard link even when its alias is inside the workdir', () => {
   const { a, b, work, control } = setup();
   const marker = join(b.home, 'private-marker'); writeFileSync(marker, 'synthetic-private');
   const alias = join(work, 'linked-auth'); linkSync(marker, alias);
@@ -199,4 +207,96 @@ attack('a Node executable placed above an Attempt cannot grant that enclosing di
   `, base], { encoding: 'utf8', timeout: 10_000 });
   expect(probe.status, probe.stderr).toBe(0);
   expect(JSON.parse(probe.stdout)).toEqual({ refused: true });
+});
+
+attack('a symlinked workdir cannot grant read or write access to caches, system temp or another HOME', () => {
+  const cache = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests'); mkdirSync(cache, { recursive: true });
+  const cached = mkdtempSync(join(cache, 'work-link-'));
+  const userTemp = spawnSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8' }).stdout.trim();
+  const temporary = mkdtempSync(join(userTemp, 'wf-behave-work-'));
+  const foreign = setup();
+  try {
+    for (const target of [cached, temporary, foreign.b.home]) {
+      const { scratch, a, work, control } = setup();
+      const marker = join(target, 'private-marker'); writeFileSync(marker, 'synthetic-private');
+      rmSync(work, { recursive: true }); symlinkSync(target, work);
+      let preparationRefused = false;
+      try { prepareWorkdir(scratch, [], root); } catch { preparationRefused = true; }
+      let unsafe: ReturnType<typeof writeProfile> | undefined;
+      try { unsafe = writeProfile(control, a, work, '/bin/sh'); } catch { /* refused before launch */ }
+      if (!unsafe) { rmSync(work); mkdirSync(work); }
+      const profile = unsafe ?? writeProfile(control, a, work, '/bin/sh');
+      expect(shell(profile.path, `cat '${marker}'`).status).not.toBe(0);
+      expect(shell(profile.path, `echo forged > '${marker}'`).status).not.toBe(0);
+      expect(readFileSync(marker, 'utf8')).toBe('synthetic-private');
+      expect(preparationRefused).toBe(true);
+      expect(unsafe).toBeUndefined();
+    }
+  } finally { rmSync(cached, { recursive: true, force: true }); rmSync(temporary, { recursive: true, force: true }); }
+});
+
+attack('a HOME replaced with a peer HOME symlink is refused before granting access', () => {
+  const { scratch, a, b, work, control } = setup();
+  const marker = join(b.home, 'private-marker'); writeFileSync(marker, 'synthetic-private');
+  rmSync(a.home, { recursive: true }); symlinkSync(b.home, a.home);
+  let unsafe: ReturnType<typeof writeProfile> | undefined;
+  try { unsafe = writeProfile(control, a, work, '/bin/sh'); } catch { /* refused before launch */ }
+  if (!unsafe) { rmSync(a.home); prepareSession(scratch, 'A', 'synthetic', clientState.loginSource); }
+  const profile = unsafe ?? writeProfile(control, a, work, '/bin/sh');
+  expect(shell(profile.path, `cat '${marker}'`).status).not.toBe(0);
+  expect(shell(profile.path, `echo forged > '${marker}'`).status).not.toBe(0);
+  expect(readFileSync(marker, 'utf8')).toBe('synthetic-private');
+  expect(unsafe).toBeUndefined();
+});
+
+attack('a client at the staging root cannot expose sibling content or grant the whole staging tree', () => {
+  const { a, b, work, control, readOnlyDir } = setup();
+  const marker = join(readOnlyDir, 'peer-login'); writeFileSync(marker, 'synthetic-private');
+  const source = join(readOnlyDir, 'client.sh'); copyFileSync('/bin/echo', source);
+  const client = prepareClient(control, source);
+  const profile = writeProfile(control, a, work, client);
+  expect(shell(profile.path, `cat '${marker}'`).status).not.toBe(0);
+  expect(client).not.toBe(source);
+  // Direct writeProfile callers cannot recreate the broad grant that prepareClient avoids.
+  for (const access of [{ bin: source }, { bin: client, readOnlyRoots: [readOnlyDir] }]) {
+    let unsafe: ReturnType<typeof writeProfile> | undefined;
+    try { unsafe = writeProfile(control, b, work, access.bin, access); } catch { /* refused before launch */ }
+    if (unsafe) expect(shell(unsafe.path, `cat '${marker}'`).status).not.toBe(0);
+    expect(unsafe).toBeUndefined();
+  }
+});
+
+attack('a client cannot probe or terminate an unrelated process but can terminate its own child', async () => {
+  const { a, work, control, readOnlyDir } = setup();
+  const victim = spawn('/bin/sleep', ['30'], { stdio: 'ignore' });
+  const driverDir = mkdtempSync(join(readOnlyDir, 'signal-'));
+  const driver = join(driverDir, 'attack.mjs');
+  writeFileSync(driver, `#!/usr/bin/env node
+import { spawn } from 'node:child_process';
+let prompt = ''; for await (const chunk of process.stdin) prompt += chunk;
+const pid = Number(prompt);
+const probe = signal => { try { process.kill(pid, signal); return 'allowed'; } catch (e) { return e.code; } };
+const external = [probe(0), probe('SIGTERM')];
+const child = spawn('/bin/sleep', ['30'], { stdio: 'ignore' });
+await new Promise(resolve => child.once('spawn', resolve));
+child.kill('SIGTERM');
+const childSignal = await new Promise(resolve => child.once('exit', (_, signal) => resolve(signal)));
+console.log(JSON.stringify({ external, childSignal }));
+`); chmodSync(driver, 0o755);
+  try {
+    const profile = writeProfile(control, a, work, driver);
+    const result = await runTurn({ options: { model: 'fake', effort: 'low', bin: driver, sandbox: true, timeoutMs: 5000 },
+      session: a, port: 1, workdir: work, profile, prompt: String(victim.pid) });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ external: ['EPERM', 'EPERM'], childSignal: 'SIGTERM' });
+    // spawnSync stays in the caller's session/process group.
+    const attached = spawnSync('sandbox-exec', ['-f', profile.path, driver], { cwd: work, input: String(victim.pid),
+      env: { PATH: process.env.PATH, HOME: a.home, CODEX_HOME: a.codexHome, TMPDIR: join(a.home, 'tmp') },
+      encoding: 'utf8', timeout: 5000 });
+    expect(attached.status, attached.stderr).toBe(0);
+    expect(JSON.parse(attached.stdout)).toEqual({ external: ['EPERM', 'EPERM'], childSignal: 'SIGTERM' });
+    expect(victim.exitCode).toBeNull();
+    expect(victim.signalCode).toBeNull();
+    expect(() => process.kill(victim.pid!, 0)).not.toThrow();
+  } finally { victim.kill(); }
 });

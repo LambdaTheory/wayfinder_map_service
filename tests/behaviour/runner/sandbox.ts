@@ -72,7 +72,8 @@ function layoutFor(controlDir: string): SandboxLayout {
 export function prepareClient(controlDir: string, bin: string): string {
   const layout = layoutFor(controlDir);
   const source = resolveBin(bin);
-  if (source === installedCodex || systemDirectories.slice(0, 4).some(p => contains(p, source)) || contains(layout.readOnlyDir, source)) return source;
+  if (source === installedCodex || systemDirectories.slice(0, 4).some(p => contains(p, source))
+    || (contains(layout.readOnlyDir, source) && dirname(source) !== layout.readOnlyDir)) return source;
   if (!lstatSync(source).isFile()) throw new IsolationError('client executable is not a regular file');
   const dir = join(layout.readOnlyDir, 'client'); mkdirSync(dir, { mode: 0o700 });
   const target = join(dir, basename(source)); copyFileSync(source, target); chmodSync(target, 0o700);
@@ -131,7 +132,9 @@ function sandboxProfile(p: Policy): string {
     ...p.denyRoots.map(root => `(deny file-write* (subpath ${q(root)}))`),
     ...p.denyEntries.map(path => `(deny file-write* (literal ${q(path)}))`),
     ...p.controlDirectories.map(root => `(deny file-read* (subpath ${q(root)}))`),
-    '(deny sysctl-read (sysctl-name-prefix "kern.proc"))', '(deny process-info* (target others))',
+    // A deny filtered by "others" leaves same-session processes accessible in an attached launch.
+    '(deny sysctl-read (sysctl-name-prefix "kern.proc"))', '(deny process-info*)', '(allow process-info* (target self))',
+    '(deny signal)', '(allow signal (target self) (target same-sandbox))',
     '(deny network-outbound (remote tcp "localhost:*") (remote udp "localhost:*"))',
     ...p.localPorts.map(port => `(allow network-outbound (remote tcp "localhost:${port}"))`),
     ...reservedPorts.map(port => `(deny network-outbound (remote ip "localhost:${port}"))`), ''].join('\n');
@@ -141,8 +144,10 @@ function sandboxProfile(p: Policy): string {
 export function writeProfile(controlDir: string, session: { home: string }, workdir: string, bin: string, access: SandboxAccess = {}): ControlProfile {
   try {
     const layout = layoutFor(controlDir);
+    if (!lstatSync(session.home).isDirectory()) throw new IsolationError('session HOME must be a real directory');
+    if (!lstatSync(workdir).isDirectory()) throw new IsolationError('workdir must be a real directory inside this Attempt');
     const home = realpathSync(session.home); workdir = realpathSync(workdir);
-    if (!contains(layout.scratch, home) || workdir !== realpathSync(join(layout.scratch, 'work')) || overlaps(home, workdir)
+    if (!contains(layout.scratch, home) || workdir !== join(layout.scratch, 'work') || overlaps(home, workdir)
       || overlaps(home, layout.readOnlyDir) || overlaps(workdir, layout.readOnlyDir)) throw new IsolationError('HOME/workdir do not belong to this Attempt');
     const controls = [...layouts.keys()].filter(p => existsSync(p));
     for (const root of installationRoots) {
@@ -152,7 +157,7 @@ export function writeProfile(controlDir: string, session: { home: string }, work
     const allowed = [home, workdir, layout.readOnlyDir, ...installationRoots];
     const grant = (path: string) => {
       const canonical = realpathSync(path);
-      if (!allowed.some(root => contains(root, canonical)) || controls.some(root => overlaps(root, canonical)))
+      if (canonical === layout.readOnlyDir || !allowed.some(root => contains(root, canonical)) || controls.some(root => overlaps(root, canonical)))
         throw new IsolationError('read grant is outside this Attempt or its exact installations');
       return canonical;
     };
@@ -171,11 +176,12 @@ export function writeProfile(controlDir: string, session: { home: string }, work
     const entries = [home, workdir, executable, ...readRoots, ...mutable, ...(access.denyWritePaths ?? []).map(p => realpathSync(p)), ...denyRoots];
     const pinnedRoots = [...new Set(entries)];
     const expectedIdentities = Object.freeze(identities(pinnedRoots, mutable));
+    const immutableHashes = treeHashes(readOnlyRoots); // Validate before reserving the exclusive profile path.
     const path = join(layout.controlDir, `${basename(home)}.sb`);
     writeFileSync(path, sandboxProfile({ home, workdir, readRoots, readFiles: [executable, ...mutable], denyRoots,
       denyEntries: Object.keys(expectedIdentities), controlDirectories: controls, localPorts: access.localPorts ?? [] }), { flag: 'wx', mode: 0o600 });
     const profile = { path, readOnlyRoots, mutableReadOnlyFiles: mutable, pinnedRoots, identities: expectedIdentities };
-    return { ...profile, hashes: Object.freeze(hashes(profile)) };
+    return { ...profile, hashes: Object.freeze({ ...immutableHashes, [path]: fileHash(path) }) };
   } catch (error) { if (error instanceof IsolationError) throw error; throw new IsolationError(`cannot prepare sandbox: ${String(error)}`); }
 }
 

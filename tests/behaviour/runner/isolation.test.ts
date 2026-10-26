@@ -1,12 +1,14 @@
 import { syntheticClientState } from './test-state.ts';
 import { spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, expect, test } from 'vitest';
 import { findRollout, prepareSandbox, prepareSession, runTurn, verifyProfile, writeProfile } from './codex.ts';
 import { isolationSnapshot, personalConfigNamesRun } from './run.ts';
-import { cleanupServiceDirectory } from './service.ts';
+import { cleanupServiceDirectory, freePort } from './service.ts';
 import { startRoute } from './relay.ts';
+import type { RelayObservation } from './relay.ts';
 
 const root = realpathSync(mkdtempSync('/private/tmp/wf-behave-isolation-'));
 const clientState = syntheticClientState(root);
@@ -69,6 +71,29 @@ test('the relay outage tells the client only a neutral gateway failure', async (
   } finally { await route.close(); }
 });
 
+test('a cut mixed RPC envelope records every dropped member, while separate resource and prompt calls forward', async () => {
+  const received: string[] = [];
+  const server = createServer(async (req, res) => {
+    let body = ''; for await (const chunk of req) body += chunk;
+    received.push(JSON.parse(body).method); res.end('ok');
+  });
+  const port = await freePort();
+  await new Promise<void>(resolve => server.listen(port, '127.0.0.1', resolve));
+  const observations: RelayObservation[] = [];
+  const route = await startRoute(port, 'synthetic', event => observations.push(event));
+  try {
+    route.cut();
+    const calls = ['tools/call', 'resources/read', 'prompts/get'].map((method, id) => ({ jsonrpc: '2.0', id, method }));
+    const send = (body: unknown) => fetch(`http://127.0.0.1:${route.port}/mcp`, { method: 'POST', body: JSON.stringify(body) });
+    const cut = await send(calls);
+    expect(cut.status).toBe(503); await cut.text();
+    expect(received).toEqual([]);
+    expect(observations.filter(e => e.phase === 'cut').map(e => e.rpc.method)).toEqual(calls.map(c => c.method));
+    for (const call of calls.slice(1)) { const response = await send(call); expect(response.status).toBe(200); await response.text(); }
+    expect(received).toEqual(['resources/read', 'prompts/get']);
+  } finally { await route.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
 // A trusted-process mutation simulates defense failure: the runner must still refuse the next launch.
 test('a changed control hash prevents the next client launch', async () => {
   const scratch = mkdtempSync(join(root, 'hash-'));
@@ -83,6 +108,20 @@ test('a changed control hash prevents the next client launch', async () => {
   expect(result.isolationFailure).toMatch(/control files changed/);
   expect(result.stdout).toBe('');
   expect(result.turnStarted).toBe(false);
+});
+
+attack('a refused immutable tree leaves no stale profile and can be prepared after correction', () => {
+  const scratch = mkdtempSync(join(root, 'retry-'));
+  const session = prepareSession(scratch, 'A', 'synthetic', clientState.loginSource);
+  const work = join(scratch, 'work'); mkdirSync(work);
+  const { controlDir, readOnlyDir } = prepareSandbox(scratch);
+  const assets = join(readOnlyDir, 'assets'); mkdirSync(assets);
+  const privateFile = join(scratch, 'private-marker'); writeFileSync(privateFile, 'synthetic-private');
+  const alias = join(assets, 'alias'); symlinkSync(privateFile, alias);
+  expect(() => writeProfile(controlDir, session, work, '/bin/sh', { readOnlyRoots: [assets] })).toThrow(/symlinks/);
+  rmSync(alias);
+  const profile = writeProfile(controlDir, session, work, '/bin/sh', { readOnlyRoots: [assets] });
+  expect(shell(profile.path, `cat '${privateFile}'`).status).not.toBe(0);
 });
 
 attack('shared profile API allows read-only roots and appends root and literal write denies', () => {

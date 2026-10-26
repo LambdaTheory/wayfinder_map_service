@@ -5,7 +5,8 @@ import { freePort } from './service.ts';
 
 export interface RpcRequest { id?: string | number; method?: string; params?: { name?: string; arguments?: Record<string, unknown> } }
 export type RelayObservation =
-  | { phase: 'request' | 'cut'; at?: string; method?: string | undefined; sessionId: string | string[] | null; rpc: RpcRequest }
+  | { phase: 'request'; at?: string; method?: string | undefined; sessionId: string | string[] | null; rpc: RpcRequest }
+  | { phase: 'cut'; sessionId: string | string[] | null; rpc: RpcRequest; scope: 'whole-envelope'; trigger: 'tools/call' }
   | { phase: 'response'; at: string; requestId: string | number | undefined; method: string | undefined;
       sessionId: string | string[] | null; status: number | undefined; body: string }
   | { phase: 'error' | 'hook-error'; requestId?: string | number | undefined; error: string };
@@ -33,7 +34,8 @@ export async function startRoute(target: number, token: string, observe: (record
       observe({ phase: 'request', at: new Date().toISOString(), method: req.method, sessionId, rpc });
       if (cut && (Array.isArray(rpc) ? rpc : [rpc]).some(call => call.method === 'tools/call')) {
         res.writeHead(503).end('Service Unavailable');
-        for (const call of Array.isArray(rpc) ? rpc : [rpc]) if (call.method === 'tools/call') observe({ phase: 'cut', sessionId, rpc: call });
+        // HTTP failure applies to the envelope, including any resource/prompt members alongside tools/call.
+        for (const call of Array.isArray(rpc) ? rpc : [rpc]) observe({ phase: 'cut', sessionId, rpc: call, scope: 'whole-envelope', trigger: 'tools/call' });
         return;
       }
       await route.before?.(rpc);

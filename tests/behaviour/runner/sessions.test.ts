@@ -196,7 +196,8 @@ describe('Controller actions and preconditions', () => {
     expect(script.judge === 'script' && script.check(record).status).toBe('holds');
     expect(mapCalls(record).some(e => e.turn === 1 && e.failed && !e.result.known)).toBe(true);
     expect(record.events.find(e => e.kind === 'controller' && e.action === 'route-fault-mode')).toMatchObject({
-      actor: 'controller', detail: { method: 'tools/call', status: 503, forwarded: false, mode: 'business-calls-only' },
+      actor: 'controller', detail: { method: 'tools/call', status: 503, forwarded: false, mode: 'tool-call-envelopes',
+        forwardedWhen: 'envelope contains no tools/call', scope: 'whole-envelope' },
     });
     expect(agentRevisions(record).every(r => r.turn === 0)).toBe(true);
     expect(record.baitClientIds).toEqual(['Bait-Credential']);

@@ -1,8 +1,7 @@
 // The Codex Driver, MCP-only Entry: one isolated HOME per session, no user config, only this run's Wayfinder
 // server, inside a sandbox that hides the service source, verdicts, personal configuration and other runs (R2).
 import { spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseLines } from './normalize.ts';
 import type { Line } from './normalize.ts';
@@ -82,8 +81,10 @@ export function clientSkills(s: CodexSession): string[] {
 }
 
 export function prepareWorkdir(scratch: string, fixtures: string[], fixturesRoot: string): string {
-  const work = join(scratch, 'work');
-  mkdirSync(work, { recursive: true });
+  const work = join(realpathSync(scratch), 'work');
+  try { mkdirSync(work, { mode: 0o700 }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  if (!lstatSync(work).isDirectory() || realpathSync(work) !== work) throw new IsolationError('workdir must be a real directory inside this Attempt');
   for (const fixture of fixtures) cpSync(join(fixturesRoot, fixture), work, { recursive: true });
   return work;
 }
