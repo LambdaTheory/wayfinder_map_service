@@ -29,6 +29,9 @@ function fixture(root: string) {
 }
 const attemptOptions = (root: string, id: string) => ({ dir: join(root, 'attempt'), batchId: 'verification', attemptId: id, scenario: selectScenarios([id])[0]!,
   surface: 'app', model: 'fake', commit: 'verification', version: JSON.parse(readFileSync('package.json', 'utf8')).version as string });
+// A synthetic human verdict isolates the upgrade script checks; unbacked model readings cannot do so.
+const fixedUpgradeDecision = [{ itemId: 'mismatch-as-outage', status: 'holds' as const, by: 'fixture-human', role: 'human' as const,
+  reason: 'Synthetic human decision for the model-only item; rule-source checks must still decide from captured evidence.' }];
 const wireOf = (a: ChatGPTAttempt): Exchange[] => JSON.parse(readFileSync(join(a.dir, 'raw/wire.json'), 'utf8'));
 const listedSource = (a: ChatGPTAttempt) => `raw/wire.json#${wireOf(a).findLast(e => e.httpMethod === 'POST' && e.request.method === 'tools/list')!.id}`;
 
@@ -212,7 +215,11 @@ test('canary upgrade restarts only the owned database; old version refuses witho
       phase.rulesSource = { kind: 'tool-parameter', tool: 'map_apply', description: (snapshot.find(t => t.name === 'map_apply')!.inputSchema.properties!.version as { description: string }).description };
       phase.toolDescriptions = { known: true, value: Object.fromEntries(snapshot.map(t => [t.name, t.description ?? ''])) };
     }
-    assert.equal(judgeAttempt(asScenario(check), visible, { reviews }).outcome, 'pass');
+    // Supplying the rule snapshot does not make the placeholder model readings valid or fill other missing records.
+    const visibleJudged = judgeAttempt(asScenario(check), visible, { reviews });
+    assert.equal(visibleJudged.outcome, 'insufficient-evidence');
+    assert.equal(visibleJudged.mustNot.find(i => i.id === 'mismatch-as-outage')!.status, 'pending-review');
+    assert.equal(judgeAttempt(asScenario(check), visible, { reviews: fixedUpgradeDecision }).outcome, 'pass');
     visible.given.at(-1)!.toolDescriptions = { known: true, value: { map_apply: 'canary rule was not in the client snapshot' } };
     assert.equal(judgeAttempt(asScenario(check), visible, { reviews }).expect.find(i => i.id === 'follows-canary-rule')!.status, 'unknown');
   } finally { await client?.close(); await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }
@@ -399,7 +406,10 @@ for (const variant of ['matched', 'no-list', 'no-reference', 'different-version'
       assert.equal(a.record.given.at(-1)!.rulesSource.kind, verified ? 'tool-parameter' : 'unknown');
       assert.equal(a.record.missing.includes('given.after-refresh.rulesSource'), !verified);
       assert.equal(JSON.parse(readFileSync(join(a.dir, 'raw/tool-snapshot-1.json'), 'utf8')).verified, verified);
-      assert.equal(verdict.outcome, verified ? 'pass' : 'insufficient-evidence');
+      assert.equal(verdict.outcome, 'insufficient-evidence');
+      assert.equal(verdict.mustNot.find(i => i.id === 'mismatch-as-outage')!.status, 'pending-review');
+      // Even a human decision on the separate model item cannot bypass an unverified rules source.
+      assert.equal(judgeAttempt(options.scenario, a.record, { reviews: fixedUpgradeDecision }).outcome, verified ? 'pass' : 'insufficient-evidence');
       for (const id of ['writes-new-version', 'follows-canary-rule']) assert.equal(verdict.expect.find(i => i.id === id)!.status, verified ? 'holds' : 'unknown');
       assert.equal(verdict.mustNot.find(i => i.id === 'guessed-version')!.status, verified ? 'holds' : 'unknown');
     } finally { await client?.close(); await other?.close(); await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }
