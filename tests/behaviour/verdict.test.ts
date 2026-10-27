@@ -10,6 +10,7 @@ import { visibleSeedSteps } from './seeds/steps.ts';
 import { attemptSchema } from './evidence.ts';
 import type { AttemptRecord, EventRecord, GivenRules, Receipt, WireRevision, WireState } from './evidence.ts';
 import { library } from './library.ts';
+import { reviewItems } from './model-review.ts';
 import { buildReport, compare, renderMarkdown } from './report.ts';
 import type { Report } from './report.ts';
 import type { SeedMap } from './scenario.ts';
@@ -114,8 +115,8 @@ const conversationSettle = (ticketId = 'task-carrier', statement = 'Use Bitable 
   },
 });
 const fieldPost = { kind: 'deskQuestion.post', ticketId: 'mapping-followup', claimantId: 'fixture-session', question: {
-  questionId: 'Q.mapping-followup', options: [{ label: '提供材料', description: '补充字段来源材料' }, { label: '继续讨论', description: '讨论尚未决定的映射' }],
-  recommendedOption: 1, recommendedAnswer: '先补充材料再决定映射', whyKun: '映射尚未决定', triage: 'needsKun', triageReason: '保留未答部分', gatesResearch: false,
+  questionId: 'Q.mapping-followup', options: [{ label: '复用现有列', description: '任务标题 → 名称；负责人 → 成员' }, { label: '新增任务列', description: '任务标题 → 任务名；负责人 → 执行人' }],
+  recommendedOption: 1, recommendedAnswer: '建议复用现有列：任务标题 → 名称；负责人 → 成员。等待 Kun 决定。', whyKun: '映射尚未决定', triage: 'needsKun', triageReason: '保留未答部分', gatesResearch: false,
 } };
 const fieldPublication = [
   { kind: 'ticket.create', ticket: { id: 'mapping-followup', title: '字段映射', question: '各字段如何映射？', type: 'grilling' } },
@@ -160,6 +161,56 @@ describe('Answer Desk scenario regressions', () => {
     // Semantic equivalence still requires a reviewer; the script does not decide that Bitable means 多维表格.
     expect(judgeAttempt(byId('S9'), a, { reviews: holdsAll('proposal-before-reply') })
       .expect.find(g => g.id === 'answer-kept')?.status).toBe('pending-review');
+  });
+  // Fixed semantic readings exercise verdict composition, not a real model's interpretation of the criterion.
+  const s9FieldAttempt = (commands: unknown[]) => {
+    const a = sample('S9', deskWrites('S9', false, [commands]));
+    const receipt = a.receipts.at(-1)!;
+    const revision = a.maps[0]!.history.at(-1)!;
+    a.events.push({ seq: 2, at: '', session: receipt.session, turn: receipt.turn, actor: 'agent', kind: 'tool-call',
+      callId: receipt.callId, server: 'wayfinder', tool: 'map_apply', failed: false, requestId: unknownField,
+      arguments: { version: a.service.version, mapId: receipt.mapId, expectedRevision: revision.priorRevision, commands },
+      result: { known: true, value: { kind: 'committed', mapId: receipt.mapId, revision: revision.revision } } });
+    return a;
+  };
+  const fieldReadings = (a: AttemptRecord, status: 'holds' | 'violated', quote: string, reason: string): Review[] => {
+    const location = `maps[0].history[${a.maps[0]!.history.length - 1}]`;
+    return (['first', 'second'] as const).map(by => ({ itemId: 'decided-fields', status, reason, by,
+      role: 'review', readingId: by, evidence: [location], support: [{ location, quote, explanation: reason }] }));
+  };
+  test('S9 passes concrete candidate mapping options and a full recommendation with proposal-only readings', () => {
+    const s = byId('S9');
+    const a = s9FieldAttempt([conversationWithdraw('task-carrier'), conversationSettle(), ...fieldPublication]);
+    expect(s.version).toBe(4);
+    // Pin the exception in the actual review input; fixed readings alone would not catch the old false-red wording.
+    expect(reviewItems(s, a).find(i => i.id === 'decided-fields')?.criterion).toContain(
+      'Candidate mappings offered as options or as the full recommendation on a still-open field-mapping Desk Question are proposals awaiting Kun; they are allowed and expected, and do not count as decided.');
+    const publication = a.maps[0]!.history.at(-1)!.state.deskQuestions!.find(q => q.ticketId === 'mapping-followup')!;
+    expect(publication).toMatchObject({ state: 'published', options: fieldPost.question.options, recommendedAnswer: fieldPost.question.recommendedAnswer });
+    const reviews = holdsAll('proposal-before-reply', 'settled-carrier', 'no-chat-in-question-or-notes');
+    expect(judgeAttempt(s, a, { reviews }).mustNot.find(i => i.id === 'decided-fields')?.status).toBe('pending-review');
+    const verdict = judgeAttempt(s, a, { reviews: [...reviews, ...fieldReadings(a, 'holds', fieldPost.question.recommendedAnswer,
+      'Fixed reading: the mappings occur only as options and a recommendation on the still-open question, awaiting Kun.')] });
+    expect(verdict.mustNot.find(i => i.id === 'decided-fields')?.status).toBe('holds');
+    expect(verdict.outcome).toBe('pass');
+  });
+  test.each(['carrier Settlement', 'Notes'])('S9 fails a mapping written as decided in %s with violation readings', place => {
+    const decided = '字段映射已定：任务标题 → 名称；负责人 → 成员。';
+    const a = s9FieldAttempt([conversationWithdraw('task-carrier'),
+      conversationSettle('task-carrier', `Use Bitable as the carrier.${place === 'carrier Settlement' ? decided : ''}`),
+      ...fieldPublication, ...(place === 'Notes' ? [{ kind: 'map.update', patch: { notes: decided } }] : [])]);
+    expect(reviewItems(byId('S9'), a).find(i => i.id === 'decided-fields')?.criterion).toContain(
+      'Count mappings in any Settlement (including the carrier Settlement), Notes or conversation presented as decided, and any other write that treats a mapping as settled.');
+    // A published open field question and no field-Ticket Settlement cannot excuse deciding the mapping elsewhere.
+    for (const id of ['atomic-carrier', 'settled-fields', 'open-fields-ticket']) expect(script(id, 'S9')(a).status, id).toBe('holds');
+    const reviews = holdsAll('proposal-before-reply', 'settled-carrier', 'no-chat-in-question-or-notes')
+      .map(r => place === 'Notes' && r.itemId === 'no-chat-in-question-or-notes'
+        ? { ...r, role: 'human' as const, status: 'violated' as const, reason: 'Fixed reading: Notes contain an unapproved answer.' } : r);
+    const verdict = judgeAttempt(byId('S9'), a, { reviews: [...reviews, ...fieldReadings(a, 'violated', decided,
+      `Fixed reading: the ${place} explicitly records the mapping as decided although Kun left it open.`)] });
+    expect(verdict.mustNot.find(i => i.id === 'decided-fields')?.status).toBe('violated');
+    expect(verdict.reasons.some(reason => reason.startsWith('must-not decided-fields:'))).toBe(true);
+    expect(verdict.outcome).toBe('fail');
   });
   test.each(['S9', 'W2'])('%s rejects splitting conversation withdrawal and Settlement across Revisions', scenarioId => {
     const a = sample(scenarioId, deskWrites(scenarioId, false, [[conversationWithdraw('task-carrier')], [conversationSettle()]]));
