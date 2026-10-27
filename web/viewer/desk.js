@@ -3,10 +3,10 @@ export function createDesk({ h, mapId, key, refresh }) {
   const element = h('section', { class: 'desk', 'aria-label': '答题台' });
   const content = h('div');
   const status = h('p', { class: 'desk-feedback', role: 'status', 'aria-live': 'polite' });
-  // This non-answering focus target survives every repaint. Only deliberate question
-  // selection (or a successful explicit answer) resumes global shortcuts after focus loss.
+  // This non-answering focus target survives every repaint. Shortcut authority is
+  // an explicit question selection in this UI version, never the default card.
   const shortcutPause = h('p', { class: 'desk-warning', role: 'status', tabindex: '-1', hidden: true },
-    '答题台已更新，快捷键已暂停。请重新选择题目后继续，或直接选择选项、打开文字答复。');
+    '快捷键已暂停。请点击当前题目或在待答列表中选择题目后继续；也可直接选择选项、打开文字答复。');
   const dialog = h('dialog', { class: 'desk-dialog', 'aria-label': '确认答复' });
   element.append(status, shortcutPause, content, dialog);
   const names = { pending: '待答', answered: '已答 · 等待取走', taken: '已取走 · 等待结算', settled: '已结算', withdrawn: '已撤回', superseded_by_reopen: '已重开 · 旧题留档' };
@@ -14,6 +14,8 @@ export function createDesk({ h, mapId, key, refresh }) {
   const identity = q => `${q.questionId}/${q.questionVersion}`;
   const choiceText = choice => !choice ? '尚未回答' : 'text' in choice ? choice.text : `${choice.option}. ${choice.label}`;
   let data = null, fingerprint = '', active = null, changedQuestion = null, busy = false, editor = null;
+  let uiVersion = 0, explicitSelection = null;
+  const interactive = 'button,input,textarea,select,a,summary,[contenteditable],[role="button"],[role="link"]';
   const selected = new Set();
   const button = (label, fn, props = {}) => {
     const b = h('button', { type: 'button', ...props }, label); b.onclick = fn; return b;
@@ -22,13 +24,27 @@ export function createDesk({ h, mapId, key, refresh }) {
   const notice = message => { status.textContent = message; };
   const title = q => h('span', null, h('code', null, q.ticketId), ` · 第 ${q.questionVersion} 版`);
   const answer = (q, choice) => ({ questionId: q.questionId, questionVersion: q.questionVersion, choice });
+  function pauseShortcuts() {
+    uiVersion++; explicitSelection = null; shortcutPause.hidden = !key;
+  }
+  const hasSelection = () => explicitSelection?.question === active && explicitSelection?.version === uiVersion;
+  const hasQuestionFocus = () => !!document.activeElement?.closest('.desk-question') && content.contains(document.activeElement);
   function chooseQuestion(q) {
-    shortcutPause.hidden = true;
     changedQuestion = null; active = q ? identity(q) : null; render();
     const card = content.querySelector('.desk-question');
     card.focus(); card.scrollIntoView({ block: 'nearest' });
+    if (q && live(q)) { explicitSelection = { question: identity(q), version: uiVersion }; shortcutPause.hidden = true; }
   }
-  function closeEditor() { editor = null; dialog.close(); dialog.replaceChildren(); }
+  function closeEditor() {
+    editor = null;
+    if (dialog.open) {
+      pauseShortcuts(); dialog.close();
+      // The opener may have been replaced while the modal held focus. Even a
+      // successful answer authorizes no shortcut on the newly displayed card.
+      if (!element.hidden && key) shortcutPause.focus({ preventScroll: true });
+    }
+    dialog.replaceChildren();
+  }
   dialog.addEventListener('cancel', event => { event.preventDefault(); if (!busy) closeEditor(); });
 
   async function write(payload) {
@@ -56,7 +72,7 @@ export function createDesk({ h, mapId, key, refresh }) {
     return ok;
   }
   async function submit(q, choice) {
-    if (await write({ action: 'answer', submissions: [answer(q, choice)] })) { shortcutPause.hidden = true; active = null; render(); }
+    if (await write({ action: 'answer', submissions: [answer(q, choice)] })) { active = null; render(); }
   }
   function openText(q) {
     if (!canWrite()) return;
@@ -138,10 +154,10 @@ export function createDesk({ h, mapId, key, refresh }) {
       title(changedQuestion), h('h2', null, '问题已变，请重新选择题目后再回答。'),
       h('p', null, `刚才查看：${changedQuestion.question}`),
       h('p', null, '这道题已撤回、替换或结算。答复已暂停；请重新选题，或确认后查看当前题目。'),
-      button('已了解，查看当前题目', () => chooseQuestion(data.deskQuestions.find(q => q.state === 'pending'))));
+      button('已了解，查看当前题目', () => chooseQuestion(null)));
     if (!q) return h('article', { class: 'desk-question card-box', tabindex: '-1' }, h('h2', null, '当前没有待答题'), h('p', { class: 'desk-muted' }, 'agent 发布新题后会出现在这里。已答题的处理进度在下方。'));
     const context = data.reopenContexts.find(c => c.ticketId === q.ticketId);
-    return h('article', { class: 'desk-question card-box', tabindex: '-1' }, title(q), h('h2', null, q.question),
+    const card = h('article', { class: 'desk-question card-box', tabindex: '-1' }, title(q), h('h2', null, q.question),
       h('p', { class: 'desk-impact' }, `解锁 ${q.immediateUnlocks} 题 · 下游未定 ${q.downstreamUnsettled} 题${q.gatesResearch ? ' · 决定是否开展长调研' : ''}`),
       h('p', null, h('strong', null, '为什么需要你：'), q.whyKun),
       h('p', { class: 'desk-muted' }, `${q.triage === 'needsKun' ? '需要你看' : '照推荐即可'} · ${q.triageReason}`),
@@ -154,12 +170,16 @@ export function createDesk({ h, mapId, key, refresh }) {
         i + 1 === q.recommendedOption && h('small', null, '推荐'), i + 1 === q.requestedOption && h('small', null, 'Kun 要求'),
       ], () => submit(q, { option: i + 1 }), { class: 'desk-option', disabled: !canWrite() }))),
       button('写文字答复 · t', () => openText(q), { disabled: !canWrite() }),
-      h('p', { class: 'desk-muted' }, '选中即提交 · Enter 推荐 · 1–3 选择 · t 文字。打开、查看和取消都不会作答。'));
+      h('p', { class: 'desk-muted' }, '选项选中即提交 · 明确选题后：Enter 推荐 · 1–3 选择 · t 文字。打开、查看和取消都不会作答。'));
+    card.onclick = event => { if (!event.target.closest(interactive)) chooseQuestion(q); };
+    return card;
   }
-  function render(polling = false) {
+  function render() {
     if (!data) return;
-    const losesFocus = polling && content.contains(document.activeElement);
-    if (losesFocus) shortcutPause.hidden = false;
+    const losesFocus = content.contains(document.activeElement);
+    // Every repaint invalidates intent, regardless of where focus currently is
+    // (including a dialog or BODY). Unchanged polls never call render.
+    pauseShortcuts();
     const pending = data.deskQuestions.filter(q => q.state === 'pending');
     const current = changedQuestion ? null : data.deskQuestions.find(q => identity(q) === active && live(q)) ?? pending[0];
     active = current ? identity(current) : null;
@@ -205,25 +225,43 @@ export function createDesk({ h, mapId, key, refresh }) {
       h('div', { class: 'desk-summary' }, h('span', null, `待答 ${pending.length} · 已答 ${count('answered')} · 已取走 ${count('taken')} · 已结算 ${count('settled')}`),
         h('span', { class: 'desk-muted' }, data.quietUntil && Date.parse(data.quietUntil) > Date.now() ? `本轮最早可取走：${new Date(data.quietUntil).toLocaleTimeString()}` : '答复取走后仍需 agent 结算')),
       h('div', { class: 'desk-layout' }, queue, questionCard(current)), bulk, requests, history, settled);
-    if (losesFocus) shortcutPause.focus({ preventScroll: true });
+    if (losesFocus && !dialog.open && !element.hidden && key) shortcutPause.focus({ preventScroll: true });
   }
   const keydown = event => {
-    if (element.hidden || dialog.open || !shortcutPause.hidden || !canWrite() || event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey
-      || event.target.closest('button,input,textarea,select,a,summary,[contenteditable],[role="button"],[role="link"]')) return;
+    if (element.hidden || dialog.open || event.target.closest(interactive)) return;
+    // Also check focus synchronously: browser focusout delivery after node removal
+    // is not reliable, and a page/root Enter must never inherit the last selection.
+    if (!hasQuestionFocus()) pauseShortcuts();
+    if (!hasSelection() || !canWrite() || event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return;
     const q = data?.deskQuestions.find(q => identity(q) === active && live(q)); if (!q) return;
     const option = event.key === 'Enter' ? q.recommendedOption : /^[1-3]$/.test(event.key) ? Number(event.key) : null;
     if (option && q.options[option - 1]) { event.preventDefault(); submit(q, { option }); }
     else if (event.key.toLowerCase() === 't') { event.preventDefault(); openText(q); }
   };
+  const focusout = event => {
+    // Native focus transfer temporarily exposes BODY before the destination gains
+    // focus. Respect that destination so the notice cannot move a clicked control.
+    if (event.relatedTarget?.closest(`.desk-question,dialog,${interactive}`)) return;
+    queueMicrotask(() => { if (!dialog.open && !hasQuestionFocus()) pauseShortcuts(); });
+  };
+  const windowFocus = () => pauseShortcuts();
   document.addEventListener('keydown', keydown);
-  return { element, destroy() { closeEditor(); element.remove(); document.removeEventListener('keydown', keydown); }, update(next) {
+  document.addEventListener('focusout', focusout);
+  document.addEventListener('visibilitychange', windowFocus);
+  window.addEventListener('focus', windowFocus);
+  window.addEventListener('blur', windowFocus);
+  return { element, destroy() {
+    closeEditor(); element.remove(); document.removeEventListener('keydown', keydown);
+    document.removeEventListener('focusout', focusout); document.removeEventListener('visibilitychange', windowFocus);
+    window.removeEventListener('focus', windowFocus); window.removeEventListener('blur', windowFocus);
+  }, update(next, revision) {
     if (!next) return;
     // Polling must never silently move a pending keystroke onto a different publication.
     // Keep the interruption across subsequent polls, including when no pending question remains.
     if (active && !next.deskQuestions.some(q => identity(q) === active && live(q))) {
       changedQuestion = data.deskQuestions.find(q => identity(q) === active); active = null;
     }
-    data = next; const nextFingerprint = JSON.stringify(next);
-    if (fingerprint !== nextFingerprint) { fingerprint = nextFingerprint; render(true); updateEditor(); }
+    data = next; const nextFingerprint = JSON.stringify([revision, next]);
+    if (fingerprint !== nextFingerprint) { fingerprint = nextFingerprint; render(); updateEditor(); }
   } };
 }

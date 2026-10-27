@@ -105,7 +105,7 @@
     // If drawing fails, keep asking for this Revision rather than calling a half-drawn page current.
     try {
       if (!previous || previous.revision !== next.revision || deskChanged) renderMap(previous);
-      deskController?.update(next.desk);
+      deskController?.update(next.desk, next.revision);
     }
     catch (error) { view = previous; throw error; }
   }
@@ -170,7 +170,7 @@
     if (deskController && $('main').contains(deskController.element)) {
       $('main').querySelector('.map-drawing').replaceWith(drawing);
       drawing.hidden = deskMode;
-      deskController.update(view.desk);
+      deskController.update(view.desk, view.revision);
     } else if (deskController) {
       const graphButton = h('button', { type: 'button' }, '地图');
       const deskButton = h('button', { type: 'button' }, '答题台');
@@ -181,7 +181,7 @@
       };
       graphButton.onclick = () => switchMode(false); deskButton.onclick = () => switchMode(true);
       $('main').replaceChildren(h('nav', { class: 'desk-tabs', 'aria-label': '地图视图' }, graphButton, deskButton), deskController.element, drawing);
-      deskController.update(view.desk);
+      deskController.update(view.desk, view.revision);
       switchMode(deskMode);
     } else $('main').replaceChildren(drawing);
     const newGraph = $('main').querySelector('.graph');

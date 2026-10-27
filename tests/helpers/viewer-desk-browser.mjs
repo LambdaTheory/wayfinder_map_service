@@ -85,7 +85,7 @@ async function verifyFocusAndChangedQuestions(context, origin, key) {
     assert.equal(questions().find(q => q.ticketId === 'B').currentAnswer.choice.option, 2);
     await tabTo(page, page.locator('.desk-question .desk-option').nth(2)); await page.keyboard.press('Enter'); await expectCard('C');
     assert.equal(questions().find(q => q.ticketId === 'A').currentAnswer.choice.option, 3);
-    await bodyKey('Enter'); await page.locator('.desk-summary').getByText(/已答 3/).waitFor();
+    await queue('C').click(); await page.keyboard.press('Enter'); await page.locator('.desk-summary').getByText(/已答 3/).waitFor();
     assert.equal(questions().find(q => q.ticketId === 'C').currentAnswer.choice.option, 1);
 
     // Replacement keeps the old reading context until a deliberate new selection.
@@ -105,7 +105,7 @@ async function verifyFocusAndChangedQuestions(context, origin, key) {
     assert(await interrupted.isVisible());
     await tabTo(page, queue('D')); await page.keyboard.press('Enter'); await expectCard('D');
     assert.equal(count(), before); assert.equal(writes, beforeWrites);
-    await bodyKey('1'); await expectCard('E');
+    await page.keyboard.press('1'); await expectCard('E');
     const latest = questions().find(q => q.ticketId === 'D' && q.questionVersion === 2);
     assert.equal(latest.currentAnswer.choice.label, 'Three');
 
@@ -116,7 +116,7 @@ async function verifyFocusAndChangedQuestions(context, origin, key) {
     await bodyKey('Enter'); assert.equal(count(), before + 1); assert.equal(writes, beforeWrites + 1);
     await tabTo(page, queue('F')); await page.keyboard.press('Enter'); await expectCard('F');
     assert.equal(count(), before + 1);
-    await bodyKey('2'); await page.locator('.desk-summary').getByText(/已答 5/).waitFor();
+    await page.keyboard.press('2'); await page.locator('.desk-summary').getByText(/已答 5/).waitFor();
     // Settlement of the answer being edited also requires deliberate navigation.
     await page.locator('.desk-answer').filter({ hasText: 'Question B?' }).getByRole('button', { name: '修改答复' }).click();
     fakeTime += 15000; storage.desk.takeEligible(id, 'synthetic-worker');
@@ -181,6 +181,118 @@ async function verifyFocusAcrossPolling(context, origin, key) {
     } finally { await page.close(); }
   }
 }
+async function verifyDialogAndWriteInvalidation(context, origin, key) {
+  // Each case starts with a deliberately selected question. The dialog operation
+  // may write its own answer/request; the subsequent global keys must add nothing.
+  for (const kind of ['text', 'bulk', 'reopen']) for (const change of ['publication', 'taken', 'none']) for (const close of ['escape', 'cancel', 'confirm']) {
+    const id = `Synthetic.Dialog.${kind}.${change}.${close}`;
+    const created = prepareCreate({ id, title: 'Dialog selection regression', destination: 'No unintended answers', author });
+    assert.equal(created.kind, 'ok'); await storage.adapter.commit(created.value);
+    const mutate = commands => apply(commands, undefined, id);
+    await mutate(['A', 'B', 'Source'].flatMap(name => [create(name, name, `Question ${name}?`), claim(name), post(name, 'One', name === 'B' ? 'followRecommendation' : 'needsKun')]));
+    await mutate([create('Previous', 'Previous', 'Previous?'), claim('Previous'), settle('Previous')]);
+    storage.desk.submitAnswers(id, [{ questionId: 'Q.Source', questionVersion: 1, choice: { option: 1 } }]);
+    const count = () => storage.desk.read(id).answers.length;
+    const page = await context.newPage(); page.setDefaultTimeout(10000);
+    let writes = 0;
+    page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/desk')) writes++; });
+    const queue = name => page.locator('.desk-queue-item').filter({ hasText: `Question ${name}?` });
+    const paused = page.locator('.desk > .desk-warning');
+    const nextPoll = () => page.waitForResponse(response => response.url().includes(`/api/maps/${id}/view?`));
+    try {
+      await page.goto(`${origin}/maps/${id}#key=${key}`); await queue('A').click();
+      if (kind === 'text') {
+        await page.getByRole('button', { name: '写文字答复 · t' }).click();
+        await page.getByRole('textbox', { name: '文字答复', exact: true }).fill('Explicit text answer');
+      } else if (kind === 'bulk') {
+        await page.locator('.desk-bulk summary').click(); await page.locator('.desk-bulk input').check();
+        await page.getByRole('button', { name: '查看所选完整答案并确认' }).click();
+      } else {
+        await page.getByRole('button', { name: '请求重开', exact: true }).click();
+        await page.getByRole('textbox', { name: '重开原因和希望的答案' }).fill('Explicit reopen request');
+      }
+      if (change === 'publication') {
+        await mutate([create('C', 'C', 'Question C?'), claim('C'), post('C', 'One')]); await queue('C').waitFor();
+      } else if (change === 'taken') {
+        fakeTime += 15000; storage.desk.takeEligible(id, 'synthetic-worker');
+        await page.locator('.desk-answer.taken').filter({ hasText: 'Source' }).waitFor();
+      }
+      assert(await page.locator('dialog').evaluate(d => d.contains(document.activeElement)), 'Polling must preserve dialog focus');
+      if (close === 'escape') await page.keyboard.press('Escape');
+      else if (close === 'cancel') await page.getByRole('button', { name: '取消', exact: true }).click();
+      else await page.getByRole('button', { name: kind === 'text' ? '提交文字答复' : kind === 'bulk' ? '确认这 1 题的完整推荐答案' : '提交重开请求', exact: true }).click();
+      await page.locator('dialog[open]').waitFor({ state: 'detached' });
+      // Wait for the explicit write's refresh to finish before measuring the next key.
+      if (close === 'confirm') await page.locator('.desk-question .desk-option').first().waitFor();
+      const before = count(), beforeWrites = writes;
+      assert.equal(before, 1 + Number(close === 'confirm' && kind !== 'reopen'));
+      assert.equal(beforeWrites, Number(close === 'confirm'));
+      for (const shortcut of ['Enter', '1', '2', '3', 't']) await page.keyboard.press(shortcut);
+      await nextPoll();
+      assert.equal(count(), before, `${kind}/${change}/${close}: shortcut stored an extra answer`);
+      assert.equal(writes, beforeWrites, `${kind}/${change}/${close}: shortcut sent an extra POST`);
+      assert(await paused.isVisible()); assert.equal(await page.locator('dialog[open]').count(), 0);
+      // Fresh keyboard selection is the positive control, and does not itself answer.
+      const target = kind === 'text' && close === 'confirm' ? 'B' : 'A';
+      await tabTo(page, queue(target)); await page.keyboard.press('Enter');
+      assert.equal(writes, beforeWrites); assert(!(await paused.isVisible()));
+      await page.keyboard.press('Enter');
+      await page.locator('.desk-answer.answered').filter({ hasText: `Question ${target}?` }).waitFor();
+      assert.equal(count(), before + 1); assert.equal(writes, beforeWrites + 1);
+      console.log(`Dialog selection passed: ${kind}/${change}/${close}`);
+    } finally { await page.close(); }
+  }
+}
+async function verifySelectionLifecycle(context, origin, key) {
+  const id = 'Synthetic.Selection';
+  const created = prepareCreate({ id, title: 'Selection lifecycle', destination: 'Only deliberate shortcuts', author });
+  assert.equal(created.kind, 'ok'); await storage.adapter.commit(created.value);
+  const mutate = commands => apply(commands, undefined, id);
+  await mutate(['A', 'B'].flatMap(name => [create(name, name, `Question ${name}?`), claim(name), post(name, 'One')]));
+  await mutate([create('Previous', 'Previous', 'Previous?'), claim('Previous'), settle('Previous')]);
+  const page = await context.newPage(); page.setDefaultTimeout(10000);
+  let writes = 0;
+  page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/desk')) writes++; });
+  const queue = name => page.locator('.desk-queue-item').filter({ hasText: `Question ${name}?` });
+  const nextPoll = () => page.waitForResponse(response => response.url().includes(`/api/maps/${id}/view?`));
+  const expectPaused = async () => {
+    const before = storage.desk.read(id).answers.length, beforeWrites = writes;
+    for (const key of ['Enter', '1', '2', '3', 't']) await page.keyboard.press(key);
+    await nextPoll();
+    assert.equal(storage.desk.read(id).answers.length, before); assert.equal(writes, beforeWrites);
+    assert(await page.locator('.desk > .desk-warning').isVisible());
+    assert.equal(await page.locator('dialog[open]').count(), 0);
+  };
+  try {
+    await page.goto(`${origin}/maps/${id}#key=${key}`); await queue('A').waitFor(); await expectPaused();
+    await queue('A').click(); await page.locator('body').click({ position: { x: 2, y: 2 } }); await expectPaused();
+    await queue('A').click();
+    // Native blur to BODY also invalidates a selection without a repaint.
+    await page.evaluate(() => document.activeElement.blur()); await expectPaused();
+    await queue('A').click();
+    await page.evaluate(() => { const root = document.querySelector('#main'); root.tabIndex = -1; root.focus(); }); await expectPaused();
+    await queue('A').click();
+    // Exercise both window event paths, even when the browser retains card focus.
+    await page.evaluate(() => { window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus')); }); await expectPaused();
+    await queue('A').click(); await mutate([{ kind: 'map.update', patch: { title: 'Revision changed without desk changes' } }]);
+    await page.getByRole('heading', { name: 'Revision changed without desk changes', exact: true }).waitFor(); await expectPaused();
+    // Clicking the visible question is explicit selection; unchanged polling preserves it.
+    await page.locator('.desk-question h2').click(); await nextPoll(); await page.keyboard.press('Enter');
+    await page.locator('.desk-summary').getByText(/已答 1/).waitFor(); await expectPaused();
+    assert.equal(writes, 1);
+    await queue('B').click(); await page.getByRole('button', { name: '请求重开', exact: true }).click();
+    await page.getByRole('textbox', { name: '重开原因和希望的答案' }).fill('Reopen without polling');
+    await page.getByRole('button', { name: '提交重开请求', exact: true }).click();
+    await page.getByRole('button', { name: '撤销重开请求', exact: true }).waitFor(); await expectPaused();
+    assert.equal(writes, 2); assert.equal(storage.desk.read(id).reopenRequests.length, 1);
+    await queue('B').click(); await page.getByRole('button', { name: '撤销重开请求', exact: true }).click();
+    await page.getByRole('button', { name: '撤销重开请求', exact: true }).waitFor({ state: 'detached' }); await expectPaused();
+    assert.equal(writes, 3); assert.equal(storage.desk.inspect(id).desk.reopenRequests.length, 0);
+    await tabTo(page, queue('B')); await page.keyboard.press('Enter'); assert.equal(writes, 3);
+    await page.keyboard.press('Enter'); await page.locator('.desk-summary').getByText(/已答 2/).waitFor(); assert.equal(writes, 4);
+    console.log('Selection lifecycle passed: initial/root/blur/window/revision/write/reopen/cancel; explicit selection survives unchanged poll.');
+  } finally { await page.close(); }
+}
 try {
   const created = prepareCreate({ id: mapId, title: '答题台 · 合成示例', destination: '验证关键选择，形成一份可以执行的计划', author });
   await storage.adapter.commit(created.value);
@@ -195,8 +307,12 @@ try {
   service = await serveLocalMcp(storage, config);
   browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1280, height: 960 }, colorScheme: 'light' });
-  const page = await context.newPage(); page.setDefaultTimeout(10000); const errors = []; page.on('pageerror', error => errors.push(error.message));
-  page.on('console', message => { if (message.type() === 'error' && !message.text().includes('server responded with a status')) errors.push(message.text()); });
+  const errors = [];
+  context.on('page', page => {
+    page.on('pageerror', error => errors.push(error.message));
+    page.on('console', message => { if (message.type() === 'error' && !message.text().includes('server responded with a status')) errors.push(message.text()); });
+  });
+  const page = await context.newPage(); page.setDefaultTimeout(10000);
   const key = readFileSync(keyPath, 'utf8'); const url = `http://127.0.0.1:${port}/maps/${mapId}`;
   await page.goto(`${url}#key=${key}`); await page.locator('.desk-question h2').waitFor();
   assert.equal(new URL(page.url()).hash, ''); assert.equal(answerCount(), 0);
@@ -209,6 +325,8 @@ try {
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.screenshot({ path: join(output, '375px.png'), fullPage: true });
   await page.setViewportSize({ width: 1280, height: 960 }); await page.waitForTimeout(250);
+  await verifyDialogAndWriteInvalidation(context, `http://127.0.0.1:${port}`, key);
+  await verifySelectionLifecycle(context, `http://127.0.0.1:${port}`, key);
   await verifyFocusAcrossPolling(context, `http://127.0.0.1:${port}`, key);
   await verifyFocusAndChangedQuestions(context, `http://127.0.0.1:${port}`, key);
   // Viewing and cancelling do nothing; whitespace is disabled; drafts survive desk-only polling.
@@ -224,9 +342,9 @@ try {
   assert(await page.locator('dialog').evaluate(d => d.matches(':modal'))); assert.equal(await text.inputValue(), '需要补充依据');
   await page.getByRole('button', { name: '取消', exact: true }).click(); assert.equal(answerCount(), 1);
   // Key 2, Enter recommendation, then selected-only bulk confirmation.
-  await page.locator('body').click({ position: { x: 2, y: 2 } }); await page.keyboard.press('2');
+  await page.locator('.desk-queue-item').filter({ hasText: '第一轮先验证多大范围？' }).click(); await page.keyboard.press('2');
   await page.locator('.desk-summary').getByText(/已答 2/).waitFor(); assert.equal(inspect().deskQuestions.find(q => q.ticketId === 'Scope').currentAnswer.choice.option, 2);
-  await page.locator('body').click({ position: { x: 2, y: 2 } }); await page.keyboard.press('Enter');
+  await page.locator('.desk-queue-item').filter({ hasText: '要先做一轮方法比较吗？' }).click(); await page.keyboard.press('Enter');
   await page.locator('.desk-summary').getByText(/已答 3/).waitFor();
   await page.locator('.desk-bulk summary').click(); await page.locator('.desk-bulk input').check();
   await page.getByRole('button', { name: '查看所选完整答案并确认' }).click(); assert.equal(answerCount(), 3);
@@ -281,7 +399,7 @@ try {
   await page.locator('.desk-queue-item').filter({ hasText: '重开后确认哪个方案？' }).click();
   await page.locator('.desk-requested').getByText('Kun 要求：2 · 推荐：1。标记不是答案，仍需选择。', { exact: true }).waitFor();
   assert.equal(answerCount(), beforeMarker); assert.equal(inspect().deskQuestions.find(q => q.ticketId === 'Requested' && q.questionVersion === 2).currentAnswer, null);
-  await page.locator('body').click({ position: { x: 2, y: 2 } }); await page.keyboard.press('Enter');
+  await page.keyboard.press('Enter');
   await page.locator('.desk-answer.answered').filter({ hasText: 'Requested' }).waitFor();
   const confirmed = inspect().deskQuestions.find(q => q.ticketId === 'Requested' && q.questionVersion === 2).currentAnswer;
   assert.equal(confirmed.choice.option, 1); fakeTime += 15000; storage.desk.takeEligible(mapId, 'synthetic-worker');
@@ -321,7 +439,7 @@ try {
     assert.equal(await page.locator('.desk').count(), 0);
   }
   assert.equal((await page.request.post(`http://127.0.0.1:${port}/api/desk`, { data: {} })).status(), 404);
-  console.log('Browser evidence passed: light/dark/375px; fragment/storage; Tab/Enter queue/text/options; six polling/focus interleavings; changed-question pause and deliberate selection; keyboard/text/bulk/edit; live polling; stale reopen list; cancellation; Taken/Settled; requested-option marker and text context; restart; disabled UI and preserved fragments.');
+  console.log('Browser evidence passed: light/dark/375px; fragment/storage; Tab/Enter queue/text/options; six polling/focus interleavings; 27 dialog interleavings; root/window/revision/write/reopen selection invalidation; explicit selection and unchanged-poll positive controls; changed-question pause; keyboard/text/bulk/edit; live polling; stale reopen list; cancellation; Taken/Settled; requested-option marker and text context; restart; disabled UI and preserved fragments; no script/CSP errors across all pages.');
 } finally {
   await browser?.close(); await service?.stop(); storage.close(); rmSync(directory, { recursive: true, force: true });
 }
