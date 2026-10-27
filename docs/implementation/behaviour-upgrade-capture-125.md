@@ -256,3 +256,79 @@ Third-review final validation used Node **26.3.0**: `npm run build`,
 timeout override), `npm run typecheck` and `git diff --check` passed. The earlier
 three-file focused run passed 240 tests; the final full run includes the later
 rediscovery regression and all earlier capture/lifecycle/verdict controls.
+
+## Fourth-review repair: preserve proven sources across native phases
+
+The second re-reviews ([Codex](https://github.com/kun-g/wayfinder_map_service/pull/147#issuecomment-6446084097),
+[Claude](https://github.com/kun-g/wayfinder_map_service/pull/147#issuecomment-6446605768))
+found two remaining false failures and two related unnecessary unknown results.
+The rule remains unchanged: uncertain position cannot support a definite result;
+proven exposure still supports a definite result after later incomplete evidence.
+
+- Missing restart: native new-version discovery and Resource reads are retained
+  at their own positions as `after-refresh` observations, without manufacturing
+  a service restart. `guessed-version` preserves the missing-restart reason for
+  writes of the current release. A definite unrelated `7.7.7` guess still fails.
+  Descriptions shared by both contracts and known old-version Resource reads
+  do not establish a new-version source.
+- Q8: an old tool set completed after a successful Resource read cannot replace
+  that source. Initial-phase boundaries stop before the recorded restart.
+  Retry attestation and committed-version checks inspect every earlier source
+  in the same native turn, including unsorted captured phases.
+- Q7 and Q6: a later unpositioned rediscovery or a later Resource read with lost
+  contents cannot erase an earlier proven Resource. Version writes, final
+  replies and the Ticket title rule keep their definite conclusions. Resource
+  provenance is checked at the original read, not the later phase's position.
+  An earlier unknown interval and later proven violations remain enforceable.
+
+The cross-phase lookup requires matching native session and turn identifiers.
+Legacy adapters without those identifiers retain their latest-phase boundary:
+in particular, an older ChatGPT phase cannot supply the new chat's missing
+snapshot. Its existing negative control passes unchanged. No Scenario,
+criterion, shared normalizer, shipped path or Release Version changes.
+
+| Regression | Before | After |
+| --- | --- | --- |
+| Complete old/new native discovery, missing restart | `guessed-version=violated` | `unknown`, restart reason retained; complete-restart control `holds` |
+| Q8: old descriptions complete after proven Resource | `invalid-recovery` / `writes-new-version=violated` | both `holds`; stale retry still `violated` |
+| Q7: proven Resource, later unpositioned discovery | write / reply `unknown` | both `holds`; later plain reply still `violated` |
+| Q6: proven Resource, later lost Resource contents | write / reply `unknown` | both `holds`; later plain reply still `violated` |
+| Ticket rule exposure followed by each of those later phases | `unknown` | `holds` |
+
+Each repaired shape failed before its repair. The capture suite now has **47
+tests**, including shared-description and old-Resource controls for initial
+capture before the restart is recorded. One older positive control had encoded the same overcorrection:
+positioned new instructions followed by an uncorroborated Resource expected
+`writes-new-version=unknown`. It now requires `holds`; its genuinely unpositioned
+counterpart still requires `unknown` and the original reason. The two existing
+independent Codex reproduction scripts each pass **6/6**. Claude's original
+eight-case probe was rerun with assertions added for the required Q6/Q7/Q8
+results; those cases and their controls pass. Its earlier five-case probe also
+passes with assertions on the unpositioned-Resource and process-fallback cases.
+
+The fourth B02c replay changes only `given` and its matching missing-field paths
+in a private copy. All four reconstructed observations and missing-field lists,
+and the entire report, are identical to the third replay. Both cells remain
+`insufficient-evidence`: `exact-history` and `guessed-version` hold in all four
+Attempts; `upgrade-evidence` holds in process-1, process-2 and resume-2, while
+resume-1 still lacks native rediscovery. All four still need the independent
+`mismatch-as-outage` readings; no model review was generated.
+
+The Codex reviewer's missing-restart fault injection was also repeated in memory
+over this copy: all four Attempts stay `insufficient-evidence`, and
+`guessed-version` becomes `unknown`, never a fabricated observed violation.
+The original **37/37** file hashes equal the previous and current before/after
+manifests, whose SHA-256 remains
+`d1d0981952d7759a7d1a91a2681f55e245ea2b69c7a93ade0de4aaf6ec4d1e14`.
+
+A full run of the final 2450-test corpus passed 2449 and failed the existing
+`runtime-privacy.test.ts` dedicated inherited-pipe fixture because it observed
+zero descendants. Both dedicated inherited-pipe cases passed immediately in an
+isolated rerun. No isolation assertion, timeout or test configuration changed.
+
+Final validation on Node **26.3.0**: `npm run build`,
+`npm test -- --maxWorkers=4` (**58 files / 2450 tests passed**, 312.19 seconds,
+no skipped tests or timeout override), `npm run typecheck` and
+`git diff --check` pass. The final full run uses the same code and tests as the
+isolated privacy rerun. No real client, model, Batch, tunnel, everyday service
+or real database was used.

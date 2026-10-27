@@ -119,7 +119,7 @@ export function upgradeRules(upgrade: NonNullable<AttemptRecord['upgrade']>, rol
       try { const list = (rpcReply(e.body, e.requestId)?.result as { tools?: unknown[] } | undefined)?.tools; return Array.isArray(list) ? [list] : []; } catch { return []; }
     }).find(list => list.every(t => t !== null && typeof t === 'object' && 'name' in t && typeof t.name === 'string'
       && 'description' in t && t.description === contract.toolDescriptions[t.name]));
-    return { ...rules, session, turn, fromSeq: seq, phase: initial ? 'initial' : 'after-restart', serviceVersion: contract.version,
+    return { ...rules, session, turn, fromSeq: seq, phase: initial ? 'initial' : restart === undefined ? 'after-refresh' : 'after-restart', serviceVersion: contract.version,
       resources: 'available', toolDefinitions: tools ? { known: true, value: tools } : { known: false, reason: 'No matching tools/list response in this native turn' } };
   };
   const phases = (contract: typeof before, seq: number, initial: boolean): GivenRules[] => {
@@ -132,26 +132,33 @@ export function upgradeRules(upgrade: NonNullable<AttemptRecord['upgrade']>, rol
     // start is unknown. That interval remains a separate phase with its reason.
     if (unpositionedDiscovery && (!initial || restart === undefined || unpositionedFromSeq < restart))
       boundaries.push(Math.max(seq, unpositionedFromSeq));
-    return (boundaries.length ? [...new Set(boundaries)].sort((a, b) => a - b) : [seq]).map(n => phase(contract, n, initial));
+    return (boundaries.length ? [...new Set(boundaries)].sort((a, b) => a - b) : [seq])
+      .filter(n => !initial || restart === undefined || n < restart).map(n => phase(contract, n, initial));
   };
   const result: GivenRules[] = [];
   if (restart === undefined || restart >= fromSeq) result.push(...phases(before, fromSeq, true));
-  if (restart !== undefined) {
-    const fresh = phases(after, Math.max(fromSeq, restart), false);
+  const reads = events.filter(e => e.kind === 'resource-read' && e.actor === 'agent' && e.session === session && e.turn === turn
+    && (restart === undefined || e.seq > restart) && e.ok && e.uri === 'wayfinder://workflow/exploration').map(read => {
+    // A later read's wire/native text cannot locate an earlier Resource exposure.
+    // The normalizer derives each Resource Event immediately from its own call.
+    const call = nativeEvents.find(e => e.seq === read.seq - 1 && e.kind === 'tool-call' && !e.failed
+      && e.server === 'wayfinder' && ['read_mcp_resource', 'read_resource', 'resources/read'].includes(e.tool));
+    const native = call?.kind === 'tool-call' && call.result.known
+      && resourceText(JSON.stringify({ jsonrpc: '2.0', id: 0, result: call.result.value }), 0) === currentResource;
+    return { read, call, native };
+  }).filter(r => restart !== undefined || r.native);
+  // Native sources still exist when the restart record is lost. Keep their own
+  // exposure positions as refreshes; checks must not infer a service restart.
+  const discoveredCurrent = discoveries.some(d => shown(d.instructions, after.instructions)
+    || Object.entries(after.toolDescriptions).some(([name, text]) => text !== before.toolDescriptions[name] && shown(d.tools, text)));
+  if (restart !== undefined || discoveredCurrent || reads.length) {
+    const fresh = phases(after, Math.max(fromSeq, restart ?? fromSeq), false);
     // In-process Codex can retain the original instructions and tools even though the service reinitialized.
     // Preserve exactly that exposure until a successful Resource read, rather than claiming a refresh.
-    if (!unpositionedDiscovery && !fresh.some(g => g.instructions.known) && upgrade.mode === 'process') {
+    if (restart !== undefined && !unpositionedDiscovery && !fresh.some(g => g.instructions.known) && upgrade.mode === 'process') {
       result.push(...phases(before, Math.max(fromSeq, restart), false).map(g => ({ ...g, serviceVersion: after.version })));
     } else result.push(...fresh);
-    const reads = events.filter(e => e.kind === 'resource-read' && e.actor === 'agent' && e.session === session && e.turn === turn
-      && e.seq > restart && e.ok && e.uri === 'wayfinder://workflow/exploration');
-    for (const read of reads) {
-      // A later read's wire/native text cannot locate an earlier Resource exposure.
-      // The normalizer derives each Resource Event immediately from its own call.
-      const call = nativeEvents.find(e => e.seq === read.seq - 1 && e.kind === 'tool-call' && !e.failed
-        && e.server === 'wayfinder' && ['read_mcp_resource', 'read_resource', 'resources/read'].includes(e.tool));
-      const native = call?.kind === 'tool-call' && call.result.known
-        && resourceText(JSON.stringify({ jsonrpc: '2.0', id: 0, result: call.result.value }), 0) === currentResource;
+    for (const { read, call, native } of reads) {
       const delivered = log.some(e => e.turn === turn && e.phase === 'response' && e.method === 'resources/read' && e.status === 200
         && (call?.kind !== 'tool-call' || !call.requestId.known || String(e.requestId) === call.requestId.value)
         && resourceText(e.body, e.requestId) === currentResource);

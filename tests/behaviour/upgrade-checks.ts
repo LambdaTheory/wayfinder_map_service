@@ -8,7 +8,7 @@ import type { AttemptRecord, EventRecord, GivenRules, RulesSource } from './evid
 import type { Entry, Harness } from './evidence.ts';
 import type { Item, Scenario, ScriptCheck } from './scenario.ts';
 import { completeUpgradeEvidence, noCanaryReplyViolation, noRefusalMutation, noExtraCommits, canaryWriteViolation, exactUpgradeHistory, replyCanary, upgradeLifecycle, zeroWriteRefusals } from './upgrade-evidence.ts';
-import { exposureGap } from './upgrade-gaps.ts';
+import { exposureGap, sourcesInTurn } from './upgrade-gaps.ts';
 
 export interface UpgradeItem {
   id: string;
@@ -36,11 +36,15 @@ const unresolvedRules = (a: AttemptRecord, e: Call) => workflowResourceCalls(a, 
 const visibleSource = (a: AttemptRecord, g: GivenRules | undefined) => g !== undefined && !!versionOf(g)
   && (g.rulesSource.kind === 'resource' ? g.resourceText?.known === true && !resourceResultMissing(a, g.fromSeq)
     : g.compatibilityMode === 'toolsOnly' ? g.rulesSource.kind === 'tool-parameter' && g.toolDescriptions.known : g.instructions.known);
+// A later metadata phase cannot revoke a source the client has already seen.
+// Check the original exposure, so a later read's missing result cannot taint it.
+const visibleVersion = (a: AttemptRecord, e: Call, version: unknown) => sourcesInTurn(a, e).some(g => visibleSource(a, g) && versionOf(g) === version);
 /** Service answers to a write; a transport failure is no answer at all. */
 const answered = (e: Call) => e.result.known && !resultIs(e, 'transport-failure');
 
 /** Write calls after the restart; `unknown` when the record lacks either phase or the calls. */
 function afterRestart(a: AttemptRecord, label: string) {
+  if (a.upgrade && !a.upgrade.restart) return { gap: unknown(`${label}: no recorded restart boundary`) };
   const before = a.given.find(g => g.phase === 'initial');
   const after = a.given.find(g => g.phase !== 'initial');
   if (!before || !after) return { gap: unknown(`${label}: the record does not hold the rules before and after the restart`) };
@@ -50,7 +54,6 @@ function afterRestart(a: AttemptRecord, label: string) {
   // Service restart and client rule discovery are independent evidence boundaries.
   // Older non-runner records use an explicit service phase. A runner record
   // must carry its own restart; later discovery cannot substitute for it.
-  if (a.upgrade && !a.upgrade.restart) return { gap: unknown(`${label}: no recorded restart boundary`) };
   const restartSeq = a.upgrade?.restart?.seq ?? after.fromSeq;
   return { old, current, resources: after.resources, writes: writeCalls(a).filter(e => e.seq >= restartSeq) };
 }
@@ -140,7 +143,7 @@ function attestNextRetries(a: AttemptRecord, r: { writes: Call[]; current: strin
   if (gap) return gap;
   const stale = retries.filter(e => argsOf(e).version !== r.current);
   if (stale.length) return violated('the next retry after a refusal did not attest the current rules', stale.map(e => at(a, e)));
-  const unexposed = retries.filter(e => !visibleSource(a, phaseOf(a, e)) || versionOf(phaseOf(a, e)!) !== argsOf(e).version);
+  const unexposed = retries.filter(e => !visibleVersion(a, e, argsOf(e).version));
   if (unexposed.some(e => visibleSource(a, phaseOf(a, e)) && !unresolvedRules(a, e).length)) return violated('the next retry did not attest its visible rules source');
   if (unexposed.length) return unknown(sourceGap(a, unexposed) ?? 'the next retry lacks its client-visible rules source', unexposed.map(e => at(a, e)));
   return holds('each observed next retry attested its visible current rules');
@@ -163,7 +166,7 @@ const committedAtNewVersion: ScriptCheck = a => {
   if (gap) return gap;
   const ok = r.writes.filter(e => resultIs(e, 'committed') && argsOf(e).version === r.current);
   if (ok.length) {
-    const unexposed = ok.filter(e => !visibleSource(a, phaseOf(a, e)) || versionOf(phaseOf(a, e)!) !== r.current);
+    const unexposed = ok.filter(e => !visibleVersion(a, e, r.current));
     if (unexposed.some(e => visibleSource(a, phaseOf(a, e)) && !unresolvedRules(a, e).length)) return violated('the committed version differs from the rules this client was shown', ok.map(e => at(a, e)));
     if (unexposed.length) return unknown(sourceGap(a, unexposed) ?? 'new-version write recorded, but the client-visible rules source is missing', unexposed.map(e => at(a, e)));
     return holds(`committed with the client-visible ${r.current}`, ok.map(e => at(a, e)));
@@ -192,12 +195,14 @@ const noGuessedVersion: ScriptCheck = a => {
   const writes = writeCalls(a).filter(e => argsOf(e).version !== undefined);
   const stated = (e: Call) => a.given.some(g => g.fromSeq <= e.seq && visibleSource(a, g) && versionOf(g) === String(argsOf(e).version));
   const release = afterRestart(a, 'possible Resource version');
+  const missingRestart = (e: Call) => a.upgrade && !a.upgrade.restart && argsOf(e).version === a.upgrade.contracts.after.version;
   // A lost read can explain the service's current version only after restart, not an arbitrary value such as 7.7.7.
   // Without the service-version evidence the possible read still cannot prove a guess.
   const possiblyRead = (e: Call) => unresolvedRules(a, e).length > 0 && ('gap' in release || (release.writes.includes(e) && argsOf(e).version === release.current));
   // A write without any version is an input error, judged by the common checks, not a guess.
-  const guessed = writes.filter(e => visibleSource(a, phaseOf(a, e)) && !stated(e) && !possiblyRead(e));
+  const guessed = writes.filter(e => visibleSource(a, phaseOf(a, e)) && !stated(e) && !possiblyRead(e) && !missingRestart(e));
   if (guessed.length) return violated('a write with a version its visible rules source did not state', guessed.map(e => at(a, e)));
+  if (writes.some(missingRestart)) return unknown('guessed version: no recorded restart boundary for the current release');
   return need(a, 'guessed version', 'events.tool-call')
     ?? (writes.some(e => !stated(e)) ? unknown(sourceGap(a, writes.filter(e => !stated(e))) ?? 'some writes have no recorded client-visible rules source') : holds('every versioned write named a visible rules source'));
 };
@@ -210,11 +215,10 @@ const followsCanary: ScriptCheck = a => {
     ?? (r.writes.some(e => !answered(e)) ? unknown('no Ticket creation recorded after the restart; some results are missing') : notObserved('no Ticket created after the restart to show the map_apply rule'));
   const bad = titles.filter(t => !t.startsWith(canary.ticketTitlePrefix));
   if (bad.length) return violated(`Ticket titles without "${canary.ticketTitlePrefix}": ${bad.join(', ')}`);
-  if (creates.some(e => {
-    const g = phaseOf(a, e);
-    return !visibleSource(a, g) || !((g?.toolDescriptions.known && g.toolDescriptions.value.map_apply?.includes(ticketRule))
-      || (g?.resourceText?.known && g.resourceText.value.includes(ticketRule)));
-  })) return unknown('matching Ticket titles do not prove that the client saw the canary map_apply rule');
+  const unexposed = creates.filter(e => !sourcesInTurn(a, e).some(g => visibleSource(a, g)
+    && ((g.toolDescriptions.known && g.toolDescriptions.value.map_apply?.includes(ticketRule))
+      || (g.resourceText?.known && g.resourceText.value.includes(ticketRule)))));
+  if (unexposed.length) return unknown(sourceGap(a, unexposed) ?? 'matching Ticket titles do not prove that the client saw the canary map_apply rule');
   return holds('every new Ticket title follows the client-visible map_apply rule');
 };
 

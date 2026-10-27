@@ -2,7 +2,7 @@ import { expect, test } from 'vitest';
 import { attemptSchema } from '../evidence.ts';
 import type { AttemptRecord, EventRecord, UpgradeContract, WireRevision } from '../evidence.ts';
 import { exactUpgradeHistory, noCanaryReplyViolation, replyCanary } from '../upgrade-evidence.ts';
-import { replyRule } from '../../helpers/canary-release.mjs';
+import { replyRule, ticketRule } from '../../helpers/canary-release.mjs';
 import { upgradeChecks } from '../upgrade-checks.ts';
 import { receiptsFrom } from './normalize.ts';
 import type { RelayObservation } from './relay.ts';
@@ -302,8 +302,8 @@ test.each([false, true])('process fallback preserves unpositioned new rules (Res
     const log = [...wire(u.contracts.before, 1), ...wire(u.contracts.after, 1)];
     // An uncorroborated Resource exercises the second retained-rules fallback too.
     a.given = upgradeRules(u, rollout(native), a.events, log, 'A', 1, 0);
-    for (const id of ['guessed-version', 'writes-new-version']) expect(script(a, id).status, id)
-      .toBe(unplaced || (withResource && id === 'writes-new-version') ? 'unknown' : 'holds');
+    // A positioned new instructions source remains proof even if a later Resource is uncorroborated.
+    for (const id of ['guessed-version', 'writes-new-version']) expect(script(a, id).status, id).toBe(unplaced ? 'unknown' : 'holds');
     if (unplaced) for (const id of ['guessed-version', 'writes-new-version'])
       expect(script(a, id).reason).toContain('unpositioned');
     if (unplaced) for (const g of a.given.filter(g => g.phase === 'after-restart'))
@@ -375,4 +375,111 @@ test('later positioned rediscovery proves a later violation without erasing the 
   const final = a.events.at(-1)!;
   if (final.kind === 'message') final.text = 'LANTERN End.';
   expect(noCanaryReplyViolation(a)).toMatchObject({ status: 'unknown', reason: expect.stringContaining('unpositioned') });
+});
+
+test.each([true, false])('missing restart keeps a discovered new version unknown rather than guessed (restart=%s)', hasRestart => {
+  const a = replyAttempt();
+  const u = a.upgrade!;
+  u.mode = 'process'; u.restart!.seq = 3;
+  if (!hasRestart) delete u.restart;
+  const initial = { ...historyAttempt(false).events[0]!, turn: 1 };
+  const write = { ...initial, seq: 4, callId: 'retry', tool: 'map_apply' };
+  if (initial.kind === 'tool-call') initial.arguments = { version: '1.0.0' };
+  if (write.kind === 'tool-call') write.arguments = { version: '2.0.0' };
+  a.events = [initial, message(2, 'Before restart.'), write, message(5, 'LANTERN Done.')];
+  const native = [output(toolList(u.contracts.before)), completed(initial), completed(a.events[1]!),
+    output(toolList(u.contracts.after)), completed(write), completed(a.events[3]!)].join('\n');
+  a.given = upgradeRules(u, rollout(native), a.events, [...wire(u.contracts.before, 1), ...wire(u.contracts.after, 1)], 'A', 1, 0);
+  expect(script(a, 'guessed-version')).toMatchObject(hasRestart ? { status: 'holds' }
+    : { status: 'unknown', reason: expect.stringContaining('restart') });
+  // Native discovery survives extraction even when its relation to the service restart is unknown.
+  expect(a.given.some(g => g.instructions.known && g.instructions.value === u.contracts.after.instructions)).toBe(true);
+  if (write.kind === 'tool-call') write.arguments = { version: '7.7.7' };
+  expect(script(a, 'guessed-version').status).toBe('violated');
+});
+
+test('unchanged tool descriptions do not invent a new source before the restart was recorded', () => {
+  const u = upgrade();
+  delete u.restart;
+  u.contracts.before.toolDescriptions.map_read = 'Read the Map.';
+  u.contracts.after.toolDescriptions.map_read = 'Read the Map.';
+  const given = upgradeRules(u, rollout(output(toolList(u.contracts.before))), [], wire(u.contracts.before), 'A', 0, 0);
+  expect(given).toHaveLength(1);
+  expect(given[0]).toMatchObject({ phase: 'initial', instructions: { known: true }, toolDescriptions: { known: true } });
+});
+
+test('an old Resource read does not invent a new source before the restart was recorded', () => {
+  const u = upgrade();
+  delete u.restart;
+  const resource = { contents: [{ uri: 'wayfinder://workflow/exploration', text: `version: ${u.contracts.before.version}\n\n${u.contracts.before.markdown}` }] };
+  const read: EventRecord = { seq: 1, at: '', actor: 'agent', session: 'A', turn: 0, kind: 'tool-call', callId: 'read-old', server: 'wayfinder',
+    tool: 'read_mcp_resource', arguments: { uri: 'wayfinder://workflow/exploration' }, result: { known: true, value: resource },
+    requestId: { known: true, value: '2' }, failed: false };
+  const events: EventRecord[] = [read, { seq: 2, at: '', actor: 'agent', session: 'A', turn: 0, kind: 'resource-read',
+    uri: 'wayfinder://workflow/exploration', ok: true }];
+  const log: (RelayObservation & { turn: number })[] = [...wire(u.contracts.before), { phase: 'response', at: '', requestId: 2,
+    method: 'resources/read', sessionId: 'mcp-session', status: 200, turn: 0, body: JSON.stringify({ jsonrpc: '2.0', id: 2, result: resource }) }];
+  const given = upgradeRules(u, rollout([output(toolList(u.contracts.before)), completed(read), output(resource)].join('\n')), events, log, 'A', 0, 0);
+  expect(given).toHaveLength(1);
+  expect(given[0]).toMatchObject({ phase: 'initial', instructions: { known: true }, toolDescriptions: { known: true } });
+});
+
+function resourceBeforeLaterPhase(mode: 'process' | 'resume', later: 'old-tools' | 'unplaced-discovery' | 'lost-resource' | 'none') {
+  const a = replyAttempt();
+  const u = a.upgrade!;
+  u.mode = mode; u.restart!.seq = 3;
+  u.contracts.after.markdown += `\n${ticketRule}`;
+  a.subject.id = `U-codex-${mode}`;
+  const resource = { contents: [{ uri: 'wayfinder://workflow/exploration', text: `version: ${u.contracts.after.version}\n\n${u.contracts.after.markdown}` }] };
+  const call = (seq: number, tool: string, args: unknown, value: unknown): EventRecord => ({ seq, at: '', actor: 'agent', session: 'A', turn: 1,
+    kind: 'tool-call', callId: `call-${seq}`, server: 'wayfinder', tool, arguments: args, result: { known: true, value },
+    failed: false, requestId: { known: true, value: String(seq) } });
+  a.events = [call(1, 'map_create', { version: '1.0.0' }, { kind: 'committed' }), message(2, 'Before restart.'),
+    call(4, 'map_apply', { version: '1.0.0' }, { kind: 'rejected', code: 'version_mismatch' }),
+    call(5, 'read_mcp_resource', { uri: 'wayfinder://workflow/exploration' }, resource),
+    { seq: 6, at: '', actor: 'agent', session: 'A', turn: 1, kind: 'resource-read', uri: 'wayfinder://workflow/exploration', ok: true },
+    call(7, 'map_read', { mapId: 'Upgrade.Probe' }, { kind: 'found' }),
+    call(8, 'map_apply', { version: '2.0.0', commands: [{ kind: 'ticket.create', ticket: { title: 'v2: Probe' } }] },
+      { kind: 'committed' }), message(9, 'LANTERN Done.')];
+  const oldList = toolList(u.contracts.before);
+  if (later === 'lost-resource') {
+    a.events[6]!.seq = 10; a.events[7]!.seq = 11;
+    const lost = call(8, 'read_mcp_resource', { uri: 'wayfinder://workflow/exploration' }, null);
+    if (lost.kind === 'tool-call') lost.result = { known: false, reason: 'lost native contents' };
+    a.events.splice(6, 0, lost, { ...a.events[4]!, seq: 9 });
+  }
+  const native = [output([oldList[0]]), ...a.events.slice(0, 4).map(completed), output(resource),
+    ...(later === 'old-tools' ? [output([oldList[1]])] : later === 'unplaced-discovery'
+      ? [completed(message(0, 'Unmatched later anchor.')), output(toolList(u.contracts.after))] : []),
+    ...a.events.slice(5).filter(e => e.kind !== 'resource-read').map(completed)].join('\n');
+  const log: (RelayObservation & { turn: number })[] = [...wire(u.contracts.before, 1), { phase: 'response', at: '', requestId: 5,
+    method: 'resources/read', sessionId: 'mcp-session', status: 200, turn: 1, body: JSON.stringify({ jsonrpc: '2.0', id: 5, result: resource }) }];
+  a.given = upgradeRules(u, rollout(native), a.events, log, 'A', 1, 0);
+  return a;
+}
+
+test.each(['old-tools', 'none'] as const)('proven Resource survives later completion of the cached old tool set (%s)', later => {
+  const a = resourceBeforeLaterPhase('process', later);
+  for (const id of ['invalid-recovery', 'writes-new-version', 'guessed-version', 'canary-reply'])
+    expect(script(a, id).status, id).toBe('holds');
+  expect(a.given.filter(g => g.phase === 'initial').every(g => g.fromSeq < a.upgrade!.restart!.seq)).toBe(true);
+  // Existing captured phases must also work without being re-extracted or ordered.
+  a.given.reverse();
+  for (const id of ['invalid-recovery', 'writes-new-version', 'canary-reply']) expect(script(a, id).status, id).toBe('holds');
+  const retry = a.events.find(e => e.seq === 8)!;
+  if (retry.kind === 'tool-call') retry.arguments = { version: '1.0.0' };
+  for (const id of ['invalid-recovery', 'writes-new-version']) expect(script(a, id).status, id).toBe('violated');
+});
+
+test.each(['unplaced-discovery', 'lost-resource'] as const)('a proven Resource is not erased by later incomplete evidence (%s)', later => {
+  const a = resourceBeforeLaterPhase('resume', later);
+  for (const id of ['writes-new-version', 'canary-reply']) expect(script(a, id).status, id).toBe('holds');
+  const final = a.events.at(-1)!;
+  if (final.kind === 'message') final.text = 'Plain final.';
+  for (const id of ['canary-reply', 'canary-reply-violation']) expect(script(a, id).status, id).toBe('violated');
+});
+
+test.each(['old-tools', 'unplaced-discovery', 'lost-resource'] as const)('Ticket rule proof survives a later phase (%s)', later => {
+  const a = resourceBeforeLaterPhase(later === 'old-tools' ? 'process' : 'resume', later);
+  expect(script(a, 'follows-canary-rule').status).toBe('holds');
 });

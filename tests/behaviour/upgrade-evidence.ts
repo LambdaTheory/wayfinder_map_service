@@ -6,7 +6,7 @@ import { replyRule, replyWord, ticketTitlePrefix } from '../helpers/canary-relea
 import { classifyResult } from './evidence.ts';
 import type { AttemptRecord, GivenRules } from './evidence.ts';
 import { reservedPorts } from './runner/service.ts';
-import { exposureGap } from './upgrade-gaps.ts';
+import { exposureGap, sourcesInTurn } from './upgrade-gaps.ts';
 
 const replyPattern = new RegExp(`^\\W*${replyWord}\\b`);
 
@@ -152,8 +152,8 @@ export const replyCanary: ScriptCheck = a => {
   if (!restart) return unknown('no restart boundary');
   const final = a.events.findLast(e => e.kind === 'message' && e.actor === 'agent' && e.role === 'assistant' && e.seq > restart.seq);
   if (!final || final.kind !== 'message') return unknown('no final native reply');
-  const source = a.given.findLast(g => g.fromSeq <= final.seq);
-  if (!source || !replyRuleVisible(a, source)) return unknown('no final native reply after exposure to the canary rule');
+  if (!sourcesInTurn(a, final).some(g => replyRuleVisible(a, g)))
+    return unknown('no final native reply after exposure to the canary rule');
   if (!replyPattern.test(final.text)) return violated('final reply did not follow the canary instructions rule', [at(a, final)]);
   return holds('final reply follows the newly visible instructions rule', [at(a, final), 'given']);
 };
