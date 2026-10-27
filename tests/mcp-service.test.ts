@@ -19,7 +19,7 @@ import type { LocalServiceConfiguration } from '../src/mcp-service.js';
 import { startLocalMcpService } from '../src/mcp-service.js';
 import { sqliteLifecycleForTests } from '../src/sqlite-internal.js';
 import type { SQLiteStorage } from '../src/sqlite-storage.js';
-import { mapTools, workflowContract } from '../src/mcp-tools.js';
+import { mapTools, toolsOnlyMapTools, workflowContract } from '../src/mcp-tools.js';
 import type { Revision } from '../src/index.js';
 import { rejectionSeed, rejectionCases } from './helpers/mcp-rejection-cases.js';
 
@@ -126,6 +126,37 @@ test('modern discovery delivers the same instructions, four schemas, Resources a
   expect(modern.requests[0]!.body!.method).toBe('server/discover');
   expect(modern.requests.every(r => !r.headers['mcp-session-id'] && r.method === 'POST' && r.body?.method !== 'initialize')).toBe(true);
   expect(f.storage.listMaps()).toMatchObject({ maps: [] });
+});
+
+test.each(protocols)('%s uses the primary toolsOnly service setting in the shared server factory', async protocol => {
+  for (const toolsOnly of [false, true]) {
+    const f = storageFixture(); const port = await freePort();
+    const service = await serveLocalMcp(f.storage, { ...configuration(f.path, port), toolsOnly });
+    cleanups.push(() => service.stop());
+    const connection = await connect(port, token, protocol);
+    expect((await connection.client.listTools()).tools).toEqual(toolsOnly ? toolsOnlyMapTools : mapTools);
+  }
+});
+
+test.each(protocols)('%s documents the deprecated task marker without claiming modern Tasks support', async protocol => {
+  const f = await fixture(); const connection = await connect(f.port, token, protocol);
+  const rpc = JSON.parse(protocol === '2025-11-25'
+    ? message('map_create', { mapId: 'TaskMarker', title: 'T', destination: 'D' })
+    : modernMessage('map_create', { mapId: 'TaskMarker', title: 'T', destination: 'D' }));
+  rpc.params.task = { ttl: 60_000 };
+  const response = await raw(f.port, JSON.stringify(rpc), protocol === '2025-11-25'
+    ? sessionHeaders(connection.transport.sessionId!) : {});
+  expect(response.status).toBe(200);
+  const payload = JSON.parse(response.body);
+  if (protocol === '2025-11-25') {
+    expect(payload.error).toEqual({ code: -32602, message: 'Protocol request failed' });
+    expect(f.storage.listMaps()).toMatchObject({ maps: [] });
+  } else {
+    // SDK v2 strips the deprecated marker; an otherwise valid call completes synchronously.
+    expect(payload.result.structuredContent).toMatchObject({ kind: 'committed', revision: 1 });
+    expect(payload.result.task).toBeUndefined();
+    expect((await connection.read(undefined, 'TaskMarker')).structuredContent).toMatchObject({ kind: 'found', revision: { revision: 1 } });
+  }
 });
 
 test('modern requests keep per-request auth, exact Host/Origin, body limits, redacted errors and credential identity', async () => {

@@ -139,6 +139,9 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
     }
   };
   const control = (call: () => Promise<CallToolResult>) => metadata.observeTool(() => admit(call), classifyCallResult);
+  const serverFor = (credential: Credential) => createMapMcpServer(storage, {
+    actorId: config.actorId, clientId: credential.clientId, viewerOrigin: `http://${host}`, toolsOnly: credential.toolsOnly,
+  }, control);
   async function sendProtocolResponse(result: Response, response: ServerResponse, observation: CallObservation | undefined) {
     // The legacy transport uses JSON mode; modern auto mode also yields JSON because
     // these tools emit no progress and subscriptions are disabled. Keep SDK diagnostics private.
@@ -193,18 +196,18 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
     }
     // stop() may have started while the request body was arriving.
     if (stopping) { httpFailure(response, 503, 'Service stopping'); return; }
+    // Omit optional IncomingMessage fields that the adapter's exact optional types do not accept.
     const webRequest = await toWebRequest({ method: request.method!, url: request.url!, headers: request.headers,
       [Symbol.asyncIterator]: () => request[Symbol.asyncIterator]() }, body);
     if (!await isLegacyRequest(webRequest, body)) {
       // Modern requests carry their protocol context on every call, not in an MCP
       // session. The authenticated credential still supplies the author identity.
       if (request.headers['mcp-session-id'] !== undefined) { httpFailure(response, 400, 'Modern requests do not use sessions'); return; }
-      const modern = createMcpHandler(() => createMapMcpServer(storage,
-        { actorId: config.actorId, clientId: credential.clientId, viewerOrigin: `http://${host}`, toolsOnly: credential.toolsOnly }, control),
+      const modernHandler = createMcpHandler(() => serverFor(credential),
       { legacy: 'reject', maxSubscriptions: 0, maxRequestBodySize: MAX_REQUEST_BYTES });
       try {
-        await sendProtocolResponse(await modern.fetch(webRequest, { parsedBody: body }), response, observation);
-      } finally { await modern.close(); }
+        await sendProtocolResponse(await modernHandler.fetch(webRequest, { parsedBody: body }), response, observation);
+      } finally { await modernHandler.close(); }
       return;
     }
     const sessionId = request.headers['mcp-session-id'];
@@ -217,8 +220,7 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
       const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: randomUUID, enableJsonResponse: true,
         onsessioninitialized(id) { sessions.set(id, created); metadata.update(observation, value => { value.fields.mcpSessionId = id; }); },
       });
-      const server = createMapMcpServer(storage,
-        { actorId: config.actorId, clientId: credential.clientId, viewerOrigin: `http://${host}`, toolsOnly: credential.toolsOnly }, control);
+      const server = serverFor(credential);
       const created: Session = { credential: credential.key, clientId: credential.clientId, server, transport, pending: new Set(), closing: false };
       await server.connect(transport);
       session = created;

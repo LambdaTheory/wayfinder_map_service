@@ -10,6 +10,7 @@ import { test } from 'vitest';
 import { specTypeSchemas } from '@modelcontextprotocol/client';
 import { rpcResponse } from './relay.ts';
 import { createHttpTestClient } from '../../helpers/mcp-http-client.mjs';
+import { chatgptDiscovery } from '../../helpers/chatgpt-discovery.js';
 import { ChatGPTAttempt } from './attempt.ts';
 import type { Capture } from './attempt.ts';
 import type { Exchange, RelayRefusal, RelayRefusalEvent } from './relay.ts';
@@ -770,13 +771,7 @@ test('ChatGPT recorded discovery, tools/list and writes work sessionlessly with 
   const root = fresh(); const a = await ChatGPTAttempt.start(attemptOptions(root, 'F11'));
   try {
     assert.deepEqual(refusalsOf(a.dir), []);
-    // Full recorded body: #80 B09a-app-20261027e/S0b-1 raw/wire.json rpc-1.
-    // Headers were not recorded; exercise both conforming headers and their absence.
-    const discover = { jsonrpc: '2.0', id: 'openai-mcp-discover', method: 'server/discover',
-      params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28',
-        'io.modelcontextprotocol/clientInfo': { name: 'openai-mcp (Codex)', version: '1.0.0' },
-        'io.modelcontextprotocol/clientCapabilities': { experimental: { 'openai/visibility': { enabled: true } },
-          extensions: { 'io.modelcontextprotocol/ui': { mimeTypes: ['text/html;profile=mcp-app'] } } } } } };
+    const discover = chatgptDiscovery;
     const response = await fetch(`http://127.0.0.1:${a.relay.port}/mcp`, { method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream',
         'mcp-protocol-version': '2026-07-28', 'mcp-method': 'server/discover' }, body: JSON.stringify(discover) });
@@ -805,6 +800,8 @@ test('ChatGPT recorded discovery, tools/list and writes work sessionlessly with 
       await a.begin();
       const mismatch = await modern.client.callTool({ name: 'map_create', arguments: { version: '0.0.0', mapId: 'ModernChatGPT', title: 'T', destination: 'D' } });
       assert.deepEqual(mismatch.structuredContent, { kind: 'rejected', code: 'version_mismatch', version: '0.0.0', rules: 'wayfinder://workflow/exploration' });
+      assert.deepEqual((await modern.client.callTool({ name: 'map_read', arguments: { mapId: 'ModernChatGPT' } })).structuredContent,
+        { kind: 'not_found', code: 'map_not_found', mapId: 'ModernChatGPT' });
       await a.end({ messagesComplete: true, otherToolsComplete: true, messages: [{ text: 'Fixed fixture response.', afterCall: null }], toolsShown: tools, toolsShownSource: source });
       const snapshot = JSON.parse(readFileSync(join(a.dir, 'raw/tool-snapshot-0.json'), 'utf8'));
       assert.equal(snapshot.verified, false); assert.match(snapshot.reason, /sessionless.*native chat/);

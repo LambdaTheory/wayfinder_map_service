@@ -69,6 +69,7 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
   const callTool = async (request: CallToolRequest): Promise<CallToolResult> => {
     const tool = tools.find(tool => tool.name === request.params.name);
     if (!tool) throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Unknown Map tool');
+    // Legacy task marker only: modern SDK requests strip this deprecated field before dispatch.
     if ('task' in request.params && request.params.task !== undefined) throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Task execution is not supported');
     const raw = request.params.arguments ?? {};
     // A write names the release whose rules the caller follows. After an upgrade, a caller still holding the old

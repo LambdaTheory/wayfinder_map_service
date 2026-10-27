@@ -419,7 +419,7 @@ test('P02/P03/D09: current reads pin observed N and writes return exact committe
   expect((await originalCurrent(id('Acceptance.Alpha')))).toMatchObject({ value: { currentRevision: 6 } });
 });
 
-test('P05: unknown tool and malformed tools/call are protocol errors, never fabricated domain errors', async () => {
+test('P05: legacy unknown tools, malformed calls and task markers are protocol errors without publication', async () => {
   const f = await fixture();
   await expect(f.client.callTool({ name: 'unknown', arguments: {} })).rejects.toMatchObject({ code: ProtocolErrorCode.InvalidParams });
   expect((await f.call('map_list')).structuredContent).toMatchObject({ maps: [] });
@@ -428,10 +428,11 @@ test('P05: unknown tool and malformed tools/call are protocol errors, never fabr
   await f.clientTransport.send({ jsonrpc: '2.0', id: 900, method: 'tools/call', params: { name: 42 } });
   await f.clientTransport.send({ jsonrpc: '2.0', id: 901, method: 'tools/call', params: { name: 'map_read', arguments: 'bad' } });
   await f.clientTransport.send({ jsonrpc: '2.0', id: 902, method: 'tools/call', params: { name: 'map_create', task: {},
-    arguments: { mapId: 'TaskUnsupported', title: 'T', destination: 'D' } } });
+    arguments: { version, mapId: 'TaskUnsupported', title: 'T', destination: 'D' } } });
   await new Promise<void>(resolve => setImmediate(resolve));
   expect(responses).toHaveLength(3);
-  // SDK v2 reports InvalidParams for malformed or unsupported task requests; this is
+  // The legacy SDK transport retains params.task; modern HTTP strips that deprecated field.
+  // Legacy malformed or unsupported task requests return InvalidParams; this is
   // a JSON-RPC error, not a successful tools/call or a business rejection.
   for (const response of responses) expect(response).toMatchObject({ error: { code: ProtocolErrorCode.InvalidParams } });
   expect(f.storage.listMaps()).toMatchObject({ maps: [] });

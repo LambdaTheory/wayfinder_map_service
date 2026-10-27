@@ -3,6 +3,7 @@ import { createServer, request } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { freePort, reservedPorts } from '../runner/service.ts';
 import { directAgent } from '../runner/direct-http.ts';
+import { mcpRequestHeaders, mcpResponseHeaders } from '../../../scripts/local-chatgpt-relay.mjs';
 
 export interface Exchange {
   id: string; at: string; httpMethod: string; request: Record<string, unknown>; response: unknown; status: number; sessionId: string | null;
@@ -154,7 +155,7 @@ export async function startRelay(servicePort: number, token: string, observe: (e
     const id = `rpc-${++counter}`;
     const at = new Date().toISOString();
     const headers: Record<string, string | string[]> = { host: `127.0.0.1:${servicePort}`, authorization: `Bearer ${state.token}` };
-    for (const key of ['accept', 'content-type', 'mcp-session-id', 'mcp-protocol-version', 'mcp-method', 'mcp-name']) {
+    for (const key of mcpRequestHeaders) {
       if (incoming.headers[key] !== undefined) headers[key] = incoming.headers[key]!;
     }
     if (body.length) headers['content-length'] = String(body.length);
@@ -169,7 +170,7 @@ export async function startRelay(servicePort: number, token: string, observe: (e
     };
     const upstream = request({ agent, hostname: '127.0.0.1', port: servicePort, path: '/mcp', method: incoming.method, headers }, response => {
       const forwarded: Record<string, string | string[]> = {};
-      for (const key of ['content-type', 'content-length', 'mcp-session-id', 'mcp-protocol-version']) {
+      for (const key of mcpResponseHeaders) {
         if (response.headers[key] !== undefined) forwarded[key] = response.headers[key]!;
       }
       const result: Buffer[] = [];
