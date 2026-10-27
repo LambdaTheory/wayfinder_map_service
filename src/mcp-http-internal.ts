@@ -26,6 +26,8 @@ export interface LocalServiceConfiguration {
   readonly credentialsPath?: string;
   // The primary credential's client shows its model no server instructions (compatibility mode).
   readonly toolsOnly?: boolean;
+  // Staged Answer Desk capability; #114 enables it by default.
+  readonly answerDeskEnabled?: boolean;
 }
 export interface LocalMcpService {
   stop(): Promise<void>;
@@ -39,7 +41,8 @@ export class LocalServiceFailure extends Error {
 }
 
 export function captureConfiguration(input: LocalServiceConfiguration): LocalServiceConfiguration {
-  if (validateObject(input, [], ['databasePath', 'port', 'token', 'actorId', 'clientId', 'allowedOrigins', 'credentialsPath', 'toolsOnly'])
+  if (validateObject(input, [], ['databasePath', 'port', 'token', 'actorId', 'clientId', 'allowedOrigins', 'credentialsPath', 'toolsOnly', 'answerDeskEnabled'])
+    || (input.answerDeskEnabled !== undefined && typeof input.answerDeskEnabled !== 'boolean')
     || (input.toolsOnly !== undefined && typeof input.toolsOnly !== 'boolean')
     || typeof input.databasePath !== 'string' || !input.databasePath
     || !Number.isInteger(input.port) || input.port < 1 || input.port > 65535
@@ -191,7 +194,7 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
         onsessioninitialized(id) { sessions.set(id, created); metadata.update(observation, value => { value.fields.mcpSessionId = id; }); },
       });
       const server = createMapMcpServer(storage,
-        { actorId: config.actorId, clientId: credential.clientId, viewerOrigin: `http://${host}`, toolsOnly: credential.toolsOnly }, control);
+        { actorId: config.actorId, clientId: credential.clientId, viewerOrigin: `http://${host}`, toolsOnly: credential.toolsOnly, answerDeskEnabled: config.answerDeskEnabled === true }, control);
       const created: Session = { credential: credential.key, clientId: credential.clientId, server, transport, pending: new Set(), closing: false };
       await server.connect(transport);
       session = created;

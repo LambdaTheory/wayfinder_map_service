@@ -1,3 +1,4 @@
+import { validateDeskCommand, validateDeskCitation } from './desk-input.js';
 import type { ApplyRequest, InvalidInput, Result, TicketType } from './types.js';
 import { invalid, isPlainObject, validateArrayShape, validateAuthor, validateExtensions, validateId, validateObject } from './values.js';
 import { immutableClone } from './immutable.js';
@@ -10,13 +11,16 @@ export function decodeApplyRequest(raw: unknown): Result<ApplyRequest, InvalidIn
 }
 
 function validateRequest(raw: unknown): InvalidInput | undefined {
-  const shape = validateObject(raw, [], ['mapId', 'expectedRevision', 'author', 'commands']);
+  const shape = validateObject(raw, [], ['mapId', 'expectedRevision', 'author', 'commands', 'reopenRequestId']);
   if (shape) return shape;
   if (!isPlainObject(raw)) return invalid([], 'Plain request required');
   const identity = validateId(raw.mapId, ['mapId']);
   if (identity) return identity;
   if (typeof raw.expectedRevision !== 'number' || !Number.isSafeInteger(raw.expectedRevision) || raw.expectedRevision <= 0) {
     return invalid(['expectedRevision'], 'Positive safe integer required');
+  }
+  if (Object.hasOwn(raw, 'reopenRequestId')) {
+    const error = validateId(raw.reopenRequestId, ['reopenRequestId']); if (error) return error;
   }
   const authorError = validateAuthor(raw.author);
   if (authorError) return authorError;
@@ -33,6 +37,10 @@ function validateRequest(raw: unknown): InvalidInput | undefined {
     const shape = validateObject(command, path);
     if (shape) return shape;
     if (!isPlainObject(command)) return invalid(path, 'Plain command required');
+    if (command.kind === 'deskQuestion.post' || command.kind === 'deskQuestion.withdraw' || command.kind === 'reopenRequest.close') {
+      const error = validateDeskCommand(command, path); if (error) return error;
+      continue;
+    }
     if (command.kind === 'ticket.reopen') {
       const shape = validateObject(command, path, ['kind', 'ticketId', 'reason']);
       if (shape) return shape;
@@ -42,13 +50,16 @@ function validateRequest(raw: unknown): InvalidInput | undefined {
       continue;
     }
     if (command.kind === 'ticket.settle') {
-      const shape = validateObject(command, path, ['kind', 'ticketId', 'ticketType', 'claimantId', 'settlement']);
+      const shape = validateObject(command, path, ['kind', 'ticketId', 'ticketType', 'claimantId', 'settlement', 'deskAnswer']);
       if (shape) return shape;
       for (const key of ['ticketId', 'claimantId']) {
         const identity = validateId(command[key], [...path, key]);
         if (identity) return identity;
       }
       if (!isTicketType(command.ticketType)) return invalid([...path, 'ticketType'], 'Supported Ticket type required');
+      if (Object.hasOwn(command, 'deskAnswer')) {
+        const error = validateDeskCitation(command.deskAnswer, [...path, 'deskAnswer']); if (error) return error;
+      }
       const settlement = validateSettlement(command.settlement, command.ticketType, [...path, 'settlement']);
       if (settlement) return settlement;
       continue;

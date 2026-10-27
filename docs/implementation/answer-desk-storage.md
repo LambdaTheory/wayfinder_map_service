@@ -1,0 +1,58 @@
+# Answer Desk storage (#111)
+
+Implements the storage, domain-command and inspection-read slice of [Answer Desk](../spec/answer-desk.md) §9. Delivery transports (#112), the keyed browser (#113) and the mandatory workflow (#114) remain separate. No real-model or ChatGPT run is claimed here.
+
+## Staged service setting
+
+`LocalServiceConfiguration.answerDeskEnabled` and `ToolAuthorConfiguration.answerDeskEnabled` default to false. The operator command accepts `WAYFINDER_ANSWER_DESK_ENABLED=true` to enable the desk in isolated runs; `false` or absence disables it, and any other value fails startup. This setting is process configuration, never a client argument or credential privilege.
+
+When disabled, desk commands, `deskAnswer`, `reopenRequestId` and taking-read syntax return `{kind:"rejected",code:"answer_desk_disabled"}` before storage access. Release Version attestation still precedes write admission. Ordinary reads, ordinary M1 writes, four-tool discovery and format-2 migration continue. #112 must put `map_wait`/taking reads behind this same setting; #113 must hide its UI and return 404 from its answer route when disabled. There is no desk UI or browser write route in #111. #114 enables the setting by default or removes it.
+
+The coordinator approved staged schema help on 2026-10-27: new commands and fields document their shapes in schema metadata; the existing authored workflow and four tool descriptions remain unchanged. W02 still checks every original command/field and additionally checks the staged metadata. **Before #114 merges, synchronize the desk rules into the workflow and all governed tool descriptions.** ChatGPT sees tool definitions without server instructions, so its required desk rules must be present in the corresponding tool `description`; nested schema metadata alone is not the final workflow contract.
+
+## Command and storage seams
+
+- `deskQuestion.post {ticketId, claimantId, question}` publishes on a claimed, open Ticket. `question` carries `questionId`, two or three `options: [{label,description}]`, `recommendedOption` (1-based), `recommendedAnswer`, `whyKun`, `triage`, `triageReason` and `gatesResearch`. A Ticket keeps one `questionId`; each post assigns the next `questionVersion`, snapshots its question text and takes `postedAt` from service mutation authorship. A changed question/type requires withdrawal before updating the Ticket and posting again.
+- `deskQuestion.withdraw {ticketId, claimantId, questionId, questionVersion, reason}` withdraws the exact active publication. Both standalone posting and withdrawal create Revisions.
+- `ticket.settle.deskAnswer {answerId, questionVersion}` is required for an active question, must cite the current answer Taken by the settling Claimant, and is retained on `StoredSettlement`. The citation resolves to the immutable publication and answer, including the displayed option label and description. Conversation Settlements use withdrawal before Settlement.
+- `map_apply.reopenRequestId` binds a batch to a Taken request and its original target Settlement. Its explicit reopen commands must name the target and exactly the currently required settled descendants; every dependent must have the authorized Settlement identity. A shrunk set is allowed. A grown set or changed Settlement returns `reopen_authorization_exceeded` with all `uncoveredTickets` and `not_listed`/`settlement_changed` reasons.
+- `reopenRequest.close {requestId,reason}` accepts only a pending/Taken request whose target has lost the recorded Settlement, evaluated after earlier batch commands. Close-only batches create one Revision whose `changes` record each command index, request ID and reason. Repeated closes reject.
+
+Other request rejection codes are `reopen_request_not_found` (including a foreign Map's ID), `reopen_request_pending`, `reopen_request_handled`, `reopen_request_inactive` (cancelled/closed/superseded), `reopen_request_stale`, `reopen_target_omitted`, `reopen_set_mismatch` and `reopen_close_guard`. They use the existing command-stage rejection envelope; a batch-level citation error uses command index 0 and relevant Ticket IDs.
+
+StateAdapter still exposes only `readCurrent`, `readRevision` and `commit`. Immutable question publications live in Revision snapshots and are indexed by `(map_id,question_id,version)` in `desk_questions`. Mutable answers, requests and the Map Quiet Window live only in `desk_answers`, `reopen_requests` and `desk_maps`. Earlier format-1 Revision JSON is never rewritten.
+
+Pure `prepareApply` accepts an optional `DeskState` value and produces a captured request plus prepared desk effects. Both adapters replay the captured request against authoritative state at commit; SQLite does so under `BEGIN IMMEDIATE`, after the existing head comparison. This closes the race in which human writes supersede an answer/request without advancing `currentRevision`. Desk effects, question-index updates, the new Revision and catalog head commit or roll back together. No external side effect occurs during pure preparation.
+
+`SQLiteStorage.desk` is the internal application seam for #112/#113, separate from StateAdapter and unavailable as an MCP answer-writing tool:
+
+| Method | Behavior |
+| --- | --- |
+| `read(mapId)` | Captured desk state for pure preparation. |
+| `inspect(mapId)` | One coherent read transaction for the head Revision and desk projection. |
+| `submitAnswers(mapId, submissions)` | Atomic single/bulk submission of `{questionId,questionVersion,choice:{option}|{text}}`; service assigns IDs, labels and timestamps, retains superseded answers and restarts the Map's 15-second Quiet Window. |
+| `fileReopenRequest(mapId, submission)` | Verifies the displayed target and entire affected ID/Settlement binding set, validates the source publication for an option, supersedes an older unhandled request and restarts the Quiet Window. |
+| `cancelReopenRequest(mapId, requestId)` | Cancels pending requests only and restarts the Quiet Window. |
+| `takeEligible(mapId, claimantId)` | Atomic low-level release after quiet: current answers for this Claimant's Tickets plus Map-scoped pending requests; retained Taken state survives receipt loss/restart. #112 owns when a response/task is collected and therefore when to call this method. |
+
+Human and release writes do not create Revisions. Failed validation leaves records and Quiet Window unchanged. SQLite failures retain the existing not-published/unknown/restart semantics. The storage seam has no browser key handling or transport waiting; callers must enforce the service setting, browser authorization and release-response boundary in their respective slices.
+
+## Reopen recovery and read projections
+
+The target reopened by a cited request records `reopenedAtRevision`; the handled request records `handledAtRevision` in the same transaction. Current reads join these identities only while that target is open. They do not choose the latest request on a Ticket. A Settlement removes the association; conversation reopens and reopened dependents receive none.
+
+`FoundMap.reopenContexts` therefore retains Kun's exact option/text after handling, even if the agent stops before re-posting. It persists through N+1, withdrawal and N+2 until the target settles. This satisfies the implementation notes in PR #115 and #116, with a stronger lifetime than just “until re-post.” The source option description is read from the retained publication identified by `requested.questionId` and `questionVersion`. `requestedOption` is emitted on an active publication only when exactly one option matches that source label **and** description; it never creates an answer. Text remains verbatim in `reopenContexts`.
+
+Current reads include all publications, displayed state, `currentAnswer`, `answerHistory` with derived `stale`, computed unlock/downstream counts, unhandled `reopenRequests` (including stale targets) and `reopenContexts`. Historical reads include only the selected Revision's publications with `published`/`withdrawn`/`superseded_by_reopen` states; they omit all answers, requests, contexts and delivery state. Inspection never takes anything. #113 can use `desk.inspect` for the same projection without duplicating domain logic.
+
+## Format-2 startup
+
+Fresh initialization creates format 2. Opening format 1 first uses the existing private `VACUUM INTO` backup mechanism to complete `<db>.pre-format-2.<UTC timestamp>.<nonce>.sqlite` in the same directory. Existing destinations/sidecars are refused; the backup is never automatically removed. One subsequent transaction creates the desk tables and sets `user_version=2`. Failures admit no calls and leave format 1 intact; unknown formats are refused. There is no downgrade API. An older binary cannot open a migrated file: operational rollback requires deliberately selecting a retained format-1 backup, with its snapshot cutoff understood.
+
+## Verification
+
+Tests use only newly created disposable SQLite files and fake clocks/publication boundaries. `tests/answer-desk.test.ts` covers publication/Claim guards, answer replacement versus commit, historical separation, restart and once-only taking, source bindings, request authorization/coverage/closure, context continuity and option rematching, queue counts and transactional rollback. `tests/desk-migration.test.ts` covers fresh format 2, WAL-inclusive backup, immutable old Revision bytes, failure boundaries, existing destinations, permissions and unknown/downgrade formats. MCP tool and HTTP tests cover declared schemas, default-disabled/enabled admission and ordinary-tool regressions.
+
+Required closeout commands: `npm run build`, `npm test`, `npm run typecheck`, `git diff --check` on Node.js 26.3.0. The PR records the final run counts. This slice has no mandatory workflow change; its behavior evidence is included in the coordinated #114 ChatGPT run, with Kun's approval before that run. Do not infer a real-client acceptance verdict from the automated tests.
+
+Final worker verification on 2026-10-27, Node.js 26.3.0: `npm run build`, `npm test -- --maxWorkers=2` (**50 files / 2,269 tests passed**), `npm run typecheck` and `git diff --check` passed. The preceding unrestricted `npm test` run hit the existing 5,000 ms timeout in two sandbox fixtures (`dedicated-privacy` artifact redaction and `sessions` concurrent HOME isolation); both passed in the complete lower-concurrency run with the original timeout/assertions unchanged.

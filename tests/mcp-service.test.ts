@@ -178,7 +178,9 @@ test.each(['grilling', 'prototype', 'research', 'task'] as const)('A01/D03–D05
   expect(revision(await reconnected.read()).state.tickets).toMatchObject([{ claim: 'session:A' }, { claim: null }, { claim: 'session:B' }]);
   expect(revision(await reconnected.read(3))).toEqual(revision(claimed));
   expect(revision(await reconnected.read(4))).toEqual(revision(accepted));
-  expect(await reconnected.read(6)).toEqual(settled);
+  const historical = await reconnected.read(6);
+  const { reopenRequests: _requests, reopenContexts: _contexts, ...settledHistory } = settled.structuredContent!;
+  expect(historical).toEqual({ ...settled, structuredContent: settledHistory });
 });
 
 test('D05/P05: complete command-error and reachable final-invariant matrix over real HTTP preserves known fixture history', async () => {
@@ -468,7 +470,8 @@ test('D11: HTTP receipt lost after durable COMMIT with service still alive; expl
   expect(recovered.maps[0]!.history.slice(0, 3)).toEqual(before.maps[0]!.history.slice(0, 3));
   expect(recovered.maps[0]!.history[4]).toEqual(before.maps[0]!.history[4]);
   expect(recovered.maps[0]!.current.structuredContent).toMatchObject({ revision: { revision: 4, priorRevision: 3, state: { notes: 'HTTP advanced' } } });
-  expect(recovered.maps[0]!.history[3]!.structuredContent).toEqual(recovered.maps[0]!.current.structuredContent);
+  const { reopenRequests: _requests, reopenContexts: _contexts, ...currentHistory } = recovered.maps[0]!.current.structuredContent!;
+  expect(recovered.maps[0]!.history[3]!.structuredContent).toEqual(currentHistory);
   expect((await c.client.listTools()).tools).toEqual(mapTools); // Same service, still available.
   armed = false;
   expect((await c.apply(update, 3)).structuredContent).toMatchObject({ kind: 'conflict', conflict: { expectedRevision: 3, currentRevision: 4 } });
@@ -629,4 +632,20 @@ test('P08/P09: actual operator command startup failures return nonzero with fixe
   const code = await new Promise<number | null>(resolve => child.on('exit', resolve));
   expect(code).toBe(1); expect(logs).toContain('startup failed: invalid_configuration');
   expect(logs).not.toContain(token); expect(logs).not.toContain('/private-path-fixture');
+});
+
+test.each([undefined, false, true])('Answer Desk service setting %s reaches the MCP handler and leaves discovery at four tools', async answerDeskEnabled => {
+  const f = storageFixture(); const port = await freePort();
+  const service = await serveLocalMcp(f.storage, { ...configuration(f.path, port), ...(answerDeskEnabled === undefined ? {} : { answerDeskEnabled }) });
+  cleanups.push(() => service.stop()); const c = await connect(port); await c.create();
+  const commands = [{ kind: 'deskQuestion.post', ticketId: 'Missing', claimantId: 'work', question: {
+    questionId: 'Q', options: [{ label: 'One', description: 'First' }, { label: 'Two', description: 'Second' }], recommendedOption: 1,
+    recommendedAnswer: 'First', whyKun: 'Choose', triage: 'needsKun', triageReason: 'Choice', gatesResearch: false,
+  } }];
+  const result = (await c.apply(commands, 1)).structuredContent;
+  expect(result).toMatchObject(answerDeskEnabled === true ? { kind: 'rejected', rejection: { code: 'ticket_not_found' } }
+    : { kind: 'rejected', code: 'answer_desk_disabled' });
+  expect((await c.client.listTools()).tools.map(t => t.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply']);
+  expect((await c.read()).structuredContent).toMatchObject({ kind: 'found', revision: { revision: 1 } });
+  expect(() => captureConfiguration({ ...configuration(f.path, port), answerDeskEnabled: 'true' as unknown as boolean })).toThrow('invalid_configuration');
 });

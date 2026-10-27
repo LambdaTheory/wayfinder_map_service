@@ -325,6 +325,8 @@ Tests for this implementation must control submission and release boundaries rat
 
 ## 9. Implementation and release sequence
 
+Until #114, the desk is disabled by default; #111–#113 ship behind one service setting that tests and isolated runs enable, and #114 enables it by default.
+
 | Issue | Delivery |
 | --- | --- |
 | #109 | This specification, two ADRs, glossary and contract amendments; closeout follows [section 10](#10-accepted-by-kun-on-2026-10-26). |
