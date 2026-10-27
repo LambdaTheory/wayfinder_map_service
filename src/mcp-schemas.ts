@@ -54,7 +54,7 @@ const outcome = (type: typeof types[number]) => type === 'grilling' || type === 
   ? object({ kind: literal('decision'), statement: text, rationale: text })
   : type === 'research' ? object({ kind: literal('finding'), statement: text, limitations: string }, ['kind', 'statement'])
     : object({ kind: literal('completion'), statement: text, resultingFacts: jsonObject }, ['kind', 'statement']);
-function definitions(version: Schema, answerDeskEnabled = false): Tool[] {
+function definitions(version: Schema, answerDeskEnabled = true): Tool[] {
   function settlement(type: typeof types[number], stored = false): Schema {
     return { ...object({ outcome: outcome(type), evidence: array(evidence), references, provenance, extensions,
       ...(stored ? { introducedAtRevision: revision, ...(answerDeskEnabled ? { deskAnswer: deskCitation } : {}) } : {}) }, ['outcome', 'evidence', 'references', 'provenance', 'extensions', ...(stored ? ['introducedAtRevision'] : [])]),
@@ -145,13 +145,13 @@ function definitions(version: Schema, answerDeskEnabled = false): Tool[] {
       inputSchema: root(object({ version, mapId: id, expectedRevision: revision, ...(answerDeskEnabled ? { reopenRequestId: { ...id, description: 'Optional Taken Reopen Request authorizing this batch to reopen its target and exactly the currently required settled dependents. The service checks their recorded Settlement bindings and marks the request handled atomically.' } } : {}), commands: array({ oneOf: commands }, { minItems: 1, maxItems: 100 }), includeSnapshot: { type: 'boolean', default: false } }, ['version', 'mapId', 'expectedRevision', 'commands'])),
       outputSchema: root({ oneOf: [...writeOutput({}), ...errors] }) },
     ...(answerDeskEnabled ? [{ name: 'map_wait',
-      description: 'Wait for Answer Desk responses on one Map. Supply mapId, your claimantId, and the Release Version you follow. Returns every eligible answer on your currently claimed Tickets plus Map-scoped reopen_request items after 15 seconds without a human answer/request change. It durably marks delivered items Taken; it never settles Tickets or reopens them. Without the io.modelcontextprotocol/tasks client capability this is a blocking call: maxWaitSeconds defaults to 600, range 1–1500; set the client timeout above that bound. A modern request declaring that extension receives a task: default 28800 seconds, range 1–28800. Poll tasks/get; first completed retrieval takes still-eligible items. tasks/cancel takes nothing new; tasks/update is unsupported. Tasks expire maxWaitSeconds plus 600 seconds after creation and do not survive service restart. A newer wait for the same Map and Claimant supersedes the older wait. Results are delivered, none_yet (optionally quietUntil), superseded, or interrupted on service stop, with currentRevision and items. On lost receipt or unknown task, read the current Map to recover Taken-but-unsettled answers and unhandled Reopen Requests; do not assume they were returned or settled. ChatGPT uses current map_read with claimantId and version at each turn start instead of waiting. Inspection and historical reads never take answers.',
+      description: workflowContract.toolDescriptions.map_wait,
       inputSchema: root(object({ mapId: id, claimantId: id, version, maxWaitSeconds: { type: 'integer', minimum: 1, maximum: 28_800,
         description: 'Blocking: default 600, maximum 1500. Task: default/maximum 28800. Values outside the applicable range are rejected, never clamped.' } }, ['mapId', 'claimantId', 'version'])),
       outputSchema: root({ oneOf: [object({ ...deliveryFields, outcome: { enum: ['delivered', 'none_yet', 'superseded', 'interrupted'] }, currentRevision: revision }, ['outcome', 'items', 'currentRevision']), ...errors] }),
     }] : []),
   ];
-  const expected = answerDeskEnabled ? workflowContract.businessTools.enabled : workflowContract.businessTools.disabled;
+  const expected = workflowContract.businessTools;
   if (JSON.stringify(tools.map(tool => tool.name)) !== JSON.stringify(expected)) throw new Error('Invalid Map tool set');
   return tools;
 }

@@ -37,7 +37,8 @@ async function fixture(entry: 'mcp-only' | 'dedicated', mode: string, appendix =
     if (req.headers['x-synthetic-token']) { echoedTokens.push(String(req.headers['x-synthetic-token'])); res.end('fixture'); return; }
     requestsAtProxy++; if (req.headers.authorization) credentialsAtProxy++;
     if (req.url?.includes('/positive-control')) positiveControl++;
-    const target = new URL(req.url!);
+    let target: URL;
+    try { target = new URL(req.url!); } catch { res.writeHead(400); res.end('absolute proxy URL required'); return; }
     if (target.hostname !== '127.0.0.1' || !allowed(Number(target.port))) { res.writeHead(502).end(); return; }
     const upstream = request(target, { method: req.method, headers: req.headers, agent: false }, reply => {
       res.writeHead(reply.statusCode!, reply.headers); reply.pipe(res);

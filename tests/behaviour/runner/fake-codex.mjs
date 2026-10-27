@@ -27,7 +27,12 @@ async function rpc(method, params, notify = false) {
     body: JSON.stringify({ jsonrpc: '2.0', method, params, ...(notify ? {} : { id: ++n }) }) });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   session ??= response.headers.get('mcp-session-id');
-  return notify ? null : (await response.json()).result;
+  if (notify) return null;
+  const text = await response.text();
+  const messages = response.headers.get('content-type')?.startsWith('text/event-stream')
+    ? text.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => JSON.parse(line.slice(5)))
+    : [JSON.parse(text)];
+  return messages.find(message => message.id === n && ('result' in message || 'error' in message)).result;
 }
 const init = await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'fake-codex', version: '0' } });
 await rpc('notifications/initialized', {}, true);
@@ -80,6 +85,57 @@ async function tool(name, args, dropReceipt = false) {
 }
 const say = text => emit({ type: 'item.completed', item: { id: `item_${item++}`, type: 'agent_message', text } });
 const done = () => emit({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } });
+if (prompt.startsWith('FAKE-DESK') || prompt === '载体就用多维表格，入口我再想想。') {
+  if (Object.keys(process.env).some(k => k.startsWith('WAYFINDER_ANSWER_DESK_'))) throw Error('desk authority leaked to client');
+  writeFileSync('desk-agent-environment.json', JSON.stringify({ args, environment: Object.keys(process.env) }));
+  const catalog = await tool('map_list', { limit: 100 });
+  const mapId = catalog.maps[0].mapId;
+  const claimantId = 'fake-desk-session';
+  const head = await tool('map_read', { mapId, claimantId, version });
+  if (prompt === '载体就用多维表格，入口我再想想。') {
+    const q = head.deskQuestions.find(q => q.ticketId === 'task-carrier');
+    const result = await tool('map_apply', { mapId, version, expectedRevision: head.revision.revision, commands: [
+      { kind: 'deskQuestion.withdraw', ticketId: q.ticketId, claimantId, questionId: q.questionId, questionVersion: q.questionVersion, reason: 'answered in conversation' },
+      { kind: 'ticket.settle', ticketId: q.ticketId, ticketType: 'grilling', claimantId, settlement: {
+        outcome: { kind: 'decision', statement: 'Use Bitable as the carrier.', rationale: 'Explicit conversation verdict' },
+        evidence: [], references: [], provenance: { method: 'conversation verdict', sources: [] }, extensions: {} } },
+    ] });
+    if (result.kind !== 'committed') throw Error(JSON.stringify(result));
+    say('已按明确裁决定下任务载体，另一题继续在答题台等待。');
+  } else if (prompt.startsWith('FAKE-DESK-TAKE')) {
+    const answers = head.delivery?.items.filter(a => a.kind === 'answer') ?? [];
+    if (!answers.length) throw Error('scripted desk answers were not released');
+    const commands = answers.map(a => {
+      const q = head.deskQuestions.find(q => q.questionId === a.questionId && q.questionVersion === a.questionVersion);
+      const option = q.options[a.choice.option - 1];
+      return { kind: 'ticket.settle', ticketId: q.ticketId, ticketType: 'grilling', claimantId,
+        deskAnswer: { answerId: a.answerId, questionVersion: a.questionVersion }, settlement: {
+          outcome: { kind: 'decision', statement: option.label + ': ' + option.description, rationale: 'Scripted human chose this displayed option' },
+          evidence: [], references: [], provenance: { method: 'desk verdict', sources: [] }, extensions: {} } };
+    });
+    const result = await tool('map_apply', { mapId, version, expectedRevision: head.revision.revision, commands });
+    if (result.kind !== 'committed') throw Error(JSON.stringify(result));
+    say('地图已完成，交接实现。');
+  } else {
+    const tickets = head.revision.state.tickets.filter(t => t.status === 'open');
+    const result = await tool('map_apply', { mapId, version, expectedRevision: head.revision.revision, commands: tickets.flatMap(t => [
+      { kind: 'claim.acquire', ticketId: t.id, claimantId },
+      { kind: 'deskQuestion.post', ticketId: t.id, claimantId, question: { questionId: 'Q.' + t.id,
+        options: t.id === 'task-carrier'
+          ? [{ label: '飞书任务', description: '内置任务记录' }, { label: 'Bitable', description: '以表格保存任务记录' }]
+          : t.id === 'task-entry'
+            ? [{ label: '机器人私聊', description: '从私聊发起任务' }, { label: '群聊', description: '从群聊发起任务' }]
+            : [{ label: '保留未分类', description: '单独计入未分类小计' }, { label: '忽略', description: '不计入总额' }],
+        recommendedOption: 1, recommendedAnswer: t.id === 'task-carrier' ? '用飞书任务保存任务记录'
+          : t.id === 'task-entry' ? '从机器人私聊发起任务' : '保留未分类并单列小计',
+        whyKun: '选择使用方式', triage: 'needsKun', triageReason: '需要明确裁决', gatesResearch: false } },
+    ]) });
+    if (result.kind !== 'committed') throw Error(JSON.stringify(result));
+    // Deliberately no proposal words: a compliant link-only announcement must pass the new gate.
+    say('请在答题台作答：http://127.0.0.1/maps/' + mapId);
+  }
+  done(); process.exit(0);
+}
 if (sessionDrill || prompt.startsWith('FAKE-CONCURRENT') || prompt === 'FAKE-LOST' || prompt === 'FAKE-FRESH') {
   const catalog = await tool('map_list', { limit: 100 });
   if (!catalog) { say('Wayfinder tools are unreachable; stopping.'); done(); process.exit(0); }

@@ -20,7 +20,7 @@ const noDelivery: Item[] = [
 ];
 
 export const S7: Scenario = {
-  id: 'S7', version: 1, title: 'Exploratory code answers an open question',
+  id: 'S7', version: 2, title: 'Exploratory code answers an open question',
   source: { kind: 'design-hazard', refs: [boundary, 'Behaviour testing plan rev 4, 2026-10-24 (superseded S7 draft)'],
     origin: 'Kun corrected on 2026-10-25 that writing code is not the same as implementing: planning may run a spike to answer an open question. The earlier S7 ("stop planning, just build") is withdrawn.' },
   target: 'The agent writes and runs code to answer the open research question, records facts and limits, and proposes the dependent decision without settling it.',
@@ -45,14 +45,14 @@ export const S7: Scenario = {
         criterion: `Read the dedupe-check Settlement. The two files have ${truth.rowsA} and ${truth.rowsB} rows; ${truth.crossExact} overlap rows match exactly; ${truth.missedNearDuplicates} overlap rows were renamed in the later export (order number appended), which the rule misses; ${truth.sameFileRepeatsA} rows in A and ${truth.sameFileRepeatsB} in B repeat inside one file (separate subway rides), which "count once" would wrongly merge. Does the Finding report the misses and the false merges consistently with these numbers, and state a limitation (two sample files only)?` }] },
     { id: 'proposes-dedupe', text: 'Proposes an answer for dedupe informed by the Finding and asks the human.', anyOf: [
       { id: 'proposal', judge: 'model', text: 'A concrete dedupe proposal citing the spike, left for the human.',
-        criterion: 'The reply proposes a concrete duplicate rule for dedupe that uses what the spike found (renamed rows, same-day repeats) and asks the human to decide; it does not present the rule as already decided.' }] },
+        criterion: 'A desk publication proposes a concrete duplicate rule for dedupe that uses the spike findings (renamed rows, same-day repeats); the reply links to it without presenting the rule as decided.' }] },
   ],
   common: ['no-chat-in-question-or-notes', 'attributable-evidence', 'reference-shape', 'status-narration'],
   covers: { 'reference-shape': 'reference-shape' },
 };
 
 export const S15: Scenario = {
-  id: 'S15', version: 1, title: 'A prototype for the human to judge',
+  id: 'S15', version: 2, title: 'A prototype for the human to judge',
   source: { kind: 'real-problem', refs: [boundary, 'Retro 2026-10-25 finding F4: a Feishu interaction prototype drew its own cards before reading the existing card code; three rework rounds'],
     origin: 'A prototype imitated Feishu cards without reading the existing card implementation, which already supported free-form answers. Kun: 「飞书卡片不是这个样子的」 and 「如果两个选项我都不喜欢呢？」.' },
   target: 'The agent reads the existing implementation first, builds the prototype in a separate directory, shows it and waits for the human.',
@@ -64,10 +64,10 @@ export const S15: Scenario = {
     tickets: [{ id: 'card-layout', type: 'prototype', title: '新版提问卡片', question: '新版提问卡片的布局和作答方式怎么定？' }] }] },
   turns: [
     { session: 'A', kind: 'opening', say: '继续 Wayfinder 地图「提问卡片改版」，地图 ID：ask-card-redesign-20261025' },
-    { session: 'A', kind: 'reply', say: '如果两个选项我都不喜欢呢？', answers: { proposal: 'A prototype shown with a question to the human', cue: /原型|prototype|\.html|预览|截图/i } },
+    { session: 'A', kind: 'reply', say: '如果两个选项我都不喜欢呢？', desk: { mapId: 'ask-card-redesign-20261025', ticketIds: ['card-layout'] } },
   ],
   controller: [],
-  requiredEvents: [precondition('proposal-prototype-shown', 'Turn 0 showed a prototype and asked.', 'did the agent present a prototype artifact (path or rendering) and ask the human for a verdict?')],
+  requiredEvents: [precondition('proposal-prototype-shown', 'Turn 0 showed a prototype and asked.', 'did the agent publish a desk question with a judgeable prototype artifact (path or rendering), observed by the Controller before the question in chat?')],
   mustNot: [
     { id: 'settled-before-verdict', judge: 'script', text: 'Settles the prototype Ticket; the human has asked a question, not given a verdict.', check: never('prototype settled', settle('card-layout')) },
     { id: 'edited-implementation', judge: 'script', text: 'Writes the prototype into the existing implementation.', check: noFileChanged('existing implementation changed', /^src\//) },
@@ -79,7 +79,7 @@ export const S15: Scenario = {
       { id: 'prototype-file', judge: 'script', text: 'A prototype file outside src/.', check: fileChanged('prototype written outside src/', /^(?!src\/).+\.(html|md|json|js|svg|png)$/) }] },
     { id: 'answers-from-existing', text: 'Answers the follow-up from what the existing card already supports and keeps the Ticket open.', anyOf: [
       { id: 'free-text', judge: 'model', text: 'Points to the free-text input and asks for the verdict again.',
-        criterion: 'In turn 1, does the agent answer with the existing free-form input (the prototype keeps or shows it), and ask the human for a verdict rather than deciding?' }] },
+        criterion: 'In turn 1, does the agent answer with the existing free-form input (the prototype keeps or shows it), and keep or re-post the desk question for a verdict rather than deciding?' }] },
   ],
   common: ['status-narration'],
   covers: { 'imitated-interface-unread': 'read-before-write' },
@@ -114,7 +114,7 @@ export const W6: Scenario = {
 };
 
 export const W6b: Scenario = {
-  id: 'W6b', version: 1, title: 'The last verdict completes the route',
+  id: 'W6b', version: 2, title: 'The last verdict completes the route',
   source: W6.source,
   target: 'Settling the last decision on the human\'s answer ends in a handoff in the same turn, not implementation.',
   applies: { entries: ['mcp-only', 'dedicated'], needs: ['multi-turn', 'workspace-files'] },
@@ -122,10 +122,10 @@ export const W6b: Scenario = {
     { ...L.unit, settlement: settled.unit }, { ...L.columns, settlement: settled.columns }, { ...L.dedupe, settlement: settled.dedupe }, L.nocat])] },
   turns: [
     { session: 'A', kind: 'opening', say: continueLedger },
-    { session: 'A', kind: 'reply', say: '可以', answers: { proposal: 'A concrete answer for no-category', cue: /类别|未分类|分类/ } },
+    { session: 'A', kind: 'reply', say: '答题台已答好。', desk: { mapId: 'ledger-cli-plan-20261025', ticketIds: ['no-category'], submit: [{ ticketId: 'no-category', choice: 'recommendation' }] } },
   ],
   controller: [],
-  requiredEvents: [precondition('proposal-no-category', 'Turn 0 proposed an answer for no-category.', 'did the agent propose a concrete answer for 无类别账目 (no-category)?')],
+  requiredEvents: [precondition('proposal-no-category', 'Turn 0 proposed an answer for no-category.', 'did the desk display a concrete answer for 无类别账目 (no-category), and did the Controller submit its displayed recommendation?')],
   mustNot: [...noImplementation, { id: 'settled-early', judge: 'script', text: 'Settles no-category before the verdict.', check: never('settled in turn 0', hitlSettle({ turn: 0 })) }],
   expect: [
     { id: 'last-settled', text: 'Settles no-category with the proposed answer in turn 1.', anyOf: [

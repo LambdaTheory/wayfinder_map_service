@@ -5,10 +5,10 @@ import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { mock } from 'node:test';
 
-mock.module('../../dist/mcp-service.js', { namedExports: {
+mock.module('../../dist/mcp-service.js', { exports: {
   startLocalMcpService() { throw new Error('Attach must not start a service'); },
 } });
-mock.module('../../scripts/local-chatgpt-relay.mjs', { namedExports: {
+mock.module('../../scripts/local-chatgpt-relay.mjs', { exports: {
   createLocalChatGptRelay() {
     const relay = new EventEmitter();
     relay.listen = (_port, _host, ready) => ready();
@@ -17,7 +17,7 @@ mock.module('../../scripts/local-chatgpt-relay.mjs', { namedExports: {
   },
 } });
 let tunnelStopped = false;
-mock.module('node:child_process', { namedExports: {
+mock.module('node:child_process', { exports: {
   execFileSync,
   spawn() {
     const tunnel = new EventEmitter();
@@ -27,7 +27,7 @@ mock.module('node:child_process', { namedExports: {
   },
 } });
 const requests = [];
-mock.module('../../scripts/local-chatgpt-attach.mjs', { namedExports: {
+mock.module('../../scripts/local-chatgpt-attach.mjs', { exports: {
   async acceptsLocalChatGptToken(port, token) {
     requests.push({ port, token });
     return true;

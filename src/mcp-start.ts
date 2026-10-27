@@ -6,12 +6,13 @@ async function main() {
   if (process.argv.length !== 2 || !port || !/^[1-9][0-9]{0,4}$/.test(port)) throw new LocalServiceFailure('invalid_configuration');
   const answerDesk = process.env.WAYFINDER_ANSWER_DESK_ENABLED;
   if (answerDesk !== undefined && answerDesk !== 'true' && answerDesk !== 'false') throw new LocalServiceFailure('invalid_configuration');
+  if (answerDesk === 'false') throw new LocalServiceFailure('answer_desk_required');
   let allowedOrigins: unknown;
   try { allowedOrigins = JSON.parse(process.env.WAYFINDER_ALLOWED_ORIGINS ?? '[]'); }
   catch { throw new LocalServiceFailure('invalid_configuration'); }
   const service = await startLocalMcpService({ databasePath: process.env.WAYFINDER_DATABASE_PATH!, port: Number(port),
     token: process.env.WAYFINDER_TOKEN!, actorId: process.env.WAYFINDER_ACTOR_ID!, clientId: process.env.WAYFINDER_CLIENT_ID!,
-    allowedOrigins: allowedOrigins as string[], answerDeskEnabled: answerDesk === 'true',
+    allowedOrigins: allowedOrigins as string[],
     ...(process.env.WAYFINDER_ANSWER_DESK_KEY_FILE === undefined ? {} : { answerDeskKeyPath: process.env.WAYFINDER_ANSWER_DESK_KEY_FILE }),
     ...(process.env.WAYFINDER_CREDENTIALS_FILE === undefined ? {} : { credentialsPath: process.env.WAYFINDER_CREDENTIALS_FILE }),
   });

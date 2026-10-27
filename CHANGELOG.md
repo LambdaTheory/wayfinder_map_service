@@ -4,6 +4,14 @@ All notable project changes are recorded here. Historical implementation evidenc
 
 Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Release Version, covers the service and the workflow it carries; `docs/spec/mcp-sqlite.md` §14.3 says which part to raise, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion` (`1.0.0` to `3.0.0` below), and the server reported a fixed `0.1.0`.
 
+## 4.0.0 (2026-10-27)
+
+- Answer Desk is enabled by default with one five-tool surface; the disabled mode is retired and explicit false configuration refuses startup.
+- Mandatory workflow: publish every askable question with unlock-first triage and reasons, announce only a short desk link, continue independent work, then settle released verdicts and publish newly unlocked questions in the same write. Claude Code uses task delivery, Codex waits after independent work, and ChatGPT takes answers at each turn start. Tool definitions carry these rules without requiring server instructions.
+- The dedicated launcher attempts to open a selected Map's keyed desk without handing the key to its agent; browser/platform/key/Map failures leave agent startup available with a keyless manual-open hint. Orca currently uses the secure default-browser stdin handoff pending a safe tab-input API.
+- ChatGPT is unverified on this major release. Its acceptance is deferred, not removed; the coordinator must obtain Kun's decision on any merge before that run.
+- An everyday database first started on 3.2.0 or later migrates one way to format 2 after a retained private backup; upgrading to this release also crosses that boundary if it has not already migrated.
+
 ## 3.4.0 (2026-10-27)
 - Add the Answer Desk viewer behind the existing **default-off** `answerDeskEnabled` setting: service-ordered questions, options and full recommendations, keyboard/text answers, selected recommendation confirmation, answer changes, delivery/Settlement states and publication history. Two-second polling also follows desk-only writes without advancing a Map Revision.
 - Add one answer-only `POST /api/desk` route for submitting/changing answers, filing/replacing Reopen Requests and cancelling untaken requests. Exact loopback Host, same-origin checks, a separate process-scoped browser key and bounded JSON protect it; all other viewer routes remain GET/HEAD. When disabled the route returns 404 and the viewer has no desk UI.

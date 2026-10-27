@@ -724,7 +724,7 @@ test('out-of-turn discovery reaches the service and wire while Map access stays 
     for (const method of ['tools/list', 'resources/list', 'resources/templates/list', 'prompts/list', 'ping']) {
       const response = await post(method);
       assert.equal(response.status, 200, method);
-      const body = await response.json();
+      const body = rpcResponse(await response.text(), response.headers.get('content-type') ?? '', id) as { id: number; result?: unknown; error?: unknown };
       assert.equal(body.id, id);
       if (method === 'resources/templates/list') {
         // The current service has no template handler; preserve its protocol error, not a relay 503.
@@ -791,7 +791,7 @@ test('ChatGPT recorded discovery, tools/list and writes work sessionlessly with 
     const modern = await createHttpTestClient(a.relay.port, 'ignored', '2026-07-28');
     try {
       const tools = (await modern.client.listTools()).tools;
-      assert.deepEqual(tools.map(t => t.name), ['map_create', 'map_list', 'map_read', 'map_apply']);
+      assert.deepEqual(tools.map(t => t.name), ['map_create', 'map_list', 'map_read', 'map_apply', 'map_wait']);
       for (const name of ['map_create', 'map_apply']) {
         const versionField = tools.find(t => t.name === name)!.inputSchema.properties!.version as { description: string };
         assert.match(versionField.description, new RegExp(`set it to "${a.record.service.version}"`));
@@ -819,7 +819,7 @@ test('ChatGPT recorded discovery, tools/list and writes work sessionlessly with 
       assert.equal(wireOf(a).at(-1)!.protocolVersionHeader, null);
       // Independently establish that the legacy route remains available.
       const fallback = await createHttpTestClient(a.relay.port, 'ignored');
-      try { assert.equal((await fallback.client.listTools()).tools.length, 4); await fallback.streamProbe; } finally { await fallback.client.close(); }
+      try { assert.equal((await fallback.client.listTools()).tools.length, 5); await fallback.streamProbe; } finally { await fallback.client.close(); }
     } finally { await modern.client.close(); }
     assert.ok(refusalsOf(a.dir).every(r => r.httpMethod === 'GET' && r.status === 405));
   } finally { await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }
@@ -891,7 +891,7 @@ test('every relay refusal persists only diagnostic metadata, with unchanged guar
     a.relay.beforeForward = async () => {}; a.relay.active = true;
     const { client, streamProbe } = await createHttpTestClient(a.relay.port, 'ignored');
     try {
-      assert.equal((await client.listTools()).tools.length, 4);
+      assert.equal((await client.listTools()).tools.length, 5);
       assert.deepEqual(await streamProbe, { status: 405 }); // The SDK's optional GET probe keeps its existing refusal.
     }
     finally { await client.close(); }

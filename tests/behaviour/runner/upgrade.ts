@@ -8,7 +8,7 @@ import type { AttemptRecord, EventRecord, GivenRules } from '../evidence.ts';
 import type { RolloutFacts } from './normalize.ts';
 import { initialRules, shown } from './normalize.ts';
 import type { RelayObservation, RpcRequest } from './relay.ts';
-import { structuredReply } from './relay.ts';
+import { structuredReply, rpcReply } from './relay.ts';
 import { checkoutRoot } from './service.ts';
 
 /** All persistent tables, not merely the head Revision or the refused response's claim. */
@@ -56,8 +56,9 @@ export function upgradeRules(upgrade: NonNullable<AttemptRecord['upgrade']>, rol
       ? { known: true, value: contract.toolDescriptions } : { known: false, reason: 'tool descriptions not found in native additional_tools' };
     const tools = log.flatMap(e => {
       if (e.turn !== turn || e.phase !== 'response' || e.method !== 'tools/list' || e.status !== 200) return [];
-      try { const list = JSON.parse(e.body).result?.tools; return Array.isArray(list) ? [list] : []; } catch { return []; }
-    }).find(list => list.every((t: { name: string; description?: string }) => t.description === contract.toolDescriptions[t.name]));
+      try { const list = (rpcReply(e.body, e.requestId)?.result as { tools?: unknown[] } | undefined)?.tools; return Array.isArray(list) ? [list] : []; } catch { return []; }
+    }).find(list => list.every(t => t !== null && typeof t === 'object' && 'name' in t && typeof t.name === 'string'
+      && 'description' in t && t.description === contract.toolDescriptions[t.name]));
     return { ...rules, session, turn, fromSeq: seq, phase: initial ? 'initial' : 'after-restart', serviceVersion: contract.version,
       resources: 'available', toolDefinitions: tools ? { known: true, value: tools } : { known: false, reason: 'No matching tools/list response in this native turn' } };
   };
@@ -75,7 +76,7 @@ export function upgradeRules(upgrade: NonNullable<AttemptRecord['upgrade']>, rol
     const read = events.find(e => e.kind === 'resource-read' && e.actor === 'agent' && e.session === session && e.turn === turn
       && e.seq > restart && e.ok && e.uri === 'wayfinder://workflow/exploration');
     const delivered = log.some(e => e.turn === turn && e.phase === 'response' && e.method === 'resources/read' && e.status === 200
-      && resourceText(e.body) === currentResource);
+      && resourceText(e.body, e.requestId) === currentResource);
     if (read) {
       const exposed = delivered && rollout && shown(channels.outputs, currentResource);
       result.push({ ...result.at(-1)!, fromSeq: read.seq,
@@ -86,9 +87,9 @@ export function upgradeRules(upgrade: NonNullable<AttemptRecord['upgrade']>, rol
   return result;
 }
 
-export function resourceText(body: string): string | null {
+export function resourceText(body: string, requestId?: unknown): string | null {
   try {
-    const contents = JSON.parse(body).result?.contents as { uri?: string; text?: string }[] | undefined;
+    const contents = (rpcReply(body, requestId)?.result as { contents?: { uri?: string; text?: string }[] } | undefined)?.contents;
     return contents?.find(c => c.uri === 'wayfinder://workflow/exploration')?.text ?? null;
   } catch { return null; }
 }

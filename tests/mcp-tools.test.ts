@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,14 +9,13 @@ import type { CallToolResult as SdkCallToolResult } from '@modelcontextprotocol/
 type CallToolResult = SdkCallToolResult & { structuredContent?: Record<string, unknown> };
 import { Ajv, type AnySchema } from 'ajv';
 import { afterEach, expect, test } from 'vitest';
-import { createMapMcpServer, mapTools, toolsOnlyMapTools, answerDeskMapTools, toolsOnlyAnswerDeskMapTools, workflowContract } from '../src/mcp-tools.js';
+import { createMapMcpServer, mapTools, toolsOnlyMapTools, answerDeskMapTools, workflowContract } from '../src/mcp-tools.js';
 import { sqliteLifecycleForTests } from '../src/sqlite-internal.js';
 import type { SQLiteStorage } from '../src/sqlite-storage.js';
 import { calculateFrontier, parseId, prepareApply } from '../src/index.js';
 import type { ClaimantId, Command, NonEmpty, Revision, TicketId, TicketType } from '../src/index.js';
 import { rejectionSeed, rejectionCases } from './helpers/mcp-rejection-cases.js';
 import { versioned } from './helpers/write-version.js';
-import { disabledDeskCases } from './helpers/disabled-desk-cases.js';
 
 const version: string = JSON.parse(readFileSync('package.json', 'utf8')).version;
 
@@ -86,11 +84,11 @@ async function observe(storage: SQLiteStorage, head: number) {
   })));
 }
 
-test('P01/P02: SDK discovers exactly four complete schemas, once-only compact/default/false and opt-in snapshots', async () => {
+test('P01/P02: SDK discovers exactly five complete schemas, once-only compact/default/false and opt-in snapshots', async () => {
   const f = await fixture();
   const listed = await f.client.listTools();
   expect(listed.tools).toEqual(mapTools);
-  expect(listed.tools.map(tool => tool.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply']);
+  expect(listed.tools.map(tool => tool.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply', 'map_wait']);
   expect(LATEST_PROTOCOL_VERSION).toBe('2025-11-25');
   expect(f.negotiatedProtocol).toBe('2025-11-25');
   expect(f.server.getClientVersion()).toEqual({ name: 'wayfinder-protocol-test', version: '0.1.0' });
@@ -127,23 +125,16 @@ test('W02: every advertised default command and field has standalone tool-descri
   }
 });
 
-test.each([false, true])('disabled tools/list exactly matches 3.1.0, including output schemas and descriptions (toolsOnly=%s)', async toolsOnly => {
-  const baseline = JSON.parse(readFileSync('tests/helpers/mcp-tools-v3.1.0.json', 'utf8'));
-  const f = await fixture({}, false, toolsOnly);
+test.each([false, true])('the default five tools include all desk schemas (toolsOnly=%s)', async toolsOnly => {
+  const f = await fixture({}, undefined, toolsOnly);
   const { tools } = await f.client.listTools();
-  const hashes = Object.fromEntries(tools.map(tool => [tool.name, createHash('sha256')
-    .update(JSON.stringify(tool).replaceAll(workflowContract.version, '<release-version>')).digest('hex')]));
-  expect(hashes).toEqual(toolsOnly ? baseline.toolsOnlyMapTools : baseline.mapTools);
-  expect(JSON.stringify(tools)).not.toMatch(/desk|reopenRequest|reopenContext|reopenedAtRevision/i);
-  const enabled = await fixture({}, true, toolsOnly);
-  const enabledTools = (await enabled.client.listTools()).tools;
-  expect(enabledTools).toEqual(toolsOnly ? toolsOnlyAnswerDeskMapTools : answerDeskMapTools);
-  expect(enabledTools.map(tool => tool.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply', 'map_wait']);
-  for (const tool of [...tools, ...enabledTools]) {
+  expect(tools).toEqual(toolsOnly ? toolsOnlyMapTools : mapTools);
+  expect(tools.map(tool => tool.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply', 'map_wait']);
+  for (const tool of tools) {
     for (const combinator of ['oneOf', 'anyOf', 'allOf']) expect(tool.inputSchema, tool.name).not.toHaveProperty(combinator);
   }
   for (const word of ['deskQuestion.post', 'deskQuestion.withdraw', 'reopenRequest.close', 'deskAnswer', 'reopenRequestId', 'deskQuestions', 'reopenRequests', 'reopenContexts']) {
-    expect(JSON.stringify(enabledTools)).toContain(word);
+    expect(JSON.stringify(tools)).toContain(word);
   }
 });
 
@@ -243,7 +234,7 @@ test.each(['grilling', 'prototype', 'research', 'task'] as const)('P01/P02/P03: 
   expect(settled.structuredContent!.frontier).toEqual(['B']);
   expect(snapshot(settled).state.tickets[0]).toMatchObject({ claim: null, status: 'settled', settlement: { ...settlement(type), introducedAtRevision: 4 } });
   const read4 = await f.read(4);
-  expect(read4.structuredContent).toEqual({ ...settled.structuredContent, kind: 'found' });
+  expect(read4.structuredContent).toEqual({ ...settled.structuredContent, kind: 'found', deskQuestions: [] });
   const reopened = await f.apply([{ kind: 'ticket.reopen', ticketId: 'A', reason: ' Reconsider\n' }], 4);
   expect(reopened.structuredContent!.frontier).toEqual(['A']);
   expect(snapshot(reopened).changes[0]).toEqual({ commandIndex: 0, command: 'ticket.reopen', subjectId: 'A', reason: ' Reconsider\n' });
@@ -608,20 +599,7 @@ test('Answer Desk commands and current/history inspection round-trip through dec
   expect((await f.read(4)).structuredContent).not.toHaveProperty('reopenContexts');
 });
 
-test.each([undefined, false])('Answer Desk setting %s disables all desk writes and taking reads before storage; ordinary tools remain available', async answerDeskEnabled => {
-  const f = await fixture({}, answerDeskEnabled); await f.create(); const before = await observe(f.storage, 1);
-  // Discovery installs the SDK output validator, as it does for ordinary clients.
-  expect((await f.client.listTools()).tools.map(t => t.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply']);
-  for (const entry of disabledDeskCases(version)) {
-    const result = await f.client.callTool({ name: entry.name, arguments: entry.arguments });
-    expect(result, entry.label).toEqual(entry.result);
-    expect(defaultSchemas.get(entry.name)!.output(result.structuredContent)).toBe(true);
-  }
-  const stored = await f.storage.adapter.readRevision(id('Acceptance.Alpha'), 1);
-  if (stored.kind !== 'found') throw Error('missing fixture');
-  const expected = { kind: 'found', revision: stored.value, frontier: [] };
-  expect((await f.read()).structuredContent).toEqual(expected);
-  expect((await f.read(1)).structuredContent).toEqual(expected);
-  expect(JSON.stringify(expected)).not.toMatch(/desk|reopenRequest|reopenContext|reopenedAtRevision/i);
-  expect(await observe(f.storage, 1)).toEqual(before);
+test('retired false setting is refused before MCP tools can advertise incompatible rules', async () => {
+  const f = await fixture();
+  expect(() => createMapMcpServer(f.storage, { ...configuration, answerDeskEnabled: false })).toThrow('Answer Desk is required');
 });

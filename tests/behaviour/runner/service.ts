@@ -36,6 +36,8 @@ export interface IsolatedService {
   port: number;
   pid: number;
   databasePath: string;
+  /** Controller-only capability file, outside the client's sandbox and working directory. */
+  answerDeskKeyPath: string;
   /** Initialize results the service sent, one JSON line per MCP session (instructions, version, capabilities). */
   protocolReport: string;
   logs(): string;
@@ -59,6 +61,7 @@ export async function startService(dir: string, controller: Credential, others: 
   writeFileSync(credentialsPath, JSON.stringify({ credentials: [controller, ...others].map(c => ({ clientId: c.clientId,
     tokenSha256: createHash('sha256').update(c.token).digest('hex') })) }), { mode: 0o600 });
   const protocolReport = join(dir, 'protocol.jsonl');
+  const answerDeskKeyPath = join(dir, 'answer-desk-key');
   const port = await freePort(excludedPorts);
   // Hold ownership across the stop/start gap; the replacement uses this same port.
   const releasePort = protectPorts([port]);
@@ -94,7 +97,7 @@ export async function startService(dir: string, controller: Credential, others: 
   }
   let current: Awaited<ReturnType<typeof launch>>;
   try { current = await launch(checkoutRoot); } catch (error) { releasePort(); throw error; }
-  return { port, get pid() { return current.pid; }, databasePath, protocolReport, logs: () => logs,
+  return { port, get pid() { return current.pid; }, databasePath, answerDeskKeyPath, protocolReport, logs: () => logs,
     async restartCanary() {
       if (disposed || restarted) throw new Error('Owned service can restart onto the canary only once, before cleanup');
       restarted = true;
@@ -112,6 +115,7 @@ export async function startService(dir: string, controller: Credential, others: 
 /** Preserve the only history copy when export fails; temporary credentials never survive cleanup. */
 export function cleanupServiceDirectory(dir: string, historyExported: boolean): { removed: boolean; retained: string | null } {
   rmSync(join(dir, 'credentials.json'), { force: true });
+  rmSync(join(dir, 'answer-desk-key'), { force: true });
   if (historyExported) rmSync(dir, { recursive: true, force: true });
   return { removed: !existsSync(dir), retained: !historyExported && existsSync(join(dir, 'db', 'maps.sqlite')) ? join(dir, 'db', 'maps.sqlite') : null };
 }

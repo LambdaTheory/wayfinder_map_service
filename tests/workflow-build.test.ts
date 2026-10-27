@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { expect, test } from 'vitest';
+import { mapTools, toolsOnlyMapTools } from '../src/mcp-schemas.js';
 
 // The generator is intentionally plain ESM so it can run before TypeScript compilation.
 // @ts-expect-error the build script is outside the TypeScript source graph
@@ -62,3 +63,32 @@ test('W00: a changed workflow must increase the shared version, and the version 
   expect(parseWorkflow(source, '1.1.0', previous).version).toBe('1.1.0');
   expect(() => parseWorkflow(source, '1.0.0', previous)).toThrow(/cannot decrease/);
 });
+
+// Pin each governed tool, not just initialization instructions: ChatGPT sees tools only.
+test.each([['instructions', mapTools], ['toolsOnly', toolsOnlyMapTools]] as const)(
+  'W114: %s tools independently carry the Answer Desk rules', (_mode, tools) => {
+    const descriptions = Object.fromEntries(tools.map(tool => [tool.name, tool.description!]));
+    const rules = {
+      map_apply: ['Post every currently askable human question', 'without a three-question limit',
+        'Prioritize unlockers', 'immediateUnlocks', 'downstreamUnsettled', 'triageReason', 'gatesResearch',
+        'Both triage classes still need a human verdict', 'one short sentence and the desk link',
+        'Settle released verdicts and publish newly unlocked questions in the same ordered',
+        'deskAnswer:{answerId,questionVersion}', 'Taken by this Claimant', 'answered in conversation',
+        'then settling without `deskAnswer` in that same batch', 'authorizes neither withdrawal nor Settlement',
+        'Agents never submit Desk Answers'],
+      map_read: ['At each turn start', 'ChatGPT', 'claimantId', 'version', 'omit `revision`',
+        'marks eligible answers and Reopen Requests Taken', 'without waiting', 'never take', 'Taken-but-unsettled'],
+      map_wait: ['hold the call for up to `maxWaitSeconds`', 'only after independent work is exhausted',
+        'io.modelcontextprotocol/tasks', 'Claude Code', 'Clients unable to hold a long call, including ChatGPT',
+        'current `map_read` with `claimantId` and `version` at each turn start', 'never settles', 'lost receipt'],
+    };
+    for (const [name, passages] of Object.entries(rules)) {
+      for (const passage of passages) expect(descriptions[name], `${name}: ${passage}`).toContain(passage);
+    }
+    const instructions = parseWorkflow(source, '4.0.0').instructions;
+    for (const passage of ['Post every currently askable', 'triageReason', 'gatesResearch', 'each turn start',
+      'deskAnswer:{answerId,questionVersion}', 'answered in conversation', 'authorizes neither withdrawal nor Settlement']) {
+      expect(instructions).toContain(passage);
+    }
+    expect(source).not.toMatch(/up to three per message|at most three questions/);
+  });

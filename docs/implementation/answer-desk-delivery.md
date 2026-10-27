@@ -58,3 +58,9 @@ The earlier disabled-used-database concern is already covered by startup refusal
 Focused tests cover quiet batching, once-only collection, task/reading competition, rechecks after admission waits, cancellation before/after release, supersession, ownership, timeout/TTL, shutdown, stale requests, unknown receipt/restart, version/range validation, SSE streaming, the recorded ChatGPT capability envelope, and both protocol eras. Existing disabled baselines normalize only the Release Version.
 
 Second-round verification on Node.js **26.3.0**, 2026-10-27: `npm run build`, `npm test -- --maxWorkers=2` (**55 files / 2,354 tests passed**, 324.69 s), `npm run typecheck` and `git diff --check` all passed. The prior full run passed 2,350 tests; this run adds four raw-disconnect cases and strengthens existing task, recovery and schema checks. Before and after validation, `origin/main` remained `8657350` (v3.2.0) and was already merged. The release stays 3.3.0 pending the coordinator's integration order with #142. Real Claude wake-up, Codex completion and ChatGPT turn-start journeys require the coordinator's approved run; no model turn, actual interactive client, tunnel, everyday-service port or real database was used here.
+
+## 4.0.0 follow-on
+
+The workflow release retires disabled operation and generates all five tool descriptions from the authored workflow. The earlier ON/OFF evidence above describes 3.3.0; 4.0.0 rejects explicit false before admitting requests. See [workflow release and review follow-ups](answer-desk-workflow.md).
+
+A disconnected blocking POST counts as cancellation because this service has no resumable stream: GET is refused and no event store retains the response. Once that response closes, a future release could not be delivered on it. Previously committed Taken state still survives for current-read recovery.

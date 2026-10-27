@@ -8,7 +8,7 @@
 
 ```
 wayfinder [地图 ID] [--harness codex|claude] [--model 模型] [--effort 档位] [--method mcp|matt] [-- harness 参数]
-wayfinder desk <地图 ID>           # 打开带钥匙的答题台（当前版本默认关闭）
+wayfinder desk <地图 ID>           # 打开带钥匙的答题台
 wayfinder maps                     # 列出所有地图：MCP 版取自服务，Matt 原版取自产出目录
 wayfinder sessions [地图 ID]       # 列出专用 Agent 的会话，可按地图筛，每行给出接着它的命令
 wayfinder resume <会话 ID>          # 接着某个会话；harness、方法版本、模型和推理强度按原会话，flag 可改
@@ -26,13 +26,13 @@ wayfinder help
 
 地图只在这里推进。别的 Agent 碰到 Wayfinder 工具不可用，应停下并把 `wayfinder <地图 ID>` 交给 Kun；2026-10-25 日常 Codex 读了服务令牌直连服务，第 22–28 版记在了专用 Agent 名下。
 
-## 答题台（默认关闭）
+## 答题台
 
-服务以 `WAYFINDER_ANSWER_DESK_ENABLED=true` 启动后，`wayfinder desk <地图 ID>` 在默认浏览器打开该地图的答题模式。命令不会自行打开开关；已有服务的配置以启动时为准。没有钥匙的查看页仍可读地图和答题状态，不能作答。
+4.0.0 默认开启答题台，关闭模式已移除；旧的 `WAYFINDER_ANSWER_DESK_ENABLED=false` 会拒绝启动，`true` 仍兼容接受。`wayfinder <地图 ID>` 启动 MCP 版时自动带钥匙打开该图；`wayfinder desk <地图 ID>` 可单独打开。新建地图后运行后者进入答题。没有钥匙的查看页仍可读地图和答题状态，不能作答。
 
-启动器把 `WAYFINDER_ANSWER_DESK_KEY_FILE` 指到服务目录的 `answer-desk-key`。服务每次启动独立生成 256-bit 随机钥匙，写入当前用户独占的 0700 目录、0600 普通文件；它与 MCP 令牌无关，不交给 harness。停止时清理，重启时替换。答题入口目前只支持 macOS 默认浏览器：启动器通过固定的 `/usr/bin/osascript -` 标准输入传递带 `#key=…` 的地址，由 Apple event 打开浏览器；忽略 `BROWSER`，钥匙不进入任何启动参数或环境变量，子进程输出全部丢弃。它不打印地址、不写调用记录，不支持的平台直接报错。页面读取后立即清掉片段，只在闭包内存中保留；刷新、另开窗口或服务重启后请再次运行命令。直接启动服务的操作者可以用同一环境变量指定已有私有目录中的钥匙文件。
+启动器把 `WAYFINDER_ANSWER_DESK_KEY_FILE` 指到服务目录的 `answer-desk-key`。服务每次启动独立生成 256-bit 随机钥匙，写入当前用户独占的 0700 目录、0600 普通文件；它与 MCP 令牌无关，不交给 harness；启动器清除传给 harness 的 WAYFINDER_ANSWER_DESK_* 环境变量。停止时清理，重启时替换。答题入口目前只支持 macOS 默认浏览器：启动器通过固定的 `/usr/bin/osascript -` 标准输入传递带 `#key=…` 的地址，由 Apple event 打开浏览器；忽略 `BROWSER`，钥匙不进入任何启动参数或环境变量，子进程输出全部丢弃。它只打印不带钥匙的地图地址，不写调用记录，不支持的平台直接报错。Orca 当前只能通过命令行参数接收 URL，缺少安全输入能力，因此在 Orca 内也走默认浏览器并说明原因；安全标签入口跟踪于 #145，绝不经 argv、环境变量或 HTML 文件转交钥匙。页面读取后立即清掉片段，只在闭包内存中保留；刷新、另开窗口或服务重启后请再次运行命令。直接启动服务的操作者可以用同一环境变量指定已有私有目录中的钥匙文件。
 
-这个入口只允许提交/修改答复、申请重开和撤销尚未取走的重开请求。查看、打开弹窗和取消不提交答案；重开前显示受影响的已结算决定。页面两秒更新一次；15 秒停手窗口由服务计算，计时结束不自动结算。该版本不改变 agent 工作流或交付协议，真实客户端的联合验收留到 #114。
+这个入口只允许提交/修改答复、申请重开和撤销尚未取走的重开请求。查看、打开弹窗和取消不提交答案；重开前显示受影响的已结算决定。页面两秒更新一次；15 秒停手窗口由服务计算，计时结束不自动结算。agent 一次发布所有可问题，按解锁优先分诊，对话只通知一句和链接。Claude Code 用任务方式取答案，Codex 做完独立工作后调用 map_wait（工具超时 1800 秒），ChatGPT 每轮开始用 claimantId + version 的 map_read。真实客户端、宽图与 ChatGPT 的验收由协调者按门安排。
 
 ## 四种组合
 
@@ -120,3 +120,5 @@ WAYFINDER_AGENT_DRY_RUN=1 wayfinder …      # 只打印要执行的命令和目
 一次性库用产品检出的 `initializeSQLite(path)` 建，放在 `~/Library/Application Support/Wayfinder/` 下的新目录。非交互的冒烟测试：`wayfinder --effort low -- exec --skip-git-repo-check "…" < /dev/null`（Codex，`< /dev/null` 免得它等 stdin）、`wayfinder --harness claude --model haiku --effort low -- -p "…"`，再用 `maps` 看写入来源。
 
 `~/.local/bin/wayfinder` 和 `wayfinder-matt` 链到本仓库的 `scripts/wayfinder-agent/wayfinder`（2026-10-25 起；此前在工作区的 `runtime/tools/wayfinder_agent/`）。脚本只用 Python 标准库，兼容系统自带的 Python 3.9。
+
+启动时若答题台打不开（例如 SSH、非 Mac、地图 ID 有误或钥匙不可用），仍照常启动 agent，并给一行不含钥匙的说明；稍后可运行 `wayfinder desk <地图 ID>`。单独运行 `desk` 失败仍返回非零状态。

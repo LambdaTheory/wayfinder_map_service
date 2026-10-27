@@ -93,10 +93,19 @@ export async function startRoute(target: number, token: string, observe: (record
   return route;
 }
 
-/** Structured result from JSON or an SSE message; absence is not a successful read. */
-export function structuredReply(body: string): Record<string, unknown> | undefined {
-  for (const line of [body, ...body.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).trim())]) {
-    try { const rpc = JSON.parse(line) as { result?: { structuredContent?: Record<string, unknown> } }; if (rpc.result?.structuredContent) return rpc.result.structuredContent; } catch { /* another SSE line */ }
+/** Decode the terminal RPC envelope in either JSON or SSE framing, never a notification. */
+export function rpcReply(body: string, requestId?: unknown): Record<string, unknown> | undefined {
+  for (const line of [body, ...body.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5))]) {
+    try {
+      const rpc = JSON.parse(line) as Record<string, unknown>;
+      if (rpc && rpc.jsonrpc === '2.0' && (requestId === undefined || rpc.id === requestId)
+        && ('result' in rpc || 'error' in rpc)) return rpc;
+    } catch { /* Non-JSON event framing cannot establish a response. */ }
   }
   return undefined;
+}
+
+/** Structured result from JSON or an SSE message; absence is not a successful read. */
+export function structuredReply(body: string): Record<string, unknown> | undefined {
+  return (rpcReply(body)?.result as { structuredContent?: Record<string, unknown> } | undefined)?.structuredContent;
 }

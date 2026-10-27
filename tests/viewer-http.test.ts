@@ -112,13 +112,13 @@ test('H01: viewer pages and data need no token while /mcp still does; only GET/H
   expect(head.body).toBe('');
 });
 
-test('H02: the view answers 204 until a Revision commits, then the new Revision with what it changed', async () => {
+test('H02: the default desk view refreshes even at the same Revision, then shows new changes', async () => {
   const f = await service();
   await f.create();
   const first = await get(f.port, `/api/maps/${f.mapId}/view`, sameOrigin);
   expect(first.json()).toMatchObject({ mapId: f.mapId, title: 'Viewer map', destination: 'See the route', revision: 1, clientId: 'viewer-test',
     tickets: [], fog: [], scopeExclusions: [], routeClear: false, latest: [{ kind: 'map.create', subjectId: f.mapId }] });
-  expect((await get(f.port, `/api/maps/${f.mapId}/view?known=1`, sameOrigin)).status).toBe(204);
+  expect((await get(f.port, `/api/maps/${f.mapId}/view?known=1`, sameOrigin)).status).toBe(200);
   await f.apply([ticket('T1'), ticket('T2'), { kind: 'dependency.add', dependentId: 'T2', prerequisiteId: 'T1' },
     { kind: 'content.add', section: 'fog', item: { id: 'F1', text: 'Unclear', references: [] } }], 1);
   await f.apply([{ kind: 'claim.acquire', ticketId: 'T1', claimantId: 'session:test' }], 2);
@@ -128,7 +128,7 @@ test('H02: the view answers 204 until a Revision commits, then the new Revision 
       { id: 'T1', state: 'inProgress', claimantId: 'session:test', layer: 0, row: 0, dependents: ['T2'] },
       { id: 'T2', state: 'waiting', layer: 1, row: 0, prerequisites: ['T1'] },
     ] });
-  expect((await get(f.port, `/api/maps/${f.mapId}/view?known=3`, sameOrigin)).status).toBe(204);
+  expect((await get(f.port, `/api/maps/${f.mapId}/view?known=3`, sameOrigin)).status).toBe(200);
   expect((await get(f.port, `/api/maps/${f.mapId}/view?known=9`, sameOrigin)).json()).toMatchObject({ revision: 3 });
   await f.apply([{ kind: 'content.remove', section: 'fog', itemId: 'F1' }], 3);
   expect((await get(f.port, `/api/maps/${f.mapId}/view?known=3`, sameOrigin)).json()).toMatchObject({

@@ -56,7 +56,11 @@ try {
       ...(session ? { 'mcp-session-id': session, 'mcp-protocol-version': '2025-11-25' } : {}),
     }, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }) });
     assert.equal(response.status, 200);
-    return { id: String(id), session: response.headers.get('mcp-session-id'), payload: await response.json() };
+    const text = await response.text();
+    const payload = response.headers.get('content-type')?.startsWith('text/event-stream')
+      ? text.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => JSON.parse(line.slice(5))).find(message => message.id === id)
+      : JSON.parse(text);
+    return { id: String(id), session: response.headers.get('mcp-session-id'), payload };
   }
   const init = { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } };
   const a = await rpc('initialize', init); const b = await rpc('initialize', init, undefined, other);

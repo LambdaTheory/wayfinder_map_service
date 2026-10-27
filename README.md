@@ -7,17 +7,17 @@ Wayfinder Map Service 是一套与客户端无关的决策地图系统，供 Cha
 - `@grilling` 按轮次探查当前的决策前沿（decision frontier）。
 - `@wayfinder` 把长期工作管理为一张持久的地图（Map），记录目的地（destinations）、决策（decisions）、工单（tickets）、依赖（dependencies）、证据（evidence）和修订（revisions）。
 
-服务持有权威状态。客户端通过 `map_create`、`map_list`、`map_read` 和 `map_apply` 四个 MCP 工具交互。
+服务持有权威状态。客户端通过 `map_create`、`map_list`、`map_read`、`map_apply` 和 `map_wait` 五个 MCP 工具交互。
 
 ## 当前状态
 
 `main` 上已接受 M1 地图核心和本地 MCP/SQLite 服务。Node.js 钉在 26.3.0。存储是私有 SQLite：`initializeSQLite(path)` 创建新数据库，`openSQLite(path)` 只打开受支持的已有数据库。领域入口保持纯粹。SQLite 只用于这个本地切片。
 
-服务和它携带的探索工作流共用 `package.json` 里的一个语义化版本号，从 1.0.1 起（[ADR 0004](docs/adr/0004-one-release-version.md)）；升哪一位见[规格 §14.3](docs/spec/mcp-sqlite.md)，每版的变化见 [CHANGELOG](CHANGELOG.md)。兼容客户端凭 MCP 初始化说明和上述四份工具描述创建、恢复、认领并推进地图。新探索地图以[这份 MCP 工作流](docs/agents/exploration-mcp.md)为唯一权威。发生冲突时，该次请求作废；客户端重读并报告新的 Revision，停到人看到后再发出新请求。
+服务和它携带的探索工作流共用 `package.json` 里的一个语义化版本号，从 1.0.1 起（[ADR 0004](docs/adr/0004-one-release-version.md)）；升哪一位见[规格 §14.3](docs/spec/mcp-sqlite.md)，每版的变化见 [CHANGELOG](CHANGELOG.md)。兼容客户端凭 MCP 初始化说明和上述五份工具描述创建、恢复、认领并推进地图。新探索地图以[这份 MCP 工作流](docs/agents/exploration-mcp.md)为唯一权威。发生冲突时，该次请求作废；客户端重读并报告新的 Revision，停到人看到后再发出新请求。
 
 本地 MCP 服务同时提供只读的地图查看页，只能从本机打开：`http://127.0.0.1:<port>/` 列出所有地图，`/maps/<mapId>` 画出一张地图，新 Revision 提交后几秒内自动更新。`map_create` 和 `map_read` 的结果带着这个链接（`viewerUrl`）。查看页不写地图，ChatGPT 测试隧道也不转发它。见[查看页规格](docs/spec/map-viewer.md)和[实现记录](docs/implementation/map-viewer.md)。
 
-答题台已实现但默认关闭，沿用 `answerDeskEnabled` 服务设置。启用后，`wayfinder desk <地图 ID>` 打开只写答复的带钥匙入口；查看、地图编辑和 agent 结算的边界见[实现记录](docs/implementation/answer-desk-viewer.md)。
+4.0.0 默认开启答题台，并移除关闭模式；旧的显式关闭配置会拒绝启动。`wayfinder desk <地图 ID>` 打开只写答复的带钥匙入口；查看、地图编辑和 agent 结算的边界见[实现记录](docs/implementation/answer-desk-viewer.md)。
 
 删除仍在规划，规格尚未接受；回滚 2026-10-25 起不做了。实现跟踪见 [GitHub Issues](https://github.com/kun-g/wayfinder_map_service/issues)，规划入口见 [GitHub 规划地图](docs/planning/README.md)。v1 契约中网页渲染的缩放和过滤、MCP Apps UI、OAuth 和 PostgreSQL 尚未进入这个本地切片。
 
@@ -54,7 +54,7 @@ npm run --silent backup -- <absolute-source> <fresh-absolute-destination>
 - [已接受的 M1 实现规格](docs/spec/m1.md)
 - [已接受的本地 MCP/SQLite 实现规格](docs/spec/mcp-sqlite.md)
 - [Local Map viewer specification and Answer Desk amendment](docs/spec/map-viewer.md)
-- [Answer Desk specification — accepted 2026-10-26; staged implementation, default off](docs/spec/answer-desk.md)
+- [Answer Desk specification — accepted 2026-10-26; default on from 4.0.0](docs/spec/answer-desk.md)
 - [已接受的行为测试与验收需求](docs/spec/behaviour-testing.md)（场景库和 Codex 运行器已实现，其余按工单推进）
 - [行为测试运行结果](docs/implementation/behaviour-runs.md)
 - [专用 Wayfinder Agent 启动器](scripts/wayfinder-agent/README.md)（`wayfinder` 命令）

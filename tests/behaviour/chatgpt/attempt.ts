@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { LocalMcpService, LocalServiceConfiguration } from '../../../src/mcp-service.ts';
 import { attemptSchema, redact } from '../evidence.ts';
 import type { AttemptRecord, Completeness, EventRecord, Field, GivenRules, Surface } from '../evidence.ts';
+import { prepareDeskTurn } from '../runner/desk.ts';
 import { connectController } from '../runner/controller.ts';
 import type { Controller } from '../runner/controller.ts';
 import { receiptsFrom } from '../runner/normalize.ts';
@@ -61,7 +62,7 @@ export interface ChatGPTAttemptRecord extends AttemptRecord {
 const emptyRefusalSummary = (): RelayRefusalSummary => ({ path: 'raw/relay-refusals.jsonl', total: 0,
   byReason: {}, byStatus: {}, withinTurn: 0, outsideTurn: 0 });
 
-/** Stateful controller for one manual Attempt. It never operates the app or supplies an answer for Kun. */
+/** Stateful controller for one manual Attempt. It never operates the app; only declared scripted desk verdicts are submitted by the Controller. */
 export class ChatGPTAttempt {
   readonly record: ChatGPTAttemptRecord;
   readonly dir: string;
@@ -120,7 +121,7 @@ export class ChatGPTAttempt {
         tokenSha256: createHash('sha256').update(a.tokens[s.label as 'A' | 'B']).digest('hex') })),
         { clientId: `${a.record.controller.clientId}.tools`, toolsOnly: true, tokenSha256: createHash('sha256').update(a.tokens.observer).digest('hex') }] }), { mode: 0o600 });
       a.serviceConfig = { databasePath: a.databasePath, port: a.servicePort, token: a.tokens.controller,
-        actorId: 'behaviour-chatgpt', clientId: a.record.controller.clientId, credentialsPath, allowedOrigins: [] };
+        actorId: 'behaviour-chatgpt', clientId: a.record.controller.clientId, credentialsPath, answerDeskKeyPath: join(a.dir, 'answer-desk-key'), allowedOrigins: [] };
       await a.startService(checkoutRoot);
       for (const map of a.scenario.seed.maps) a.seedHeads.set(map.mapId, await a.controller.seed(map));
       a.saveRaw('seed.json', { seed: a.scenario.seed, maps: await a.controller.exportCatalog() });
@@ -134,6 +135,7 @@ export class ChatGPTAttempt {
   private async startService(root: string) {
     const { startLocalMcpService } = await import(pathToFileURL(join(root, 'dist/mcp-service.js')).href) as { startLocalMcpService(c: LocalServiceConfiguration): Promise<LocalMcpService> };
     this.service = await startLocalMcpService(this.serviceConfig);
+    this.secrets['answer-desk-key'] = readFileSync(this.serviceConfig.answerDeskKeyPath!, 'utf8');
     this.controller = await connectController(this.servicePort, this.tokens.controller);
     // Observe actual service metadata with a Controller credential in the same configured mode as ChatGPT.
     const observation = await createControllerClient(this.servicePort, this.tokens.observer);
@@ -202,18 +204,20 @@ export class ChatGPTAttempt {
     if (index > 0 && this.record.subject.kind === 'upgrade-check' && !this.upgraded) throw new Error('Run upgrade before the second turn');
     if (turn.answers && (!proposalConfirmed || !turn.answers.cue.test(this.lastMessages)))
       throw new Error(`Precondition unmet: confirm the actual proposal before sending a reply: ${turn.answers.proposal}`);
+    const prompt = await prepareDeskTurn(this.servicePort, this.serviceConfig.answerDeskKeyPath!, turn, index,
+      event => this.record.events.push({ ...event, seq: this.record.events.length }));
     this.activeTurn = index;
     const snapshotKey = `${this.phase}:${turn.session}`;
     if (!this.snapshotBoundaries.has(snapshotKey)) this.snapshotBoundaries.set(snapshotKey, this.exchanges.length);
     this.relay.token = this.tokens[turn.session as 'A' | 'B'];
     const at = now();
-    this.record.sessions.find(s => s.label === turn.session)!.turns.push({ index, input: turn.say, startedAt: at, endedAt: '', durationMs: 0 });
-    this.record.events.push({ seq: this.record.events.length, at, actor: 'script-human', session: turn.session, turn: index, kind: 'message', role: 'user', text: turn.say });
+    this.record.sessions.find(s => s.label === turn.session)!.turns.push({ index, input: prompt, startedAt: at, endedAt: '', durationMs: 0 });
+    this.record.events.push({ seq: this.record.events.length, at, actor: 'script-human', session: turn.session, turn: index, kind: 'message', role: 'user', text: prompt });
     this.saveRaw(`before-turn-${index}.json`, await this.controller.exportCatalog());
     this.measureIsolation();
     this.relay.active = true;
     this.persist();
-    return turn.say;
+    return prompt;
   }
 
   async end(capture: Capture) {
@@ -235,11 +239,12 @@ export class ChatGPTAttempt {
     const timeline = [...capture.messages, ...capture.otherToolCalls ?? []];
     if (capture.otherToolCalls?.length && (timeline.some(e => !Number.isInteger(e.order)) || new Set(timeline.map(e => e.order)).size !== timeline.length))
       throw new Error('Mixed native messages/tools need distinct integer order values');
-    if (capture.toolsShown && (!Array.isArray(capture.toolsShown) || capture.toolsShown.length !== 4
-      || new Set(capture.toolsShown.map(t => t?.name)).size !== 4
-      || capture.toolsShown.some(t => !['map_create', 'map_read', 'map_list', 'map_apply'].includes(t?.name)
+    if (capture.toolsShown && (!Array.isArray(capture.toolsShown) || ![4, 5].includes(capture.toolsShown.length)
+      || new Set(capture.toolsShown.map(t => t?.name)).size !== capture.toolsShown.length
+      || ['map_create', 'map_read', 'map_list', 'map_apply'].some(name => !capture.toolsShown!.some(t => t?.name === name))
+      || capture.toolsShown.some(t => !['map_create', 'map_read', 'map_list', 'map_apply', 'map_wait'].includes(t?.name)
         || typeof t.description !== 'string' || !t.inputSchema || (['map_create', 'map_apply'].includes(t.name) && versionDescription(t) === undefined))))
-      throw new Error('toolsShown must contain the four actual client tool definitions, including write version descriptions');
+      throw new Error('toolsShown must contain the actual client tool definitions (four before 4.0.0, five thereafter), including write version descriptions');
     const index = this.activeTurn;
     const turn = this.scenario.turns[index]!;
     const calls = this.record.events.filter(e => e.turn === index && e.kind === 'tool-call');
@@ -368,6 +373,7 @@ export class ChatGPTAttempt {
           if (existsSync(`${this.databasePath}.calls.jsonl`)) this.saveRaw('service-calls.json', readFileSync(`${this.databasePath}.calls.jsonl`, 'utf8'));
         } finally {
           rmSync(join(this.dir, 'credentials.json'), { force: true });
+          rmSync(join(this.dir, 'answer-desk-key'), { force: true });
           this.record.run.endedAt = now();
           this.persist();
         }

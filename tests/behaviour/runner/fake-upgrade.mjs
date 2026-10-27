@@ -26,7 +26,12 @@ async function rpc(method, params, notify = false) {
   }
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   session ??= response.headers.get('mcp-session-id');
-  return notify ? null : (await response.json()).result;
+  if (notify) return null;
+  const text = await response.text();
+  const messages = response.headers.get('content-type')?.startsWith('text/event-stream')
+    ? text.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => JSON.parse(line.slice(5)))
+    : [JSON.parse(text)];
+  return messages.find(message => message.id === request && ('result' in message || 'error' in message)).result;
 }
 async function initialize() {
   const init = await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'fake-upgrade', version: '0' } });

@@ -1,3 +1,4 @@
+import { rpcResponse } from './behaviour/chatgpt/relay.js';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -48,7 +49,11 @@ async function post(port: number, body: unknown, session?: string, bearer: strin
     'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Connection: 'close',
     ...(session ? { 'mcp-session-id': session, 'mcp-protocol-version': '2025-11-25' } : {}),
   }, body: JSON.stringify(body) });
-  return { status: response.status, session: response.headers.get('mcp-session-id'), body: await response.text() };
+  const text = await response.text();
+  const contentType = response.headers.get('content-type') ?? '';
+  return { status: response.status, session: response.headers.get('mcp-session-id'),
+    body: contentType.startsWith('text/event-stream') ? JSON.stringify(rpcResponse(text, contentType, (body as { id?: unknown }).id)) : text };
+
 }
 async function initialize(port: number, bearer = token) {
   const result = await post(port, { jsonrpc: '2.0', id: 0, method: 'initialize', params: {
