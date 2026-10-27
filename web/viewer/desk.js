@@ -14,7 +14,7 @@ export function createDesk({ h, mapId, key, refresh }) {
   const choiceText = choice => !choice ? '尚未回答' : 'text' in choice ? choice.text : `${choice.option}. ${choice.label}`;
   let data = null, fingerprint = '', active = null, changedQuestion = null, busy = false, editor = null;
   let armedQuestion = null, armingQuestion = null, armTimer = null, externalPause = false, displayed = false;
-  let inactive = false, focusCheck = 0, destroyed = false;
+  let inactive = false, resumeQuestion = null, focusCheck = 0, destroyed = false;
   const interactive = 'button,input,textarea,select,a,summary,[contenteditable],[role="button"],[role="link"]';
   const selected = new Set();
   const button = (label, fn, props = {}) => {
@@ -55,6 +55,9 @@ export function createDesk({ h, mapId, key, refresh }) {
     pauseShortcuts(); changedQuestion = null; externalPause = false; active = q ? identity(q) : null; render(true);
     const card = content.querySelector('.desk-question');
     card.focus(); card.scrollIntoView({ block: 'nearest' });
+    // Selection during the refocus read is explicit, but still waits for that
+    // fresh projection and its guard before enabling shortcuts.
+    if (inactive) resumeQuestion = q && live(q) ? identity(q) : null;
     if (q && live(q)) armShortcuts();
   }
   function closeEditor(resume = true) {
@@ -98,6 +101,9 @@ export function createDesk({ h, mapId, key, refresh }) {
     return ok;
   }
   async function submit(q, choice) {
+    // An explicit answer to the displayed question also authorizes advancement.
+    // A later external change still pauses the in-flight write in update().
+    if (canWrite() && identity(q) === active) externalPause = false;
     await write({ action: 'answer', submissions: [answer(q, choice)] });
   }
   function openText(q) {
@@ -275,6 +281,9 @@ export function createDesk({ h, mapId, key, refresh }) {
     else if (event.key.toLowerCase() === 't') { event.preventDefault(); openText(q); }
   };
   const windowBlur = () => {
+    // blur and visibilitychange may both arrive for one focus loss. Preserve
+    // the first snapshot, including an already-authorized delay, across both.
+    if (!inactive) resumeQuestion = active && (armedQuestion === active || armingQuestion === active) ? active : null;
     inactive = true; focusCheck++; pauseShortcuts();
   };
   const windowFocus = async () => {
@@ -287,7 +296,9 @@ export function createDesk({ h, mapId, key, refresh }) {
       return;
     }
     if (check !== focusCheck || destroyed || document.hidden) return;
-    inactive = false; armShortcuts(true);
+    inactive = false;
+    if (resumeQuestion && resumeQuestion === active) armShortcuts(true);
+    resumeQuestion = null;
   };
   const visibility = () => { if (document.hidden) windowBlur(); else windowFocus(); };
   document.addEventListener('keydown', keydown);

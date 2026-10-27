@@ -128,6 +128,14 @@ async function verifyFocusAndChangedQuestions(context, origin, key) {
     await page.getByRole('heading', { name: '当前没有待答题', exact: true }).waitFor();
     assert(await page.getByRole('button', { name: '请求重开', exact: true }).isEnabled());
     assert.equal(count(), before + 2); assert.equal(writes, beforeWrites + 2);
+    // New arrivals on the empty desk are paused, but an explicit option click
+    // answers the displayed question and advances to the next pending question.
+    await mutate(['H', 'I'].flatMap(name => [create(name, name, `Question ${name}?`), claim(name), posted(name)]));
+    await expectCard('H'); assert.equal(await page.locator('.desk').getAttribute('data-shortcuts'), 'paused');
+    await page.locator('.desk-question .desk-option').nth(1).click(); await expectCard('I');
+    assert.equal(questions().find(q => q.ticketId === 'H').currentAnswer.choice.option, 2);
+    assert.equal(count(), before + 3); assert.equal(writes, beforeWrites + 3);
+    await page.locator('.desk[data-shortcuts=armed]').waitFor();
   } finally { await page.close(); }
 }
 async function verifyFocusAcrossPolling(context, origin, key) {
@@ -313,9 +321,22 @@ async function verifyContinuousKeyboard(browser, origin, key) {
     await page.clock.runFor(599); await noShortcutWrites(); assert.equal(await mode(), 'waiting');
     await page.clock.runFor(1); assert.equal(await mode(), 'armed');
   }
+  async function refocus() {
+    // Browsers can report both blur and hidden; the second event must not
+    // overwrite the authority captured by the first.
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('blur'));
+    });
+    await noShortcutWrites();
+    const refreshed = page.waitForResponse(r => r.url().includes(`/api/maps/${id}/view`));
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await (await refreshed).finished();
+  }
   try {
     await page.goto(`${origin}/maps/${id}#key=${key}`); await queue('A').waitFor();
     await page.clock.runFor(700); await noShortcutWrites(); assert.equal(await mode(), 'paused');
+    await refocus(); await page.clock.runFor(1000); await noShortcutWrites();
+    assert.equal(await mode(), 'paused', 'Refocus must not arm the initial unselected question');
     await tabTo(page, queue('A')); await page.keyboard.press('Space'); assert.equal(await mode(), 'armed');
     // Queue order changes do not replace the displayed A, even if G jumps first.
     await poll([withdraw('G'), posted('G', { gatesResearch: true })]);
@@ -358,8 +379,12 @@ async function verifyContinuousKeyboard(browser, origin, key) {
     await page.evaluate(() => { const root = document.querySelector('#main'); root.tabIndex = -1; root.focus(); });
     assert.equal(await mode(), 'armed');
     // Same-question refocus reads first, then re-arms after the full delay.
-    await page.evaluate(() => window.dispatchEvent(new Event('blur'))); await noShortcutWrites();
-    await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await waitMode('waiting'); await finishDelay();
+    const refocusTarget = await current(), beforeRefocus = answers().length;
+    await refocus(); await waitMode('waiting'); await finishDelay();
+    await page.keyboard.press('Enter'); await waitMode('waiting');
+    assert.equal(answers().length, beforeRefocus + 1); assert.equal(answers().at(-1).questionId, refocusTarget);
+    // A delay already authorized by Kun resumes with a full guard after refocus.
+    await page.clock.runFor(300); await refocus(); await waitMode('waiting'); await finishDelay();
     // File/cancel Reopen Requests keep the displayed question, with the same guard.
     const beforeRequests = writes, requestTarget = await current();
     await page.getByRole('button', { name: '请求重开', exact: true }).click();
@@ -376,6 +401,7 @@ async function verifyContinuousKeyboard(browser, origin, key) {
     await page.evaluate(() => window.dispatchEvent(new Event('focus')));
     await page.getByRole('heading', { name: '问题已变，请重新选择题目后再回答。', exact: true }).waitFor();
     await page.clock.runFor(1000); await poll(); await noShortcutWrites(); assert.equal(await mode(), 'paused');
+    await refocus(); await page.clock.runFor(1000); await noShortcutWrites(); assert.equal(await mode(), 'paused');
     await queue(currentName).click(); assert.equal(await mode(), 'armed');
     // A current question removed while a delay is pending cancels that timer.
     await page.keyboard.press('t'); await page.keyboard.press('Escape'); assert.equal(await mode(), 'waiting');
@@ -384,6 +410,19 @@ async function verifyContinuousKeyboard(browser, origin, key) {
     // Release the interruption, but merely displaying another default is unarmed.
     await page.getByRole('button', { name: '已了解，查看当前题目', exact: true }).click();
     await page.clock.runFor(1000); await noShortcutWrites(); assert.equal(await mode(), 'paused');
+    await refocus(); await page.clock.runFor(1000); await noShortcutWrites();
+    assert.equal(await mode(), 'paused', 'Acknowledging a change must still require selection after refocus');
+    // A click that restores focus is an explicit selection. Hold the refocus
+    // read to prove it waits for fresh state, then gets the full 600 ms guard.
+    let releaseRead, readStarted;
+    const heldRead = new Promise(resolve => { releaseRead = resolve; });
+    const started = new Promise(resolve => { readStarted = resolve; });
+    const viewRoute = `**/api/maps/${id}/view?*`;
+    await page.route(viewRoute, async route => { readStarted(); await heldRead; await route.continue(); });
+    await page.evaluate(() => { window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus')); });
+    await started; await page.locator('.desk-question h2').click();
+    await page.clock.runFor(1000); await noShortcutWrites(); assert.equal(await mode(), 'paused');
+    releaseRead(); await waitMode('waiting'); await finishDelay(); await page.unroute(viewRoute);
     // A different question ID must not inherit authority even at the same version.
     await queue('Side0').click();
     await poll([withdraw('Side0'), create('Replacement', 'Replacement', 'Question Replacement?'), claim('Replacement'), posted('Replacement')]);
