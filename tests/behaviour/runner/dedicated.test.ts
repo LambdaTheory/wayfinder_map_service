@@ -112,6 +112,7 @@ test.skipIf(!sandbox)('real launcher runs and resumes inside the allowlist, reco
   const first = context.launches[0]; const second = context.launches[1];
   expect(first.argv).not.toContain('--ignore-user-config');
   expect(first.argv).toContain('--no-daemon');
+  expect(first.argv).toContain('mcp_servers.wayfinder.tool_timeout_sec=1800');
   expect(first.argv[first.argv.indexOf('-m') + 1]).toBe('fake-model');
   expect(first.argv).toContain('model_reasoning_effort="low"');
   expect(second.argv.slice(-2)).toEqual([record.sessions[0]!.nativeId.known ? record.sessions[0]!.nativeId.value : '', '-']);

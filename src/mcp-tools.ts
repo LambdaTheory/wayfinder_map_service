@@ -1,15 +1,16 @@
 import { projectDesk } from './desk-domain.js';
 import { emptyDesk } from './desk-types.js';
-import { Server, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
-import type { CallToolRequest, CallToolResult } from '@modelcontextprotocol/server';
+import { Server, ProtocolError, ProtocolErrorCode, CLIENT_CAPABILITIES_META_KEY, MissingRequiredClientCapabilityError } from '@modelcontextprotocol/server';
+import type { CallToolRequest, CallToolResult, ServerContext, StandardSchemaV1 } from '@modelcontextprotocol/server';
 import { calculateFrontier, decodeApplyRequest, prepareApply, prepareCreate } from './index.js';
-import type { CreateMapInput, InvalidInput, MapId, MutationAuthor } from './types.js';
+import type { ClaimantId, CreateMapInput, InvalidInput, MapId, MutationAuthor } from './types.js';
 import type { SQLiteStorage } from './sqlite-storage.js';
 import { SQLiteFailure } from './sqlite-storage.js';
 import { invalid, isPlainObject, validateAuthor, validateId, validateObject } from './values.js';
 import { mapTools, toolsOnlyMapTools, answerDeskMapTools, toolsOnlyAnswerDeskMapTools } from './mcp-schemas.js';
 import { workflowContract } from './workflow.generated.js';
 import { viewerUrl } from './viewer-http.js';
+import { DeskDelivery, TASKS_EXTENSION } from './desk-delivery.js';
 
 export { mapTools, toolsOnlyMapTools, answerDeskMapTools, toolsOnlyAnswerDeskMapTools } from './mcp-schemas.js';
 export { workflowContract } from './workflow.generated.js';
@@ -17,12 +18,13 @@ export { workflowContract } from './workflow.generated.js';
 // model no server instructions; its write tools state the release instead.
 export interface ToolAuthorConfiguration { readonly actorId: string; readonly clientId: string; readonly viewerOrigin?: string; readonly toolsOnly?: boolean; readonly answerDeskEnabled?: boolean }
 // The HTTP host owns admission/draining, including work whose response is lost.
-export type ToolCallControl = (call: () => Promise<CallToolResult>) => Promise<CallToolResult>;
+export type ToolCallControl = (call: (suspend: () => void, disconnected?: AbortSignal) => Promise<CallToolResult>) => Promise<CallToolResult>;
 
 // This advanced SDK seam deliberately retains M1's structured validation paths
 // instead of the high-level SDK's generic text errors/duplicate-text convenience.
 // Transport, admission, authentication and storage lifecycle belong to the host.
-export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAuthorConfiguration, control?: ToolCallControl): Server {
+export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAuthorConfiguration, control?: ToolCallControl,
+  delivery = new DeskDelivery(storage), taskOwner = configuration.clientId): Server {
   if (validateObject(configuration, [], ['actorId', 'clientId', 'viewerOrigin', 'toolsOnly', 'answerDeskEnabled'])
     || (configuration.answerDeskEnabled !== undefined && typeof configuration.answerDeskEnabled !== 'boolean')
     || (configuration.toolsOnly !== undefined && typeof configuration.toolsOnly !== 'boolean')
@@ -39,7 +41,7 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
   const viewerLink = (mapId: string) => viewerOrigin === undefined ? {} : { viewerUrl: viewerUrl(viewerOrigin, mapId) };
   const author = (): MutationAuthor => ({ ...identity, occurredAt: new Date().toISOString() } as MutationAuthor);
   const server = new Server({ name: 'wayfinder-map', version: workflowContract.version }, {
-    capabilities: { tools: {}, resources: {}, prompts: {} }, instructions: workflowContract.instructions,
+    capabilities: { tools: {}, resources: {}, prompts: {}, ...(answerDeskEnabled ? { extensions: { [TASKS_EXTENSION]: {} } } : {}) }, instructions: workflowContract.instructions,
   });
   server.setRequestHandler('tools/list', () => ({ tools: structuredClone([...tools]) }));
   const stableResourceUri = 'wayfinder://workflow/exploration';
@@ -72,7 +74,22 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
     return { description: prompt.description, messages: [{ role: 'user' as const, content: { type: 'text' as const,
       text: `${workflowContract.prompt}\n\nversion: ${workflowContract.version}. Mode: ${args.mode}.${selection}` } }] };
   });
-  const callTool = async (request: CallToolRequest): Promise<CallToolResult> => {
+  if (answerDeskEnabled) {
+    const params: StandardSchemaV1<unknown, { taskId: string }> = { '~standard': { version: 1, vendor: 'wayfinder', validate(value: unknown) {
+      return isPlainObject(value) && typeof value.taskId === 'string' && value.taskId.length > 0
+        && !validateObject(value, [], ['taskId']) ? { value: { taskId: value.taskId } } : { issues: [{ message: 'A taskId is required' }] };
+    } } };
+    const requireTasks = (ctx: ServerContext) => {
+      if (!supportsTasks(ctx, server)) throw new MissingRequiredClientCapabilityError({ requiredCapabilities: { extensions: { [TASKS_EXTENSION]: {} } } });
+    };
+    server.setRequestHandler('tasks/get', { params }, async ({ taskId }, ctx) => { requireTasks(ctx); return delivery.get(taskId, taskOwner); });
+    server.setRequestHandler('tasks/cancel', { params }, ({ taskId }, ctx) => { requireTasks(ctx); return delivery.cancel(taskId, taskOwner); });
+    server.setRequestHandler('tasks/update', { params }, (_params, ctx) => {
+      requireTasks(ctx); throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'The wait has no input phase');
+    });
+  }
+  const callTool = async (request: CallToolRequest, ctx: ServerContext, suspend: () => void, disconnected?: AbortSignal): Promise<CallToolResult> => {
+    const waitSignal = disconnected ? AbortSignal.any([ctx.mcpReq.signal, disconnected]) : ctx.mcpReq.signal;
     const tool = tools.find(tool => tool.name === request.params.name);
     if (!tool) throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Unknown Map tool');
     // Legacy task marker only: modern SDK requests strip this deprecated field before dispatch.
@@ -81,7 +98,8 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
     // A write names the release whose rules the caller follows. After an upgrade, a caller still holding the old
     // rules (a client that reconnected without refreshing, or one resending its last call) is stopped before
     // anything is validated or written, and pointed at the current rules.
-    if (tool.name === 'map_create' || tool.name === 'map_apply') {
+    if (tool.name === 'map_create' || tool.name === 'map_apply' || tool.name === 'map_wait'
+      || (answerDeskEnabled && tool.name === 'map_read' && isPlainObject(raw) && Object.hasOwn(raw, 'claimantId') && Object.hasOwn(raw, 'version'))) {
       const claimed = isPlainObject(raw) ? raw.version : undefined;
       if (claimed !== workflowContract.version) {
         return envelope({ kind: 'rejected', code: 'version_mismatch',
@@ -109,11 +127,22 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
       apply = decodeApplyRequest({ ...fields, author: author() }, { answerDeskEnabled });
       if (apply.kind === 'error') return inputFailure(apply.error);
       if (apply.value.commands.length > 100) return inputFailure(invalid(['commands'], 'At most 100 commands required'));
-    } else if (tool.name === 'map_read') {
+    } else if (tool.name === 'map_read' || tool.name === 'map_wait') {
       const error = validateId(raw.mapId, ['mapId']);
       if (error) return inputFailure(error);
       if (Object.hasOwn(raw, 'revision') && (!Number.isSafeInteger(raw.revision) || (raw.revision as number) <= 0)) {
         return inputFailure(invalid(['revision'], 'Positive safe integer required'));
+      }
+      if (tool.name === 'map_wait' || Object.hasOwn(raw, 'claimantId') || Object.hasOwn(raw, 'version')) {
+        const error = validateId(raw.claimantId, ['claimantId']);
+        if (error) return inputFailure(error);
+        if (!Object.hasOwn(raw, 'version')) return inputFailure(invalid(['version'], 'Release Version required with claimantId'));
+        if (Object.hasOwn(raw, 'revision')) return inputFailure(invalid(['revision'], 'Taking reads cannot select a historical Revision'));
+      }
+      if (tool.name === 'map_wait' && Object.hasOwn(raw, 'maxWaitSeconds')) {
+        const max = supportsTasks(ctx, server) ? 28_800 : 1500;
+        if (!Number.isInteger(raw.maxWaitSeconds) || (raw.maxWaitSeconds as number) < 1 || (raw.maxWaitSeconds as number) > max)
+          return inputFailure(invalid(['maxWaitSeconds'], `Integer from 1 through ${max} required`));
       }
     } else {
       if (Object.hasOwn(raw, 'limit') && (!Number.isInteger(raw.limit) || (raw.limit as number) < 1 || (raw.limit as number) > 100)) {
@@ -126,13 +155,29 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
     }
     try {
       if (tool.name === 'map_list') return envelope(storage.listMaps(raw));
+      if (tool.name === 'map_wait') {
+        const task = supportsTasks(ctx, server);
+        const wait = delivery.start({ mapId: raw.mapId as MapId, claimantId: raw.claimantId as ClaimantId,
+          maxWaitSeconds: raw.maxWaitSeconds as number | undefined ?? (task ? 28_800 : 600) }, task, taskOwner);
+        if ('content' in wait) return wait;
+        if (task) return delivery.handle(wait);
+        suspend();
+        return await delivery.block(wait, waitSignal, async elapsed => {
+          const progressToken = ctx.mcpReq._meta?.progressToken;
+          if (progressToken !== undefined) await ctx.mcpReq.notify({ method: 'notifications/progress',
+            params: { progressToken, progress: elapsed, total: wait.args.maxWaitSeconds, message: 'Waiting for Answer Desk responses' } });
+        });
+      }
       if (tool.name === 'map_read') {
         const mapId = raw.mapId as MapId;
         const revision = raw.revision as number | undefined;
         if (revision === undefined) {
+          const taken = Object.hasOwn(raw, 'claimantId') ? delivery.take(mapId, raw.claimantId as ClaimantId) : undefined;
+          if (taken && taken.kind !== 'updated') return envelope(taken);
           const current = storage.desk.inspect(mapId);
           if (current.kind !== 'found') return envelope(current);
-          return envelope({ kind: 'found', revision: current.revision, frontier: calculateFrontier(current.revision.state), ...(answerDeskEnabled ? current.desk : {}), ...viewerLink(mapId) });
+          return envelope({ kind: 'found', revision: current.revision, frontier: calculateFrontier(current.revision.state), ...(answerDeskEnabled ? current.desk : {}),
+            ...(taken?.kind === 'updated' ? { delivery: taken.value } : {}), ...viewerLink(mapId) });
         }
         const read = await storage.adapter.readRevision(mapId, revision);
         return read.kind === 'found' ? envelope({ kind: 'found', revision: read.value, frontier: calculateFrontier(read.value.state),
@@ -154,14 +199,22 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
       if (raw.includeSnapshot === true) return envelope({ ...commit, ...link });
       return envelope({ kind: 'committed', mapId: commit.revision.mapId, revision: commit.revision.revision, changes: commit.revision.changes, ...link });
     } catch (error) {
+      if (ctx.mcpReq.signal.aborted || (tool.name === 'map_wait' && waitSignal.aborted)) throw error;
       // Never expose exception text/cause/stack, SQL, paths or submitted bodies.
       // An unclassified failure cannot establish publication or connection health.
       return envelope({ kind: 'infrastructure_error', code: error instanceof SQLiteFailure ? error.code : 'storage_failure',
         outcome: error instanceof SQLiteFailure ? error.outcome : 'unknown', requiresRestart: error instanceof SQLiteFailure ? error.requiresRestart : true });
     }
   };
-  server.setRequestHandler('tools/call', request => control ? control(() => callTool(request)) : callTool(request));
+  server.setRequestHandler('tools/call', (request, ctx) => control ? control((suspend, disconnected) => callTool(request, ctx, suspend, disconnected)) : callTool(request, ctx, () => {}));
   return server;
+}
+
+function supportsTasks(ctx: ServerContext, server: Server): boolean {
+  if (server.getNegotiatedProtocolVersion() !== '2026-07-28') return false;
+  const envelope = ctx.mcpReq.envelope;
+  const capabilities = isPlainObject(envelope) ? envelope[CLIENT_CAPABILITIES_META_KEY] : undefined;
+  return isPlainObject(capabilities) && isPlainObject(capabilities.extensions) && Object.hasOwn(capabilities.extensions, TASKS_EXTENSION);
 }
 
 function inputFailure(error: InvalidInput): CallToolResult {

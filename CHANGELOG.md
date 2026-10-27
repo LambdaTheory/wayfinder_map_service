@@ -4,13 +4,19 @@ All notable project changes are recorded here. Historical implementation evidenc
 
 Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Release Version, covers the service and the workflow it carries; `docs/spec/mcp-sqlite.md` §14.3 says which part to raise, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion` (`1.0.0` to `3.0.0` below), and the server reported a fixed `0.1.0`.
 
-## 3.3.0 (2026-10-27)
-
+## 3.4.0 (2026-10-27)
 - Add the Answer Desk viewer behind the existing **default-off** `answerDeskEnabled` setting: service-ordered questions, options and full recommendations, keyboard/text answers, selected recommendation confirmation, answer changes, delivery/Settlement states and publication history. Two-second polling also follows desk-only writes without advancing a Map Revision.
 - Add one answer-only `POST /api/desk` route for submitting/changing answers, filing/replacing Reopen Requests and cancelling untaken requests. Exact loopback Host, same-origin checks, a separate process-scoped browser key and bounded JSON protect it; all other viewer routes remain GET/HEAD. When disabled the route returns 404 and the viewer has no desk UI.
 - Add `wayfinder desk <mapId>`: open the viewer with a private service-generated key in the fragment, strip it immediately and retain it only in page closure memory. A service restart rotates the key; no MCP credential can substitute for it. Reopen entry displays the exact affected Settlement bindings and requires re-review when they change. MCP tools and workflow text remain unchanged; coordinated real-client acceptance stays with #114.
 - Keep the browser key out of process arguments and environments by using macOS Apple events over stdin, ignoring `BROWSER` and suppressing child diagnostics. Keep native keyboard activation on focused controls, and pause answers after the displayed question is withdrawn, replaced or settled until the human explicitly selects a question. Drain excess answer uploads so clients receive the full 413 refusal.
-- Pause global shortcuts when polling removes the focused desk control, including unrelated questions or delivery updates; require deliberate reselection before shortcuts resume. Explain unsupported platforms before starting the desk launcher, and leave URL fragments untouched when the desk is disabled.
+- Require an explicitly selected Question Version in the current UI version for global shortcuts. Every changed poll, dialog close, write refresh, root focus loss and window refocus invalidates that selection; show a pause until deliberate reselection, including after an answer or Reopen Request. Explain unsupported platforms before starting the desk launcher, and leave URL fragments untouched when the desk is disabled.
+
+## 3.3.0 (2026-10-27)
+
+- Add Answer Desk `map_wait` with task and blocking execution, once-only delivery after the Map Quiet Window, and taking `map_read` for turn-start delivery. Answers and Reopen Requests retain Taken state through interruption and restart.
+- Keep Answer Desk **disabled by default** behind `answerDeskEnabled` / `WAYFINDER_ANSWER_DESK_ENABLED=true`: disabled discovery remains four tools with the existing schemas and errors; enabled discovery exposes five tools in both protocol eras. Mandatory workflow text is unchanged until #114.
+- Stream blocking-wait progress over SSE with redacted protocol errors, share delivery admission across protocol instances, and raise the dedicated Codex MCP timeout to 1,800 seconds. Real-client journeys remain for the coordinated acceptance run.
+- Encode retained Tasks results for the official extension decoder and allow retry after a lost collection response; cancel blocking waits on HTTP disconnect in both eras before they take later answers. Keep enabled tool input schemas free of top-level combinators, with taking-read constraints described in fields and enforced by the service.
 
 ## 3.2.0 (2026-10-27)
 

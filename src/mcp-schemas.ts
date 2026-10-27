@@ -45,6 +45,9 @@ const reopenRequest = object({ requestId: id, ticketId: id, settlementIntroduced
   affectedTickets: array(id), affectedSettlementRevisions: { type: 'object', additionalProperties: revision }, requestedAt: string,
   state: { enum: ['pending', 'taken'] }, stale: { type: 'boolean' } });
 const reopenContext = object({ ticketId: id, requestId: id, requested: reopenChoice, handledAtRevision: revision });
+const reopenItem = object({ kind: literal('reopen_request'), requestId: id, ticketId: id, settlementIntroducedAtRevision: revision, requested: reopenChoice,
+  affectedTickets: array(id), affectedSettlementRevisions: { type: 'object', additionalProperties: revision }, requestedAt: string });
+const deliveryFields = { outcome: { enum: ['delivered', 'none_yet'] }, items: array({ oneOf: [answerItem, reopenItem] }), quietUntil: string };
 const types = ['grilling', 'prototype', 'research', 'task'] as const;
 const ticketType: Schema = { enum: types };
 const outcome = (type: typeof types[number]) => type === 'grilling' || type === 'prototype'
@@ -120,7 +123,7 @@ function definitions(version: Schema, answerDeskEnabled = false): Tool[] {
   // Only map_create carries the viewer link; map_apply results keep their shape.
   const writeOutput = (link: Record<string, Schema>) => [object({ kind: literal('committed'), mapId: id, revision, changes, ...link }, ['kind', 'mapId', 'revision', 'changes']),
     object({ kind: literal('committed'), revision: fullRevision, frontier: array(id), ...link }, ['kind', 'revision', 'frontier'])];
-  return [
+  const tools: Tool[] = [
     { name: 'map_create', description: workflowContract.toolDescriptions.map_create,
       inputSchema: root(object({ version, mapId: id, title: text, destination: text, notes: string, extensions, includeSnapshot: { type: 'boolean', default: false } }, ['version', 'mapId', 'title', 'destination'])),
       outputSchema: root({ oneOf: [...writeOutput({ viewerUrl }), ...errors] }) },
@@ -129,15 +132,28 @@ function definitions(version: Schema, answerDeskEnabled = false): Tool[] {
       outputSchema: root({ oneOf: [object({ kind: literal('listed'), maps: array(object({ mapId: id, title: text, destination: text, currentRevision: revision })),
         nextAfterMapId: { anyOf: [id, literal(null)] } }), ...errors] }) },
     { name: 'map_read', description: workflowContract.toolDescriptions.map_read,
-      inputSchema: root(object({ mapId: id, revision }, ['mapId'])),
+      inputSchema: root(object({ mapId: id, revision, ...(answerDeskEnabled ? {
+        claimantId: { ...id, description: 'Supply together with version and omit revision to take eligible Answer Desk responses for this Claimant. Delivered items are durably marked Taken. Omit both for inspection without taking.' },
+        version: { ...version, description: `${version.description} Required together with claimantId for a taking current read; omit revision. Omit both fields for inspection without taking.` },
+      } : {}) }, ['mapId'])),
       outputSchema: root({ oneOf: [
         ...(answerDeskEnabled ? [object({ kind: literal('found'), revision: fullRevision, frontier: array(id), viewerUrl, deskQuestions: array(publication) }, ['kind', 'revision', 'frontier', 'deskQuestions']),
-        object({ kind: literal('found'), revision: fullRevision, frontier: array(id), viewerUrl, deskQuestions: array(currentQuestion), reopenRequests: array(reopenRequest), reopenContexts: array(reopenContext) }, ['kind', 'revision', 'frontier', 'deskQuestions', 'reopenRequests', 'reopenContexts'])]
+        object({ kind: literal('found'), revision: fullRevision, frontier: array(id), viewerUrl, deskQuestions: array(currentQuestion), reopenRequests: array(reopenRequest), reopenContexts: array(reopenContext),
+          delivery: object(deliveryFields, ['outcome', 'items']) }, ['kind', 'revision', 'frontier', 'deskQuestions', 'reopenRequests', 'reopenContexts'])]
           : [object({ kind: literal('found'), revision: fullRevision, frontier: array(id), viewerUrl }, ['kind', 'revision', 'frontier'])]), ...errors] }) },
     { name: 'map_apply', description: workflowContract.toolDescriptions.map_apply,
       inputSchema: root(object({ version, mapId: id, expectedRevision: revision, ...(answerDeskEnabled ? { reopenRequestId: { ...id, description: 'Optional Taken Reopen Request authorizing this batch to reopen its target and exactly the currently required settled dependents. The service checks their recorded Settlement bindings and marks the request handled atomically.' } } : {}), commands: array({ oneOf: commands }, { minItems: 1, maxItems: 100 }), includeSnapshot: { type: 'boolean', default: false } }, ['version', 'mapId', 'expectedRevision', 'commands'])),
       outputSchema: root({ oneOf: [...writeOutput({}), ...errors] }) },
+    ...(answerDeskEnabled ? [{ name: 'map_wait',
+      description: 'Wait for Answer Desk responses on one Map. Supply mapId, your claimantId, and the Release Version you follow. Returns every eligible answer on your currently claimed Tickets plus Map-scoped reopen_request items after 15 seconds without a human answer/request change. It durably marks delivered items Taken; it never settles Tickets or reopens them. Without the io.modelcontextprotocol/tasks client capability this is a blocking call: maxWaitSeconds defaults to 600, range 1–1500; set the client timeout above that bound. A modern request declaring that extension receives a task: default 28800 seconds, range 1–28800. Poll tasks/get; first completed retrieval takes still-eligible items. tasks/cancel takes nothing new; tasks/update is unsupported. Tasks expire maxWaitSeconds plus 600 seconds after creation and do not survive service restart. A newer wait for the same Map and Claimant supersedes the older wait. Results are delivered, none_yet (optionally quietUntil), superseded, or interrupted on service stop, with currentRevision and items. On lost receipt or unknown task, read the current Map to recover Taken-but-unsettled answers and unhandled Reopen Requests; do not assume they were returned or settled. ChatGPT uses current map_read with claimantId and version at each turn start instead of waiting. Inspection and historical reads never take answers.',
+      inputSchema: root(object({ mapId: id, claimantId: id, version, maxWaitSeconds: { type: 'integer', minimum: 1, maximum: 28_800,
+        description: 'Blocking: default 600, maximum 1500. Task: default/maximum 28800. Values outside the applicable range are rejected, never clamped.' } }, ['mapId', 'claimantId', 'version'])),
+      outputSchema: root({ oneOf: [object({ ...deliveryFields, outcome: { enum: ['delivered', 'none_yet', 'superseded', 'interrupted'] }, currentRevision: revision }, ['outcome', 'items', 'currentRevision']), ...errors] }),
+    }] : []),
   ];
+  const expected = answerDeskEnabled ? workflowContract.businessTools.enabled : workflowContract.businessTools.disabled;
+  if (JSON.stringify(tools.map(tool => tool.name)) !== JSON.stringify(expected)) throw new Error('Invalid Map tool set');
+  return tools;
 }
 export const mapTools: readonly Tool[] = immutableClone(definitions(version));
 export const toolsOnlyMapTools: readonly Tool[] = immutableClone(definitions(statedVersion));

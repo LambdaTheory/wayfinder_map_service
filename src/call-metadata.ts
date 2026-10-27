@@ -5,7 +5,7 @@ import { closeSync, constants, fstatSync, openSync, writeFileSync, writeSync } f
 import { isAbsolute } from 'node:path';
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import { isPlainObject, validateId } from './values.js';
-import { mapTools } from './mcp-schemas.js';
+import { answerDeskMapTools } from './mcp-schemas.js';
 import { workflowContract } from './workflow.generated.js';
 
 export const metadataSchema = 'wayfinder-service-call/1';
@@ -45,8 +45,8 @@ export interface CallObservation {
   result: CallResult | undefined;
 }
 const methods = new Set(['initialize', 'notifications/initialized', 'notifications/cancelled', 'ping',
-  'tools/list', 'tools/call', 'resources/list', 'resources/read', 'resources/templates/list', 'prompts/list', 'prompts/get']);
-const tools = new Set(mapTools.map(tool => tool.name));
+  'tools/list', 'tools/call', 'tasks/get', 'tasks/cancel', 'tasks/update', 'resources/list', 'resources/read', 'resources/templates/list', 'prompts/list', 'prompts/get']);
+const tools = new Set(answerDeskMapTools.map(tool => tool.name));
 const httpMethods = new Set(['GET', 'POST', 'DELETE', 'HEAD', 'PUT', 'PATCH', 'OPTIONS', 'CONNECT', 'TRACE']);
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 // Derived from the existing credential verifier, but not itself a stored authentication verifier.
@@ -69,8 +69,10 @@ export function appendPrivateMetadata(path: string, record: unknown): void {
 }
 
 export function classifyCallResult(result: CallToolResult): CallResult {
+  if (result.resultType === 'task') return 'ok';
   const value = result.structuredContent;
   if (!isPlainObject(value)) return 'transport-failure';
+  if (['delivered', 'none_yet', 'superseded', 'interrupted'].includes(value.outcome as string) && Array.isArray(value.items)) return 'ok';
   switch (value.kind) {
     case 'committed': return 'committed';
     case 'found': case 'listed': return 'read';
