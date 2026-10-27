@@ -27,7 +27,12 @@ async function rpc(method, params, notify = false) {
     body: JSON.stringify({ jsonrpc: '2.0', method, params, ...(notify ? {} : { id: ++n }) }) });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   session ??= response.headers.get('mcp-session-id');
-  return notify ? null : (await response.json()).result;
+  if (notify) return null;
+  const text = await response.text();
+  const messages = response.headers.get('content-type')?.startsWith('text/event-stream')
+    ? text.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => JSON.parse(line.slice(5)))
+    : [JSON.parse(text)];
+  return messages.find(message => message.id === n && ('result' in message || 'error' in message)).result;
 }
 const init = await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'fake-codex', version: '0' } });
 await rpc('notifications/initialized', {}, true);

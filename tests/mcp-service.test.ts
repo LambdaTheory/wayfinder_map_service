@@ -1,3 +1,4 @@
+import { rpcResponse } from './behaviour/chatgpt/relay.js';
 import { createHash } from 'node:crypto';
 import { createServer, request as httpRequest } from 'node:http';
 import type { Server as HttpServer } from 'node:http';
@@ -23,7 +24,6 @@ import type { SQLiteStorage } from '../src/sqlite-storage.js';
 import { mapTools, toolsOnlyMapTools, answerDeskMapTools, workflowContract } from '../src/mcp-tools.js';
 import type { Revision } from '../src/index.js';
 import { rejectionSeed, rejectionCases } from './helpers/mcp-rejection-cases.js';
-import { disabledDeskCases } from './helpers/disabled-desk-cases.js';
 
 const cleanups: (() => void | Promise<void>)[] = [];
 beforeAll(() => { execFileSync('npm', ['run', 'build'], { stdio: 'pipe' }); });
@@ -92,7 +92,7 @@ function raw(port: number, body: string | Buffer = '', headers: Record<string, s
       ...(String(body).includes('io.modelcontextprotocol/protocolVersion') ? { 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'tools/call', 'mcp-name': JSON.parse(String(body)).params.name } : {}), ...headers,
     } }, response => {
       let text = ''; response.setEncoding('utf8'); response.on('data', data => text += data);
-      response.on('end', () => resolve({ status: response.statusCode!, body: text, headers: response.headers }));
+      response.on('end', () => resolve({ status: response.statusCode!, body: response.headers['content-type']?.startsWith('text/event-stream') ? JSON.stringify(rpcResponse(text, response.headers['content-type'], JSON.parse(String(body)).id)) : text, headers: response.headers }));
       response.on('error', reject);
     });
     req.on('error', reject); req.end(body);
@@ -110,7 +110,7 @@ const modernMessage = (name = 'map_list', args: Record<string, unknown> = {}) =>
 const update = [{ kind: 'map.update', patch: { notes: 'HTTP advanced' } }];
 type Connection = Awaited<ReturnType<typeof connect>>;
 
-test('modern discovery delivers the same instructions, four schemas, Resources and Prompt without a session', async () => {
+test('modern discovery delivers the same instructions, five schemas, Resources and Prompt without a session', async () => {
   const f = await fixture();
   const modern = await createHttpTestClient(f.port, token, '2026-07-28'); cleanups.push(() => modern.client.close());
   const legacy = await createHttpTestClient(f.port, token); cleanups.push(() => legacy.client.close());
@@ -756,7 +756,7 @@ test('P08/P09: actual operator command startup failures return nonzero with fixe
   expect(logs).not.toContain(token); expect(logs).not.toContain('/private-path-fixture');
 });
 
-test.each(protocols.flatMap(protocol => [undefined, false, true].map(answerDeskEnabled => ({ protocol, answerDeskEnabled }))))(
+test.each(protocols.flatMap(protocol => [undefined, true].map(answerDeskEnabled => ({ protocol, answerDeskEnabled }))))(
   'Answer Desk setting $answerDeskEnabled reaches $protocol with the exact matching tool set', async ({ protocol, answerDeskEnabled }) => {
   const f = storageFixture(); const port = await freePort();
   const service = await serveLocalMcp(f.storage, { ...configuration(f.path, port), ...(answerDeskEnabled === undefined ? {} : { answerDeskEnabled }) });
@@ -770,46 +770,21 @@ test.each(protocols.flatMap(protocol => [undefined, false, true].map(answerDeskE
     { kind: 'ticket.create', ticket: { id: 'A', title: 'Choice', question: 'Which?', type: 'grilling' } },
     { kind: 'claim.acquire', ticketId: 'A', claimantId: 'work' }, post,
   ] } })).structuredContent;
-  expect(result).toMatchObject(answerDeskEnabled === true ? { kind: 'committed', revision: 2 }
-    : { kind: 'rejected', rejection: { stage: 'input', error: { code: 'invalid_input', path: ['commands', 2, 'kind'], constraint: 'Unsupported command kind' } } });
-  expect(tools).toEqual(answerDeskEnabled ? answerDeskMapTools : mapTools);
-  expect(tools.map(t => t.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply', ...(answerDeskEnabled ? ['map_wait'] : [])]);
+  expect(result).toMatchObject({ kind: 'committed', revision: 2 });
+  expect(tools).toEqual(answerDeskMapTools);
+  expect(tools.map(t => t.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply', 'map_wait']);
   const read = (await c.client.callTool({ name: 'map_read', arguments: { mapId: 'Acceptance.Alpha' } })).structuredContent;
-  expect(read).toMatchObject({ kind: 'found', revision: { revision: answerDeskEnabled ? 2 : 1 } });
-  if (answerDeskEnabled) expect(read).toMatchObject({ deskQuestions: [{ state: 'pending' }], reopenRequests: [], reopenContexts: [] });
-  else {
-    expect(JSON.stringify(read)).not.toMatch(/desk|reopenRequest|reopenContext|reopenedAtRevision/i);
-    expect(JSON.stringify(tools)).not.toMatch(/desk|reopenRequest|reopenContext|reopenedAtRevision/i);
-  }
+  expect(read).toMatchObject({ kind: 'found', revision: { revision: 2 } });
+  expect(read).toMatchObject({ deskQuestions: [{ state: 'pending' }], reopenRequests: [], reopenContexts: [] });
+
   expect(() => captureConfiguration({ ...configuration(f.path, port), answerDeskEnabled: 'true' as unknown as boolean })).toThrow('invalid_configuration');
 });
 
-test.each(protocols.flatMap(protocol => [undefined, false].flatMap(answerDeskEnabled => [false, true].map(toolsOnly => ({ protocol, answerDeskEnabled, toolsOnly })))))(
-  'disabled desk errors match v3.1.0 after SDK discovery: $protocol / $answerDeskEnabled / toolsOnly=$toolsOnly', async ({ protocol, answerDeskEnabled, toolsOnly }) => {
+test('even an unused database refuses the retired disabled configuration before listening', async () => {
   const f = storageFixture(); const port = await freePort();
-  const service = await serveLocalMcp(f.storage, { ...configuration(f.path, port), toolsOnly, ...(answerDeskEnabled === undefined ? {} : { answerDeskEnabled }) });
-  cleanups.push(() => service.stop()); const c = await connect(port, token, protocol);
-  await c.client.listTools(); await c.create(); const before = await c.read();
-  for (const entry of disabledDeskCases(version)) {
-    const result = await c.client.callTool({ name: entry.name, arguments: entry.arguments });
-    expect(result, entry.label).toEqual({ ...entry.result, ...(protocol === '2026-07-28'
-      ? { _meta: { 'io.modelcontextprotocol/serverInfo': { name: 'wayfinder-map', version } } } : {}) });
-    expect(outputs.get(entry.name)!(result.structuredContent), entry.label).toBe(true);
-  }
-  expect(await c.read()).toEqual(before);
-});
-
-
-test('disabled service accepts a migrated format-2 database whose desk tables are empty', async () => {
-  const f = storageFixture({}, 1); const port = await freePort();
-  const db = new DatabaseSync(f.path, { readOnly: true });
-  try { expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(2); } finally { db.close(); }
   expect(f.storage.hasDeskHistory()).toBe(false);
-  const service = await serveLocalMcp(f.storage, { ...configuration(f.path, port), answerDeskEnabled: false });
-  cleanups.push(() => service.stop()); const c = await connect(port); await c.create();
-  expect((await c.client.listTools()).tools).toEqual(mapTools);
-  expect((await c.read()).structuredContent).toMatchObject({ kind: 'found' });
-  expect(f.storage.hasDeskHistory()).toBe(false);
+  await expect(serveLocalMcp(f.storage, { ...configuration(f.path, port), answerDeskEnabled: false }))
+    .rejects.toMatchObject({ code: 'answer_desk_required' });
 });
 
 test.each([false, true])('a used Answer Desk database refuses disabled startup even after withdrawal=%s', async withdraw => {
@@ -830,15 +805,13 @@ test.each([false, true])('a used Answer Desk database refuses disabled startup e
   const storage = sqliteLifecycleForTests().open(f.path); cleanups.push(() => storage.close());
   const before = await storage.adapter.readRevision('Acceptance.Alpha' as Revision['mapId'], 2);
   expect(storage.hasDeskHistory()).toBe(true);
-  for (const answerDeskEnabled of [undefined, false]) {
-    await expect(serveLocalMcp(storage, { ...config, ...(answerDeskEnabled === undefined ? {} : { answerDeskEnabled }) }))
-      .rejects.toMatchObject({ code: 'answer_desk_required',
-        message: 'The configured private SQLite database has used Answer Desk; enable answerDeskEnabled (WAYFINDER_ANSWER_DESK_ENABLED=true).' });
-  }
+  await expect(serveLocalMcp(storage, { ...config, answerDeskEnabled: false }))
+    .rejects.toMatchObject({ code: 'answer_desk_required',
+      message: 'Answer Desk is required by this release; remove answerDeskEnabled: false (WAYFINDER_ANSWER_DESK_ENABLED=false).' });
   expect(await storage.adapter.readRevision('Acceptance.Alpha' as Revision['mapId'], 2)).toEqual(before);
   // Refusal never admits a partial service or occupies the port; enabling again
   // serves the exact retained publication/history without rewriting it.
-  const restarted = await serveLocalMcp(storage, { ...config, answerDeskEnabled: true }); cleanups.push(() => restarted.stop());
+  const restarted = await serveLocalMcp(storage, config); cleanups.push(() => restarted.stop());
   const resumed = await connect(port);
   expect((await resumed.client.callTool({ name: 'map_read', arguments: { mapId: 'Acceptance.Alpha' } })).structuredContent)
     .toMatchObject({ kind: 'found', revision: { revision: 2 }, deskQuestions: [{ state: withdraw ? 'withdrawn' : 'pending' }] });

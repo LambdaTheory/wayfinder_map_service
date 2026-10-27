@@ -154,6 +154,10 @@ For example, if B requires both A and another open Ticket, settling A alone does
 | Codex | Call `map_wait` as an ordinary blocking tool call only after independent work is exhausted; configure a long tool timeout in the dedicated launcher. |
 | ChatGPT | Do not call `map_wait`; use current `map_read` with `claimantId` and `version` at each turn start; Kun tells it when he is done. |
 
+ChatGPT shows its model tool definitions only; initialization instructions are not a delivery channel for its mandatory rules. Under MCP/SQLite §14.2, `map_apply` must carry all-askable posting, unlock-first triage and reasons, `deskAnswer` citations, same-write Settlement/new questions, and the explicit conversation-verdict withdrawal path. A takeover phrase, question or scope comment never authorizes withdrawal or Settlement. A posted batch is announced in one short sentence with the desk link, without copying the questions into chat.
+
+`map_read` must describe the turn-start taking call (`claimantId` plus `version`, no `revision`) and its Taken effect. `map_wait` must say that blocking can hold the call for up to `maxWaitSeconds`; clients unable to hold a long call use the turn-start taking read instead. The tools-only version wording may differ, while carrying the same rules. Build tests pin these passages on each governed tool. The deferred ChatGPT acceptance includes a turn-start read that takes an actual desk answer, followed by Settlement and publication of the newly unlocked question in one batch.
+
 ### 6.1 Public inputs
 
 These signatures extend [MCP/SQLite §4](mcp-sqlite.md#4-public-tool-inputs); IDs retain its validation and `version` is the Release Version, never `questionVersion`:
@@ -325,7 +329,7 @@ Tests for this implementation must control submission and release boundaries rat
 
 ## 9. Implementation and release sequence
 
-Until #114, the desk is disabled by default; #111–#113 ship behind one service setting that tests and isolated runs enable, and #114 enables it by default.
+The #111–#113 releases staged the desk behind a default-off service setting. Release 4.0.0 (#114) enables the desk by default and retires the disabled surface: omitted or legacy true configuration serves five tools; explicit false is refused before serving. A database that has used the desk can never start in a disabled mode.
 
 | Issue | Delivery |
 | --- | --- |
@@ -334,11 +338,11 @@ Until #114, the desk is disabled by default; #111–#113 ship behind one service
 | #111 | Format-2 desk storage and migration, including Reopen Requests, Settlement bindings and affected-dependent computation; post/withdraw commands, typed Settlement citations, `reopenRequestId` validation and handled marking, `reopenRequest.close`, publication retirement, preselection/history data and the [section 6.2 inspection read projection](#62-public-results-and-recovery-reads). |
 | #112 | `map_wait` and ChatGPT taking `map_read` through one release coordinator, including `reopen_request` delivery, task/blocking paths, recovery and exact-tool-set/build metadata. |
 | #113 | Viewer write route for answer submit/change, Reopen Requests displaying the affected list and cancellation; preselection/text context and superseded publications shown as history; keyed, keyboard/bulk and visual behavior. |
-| #114 | Publish all-askable posting, unlock-first triage and client use in the mandatory workflow and every governed tool description, plus launcher instructions and behavior scenarios. |
+| #114 | Enable the desk by default with one five-tool surface; publish all-askable posting, unlock-first triage, same-write Settlement/new questions and client use in the mandatory workflow and every governed tool description, plus launcher instructions and behavior scenarios. |
 
 #112 depends on #110 and #111; #113 depends on #111; #114 depends on #112 and #113. This assignment replaces #113's original submit-answer-only wording; this specification governs later additions even when the implementation Issue bodies have not yet been synchronized. Follow those Issues for scheduling and Kun's gates. Do not ship the discarded intermediate chat-only approach. Agents settle released verdicts and post newly unlocked questions in the same write where the existing command rules allow it.
 
-Under [MCP/SQLite §14.3](mcp-sqlite.md#143-versioning-build-and-release), this documentation-only PR keeps the Release Version and adds no CHANGELOG section or tag. The current workflow file and generated guidance remain unchanged. The additive implementation Issues specify minor releases; the mandatory workflow change ships with the desk as one later major release after #87, with one approved ChatGPT run before that merge. No real-model Batch, ChatGPT run, everyday-service operation or release is authorized by this specification PR. Keep `Refs #109` for the [closeout gate](#10-accepted-by-kun-on-2026-10-26).
+At specification acceptance (#109), the documentation-only PR kept the Release Version, added no CHANGELOG section or tag, and left the workflow file and generated guidance unchanged. The additive implementation Issues specify minor releases; the mandatory workflow change ships with the desk as one later major release after #87, with one approved ChatGPT run before that merge. No real-model Batch, ChatGPT run, everyday-service operation or release is authorized by this specification PR. Keep `Refs #109` for the [closeout gate](#10-accepted-by-kun-on-2026-10-26).
 
 ## 10. Accepted by Kun on 2026-10-26
 

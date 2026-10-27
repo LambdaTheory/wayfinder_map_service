@@ -63,6 +63,15 @@ assert key not in (svc / 'osascript-argv').read_text()
 assert browser_log.read_text() == probe
 assert key not in output.getvalue()
 assert not (svc / 'launches.jsonl').exists()
+assert 'http://127.0.0.1:18766/maps/Synthetic.Map' in output.getvalue()
+# Orca currently has no secure URL input; it must use the same stdin path, never --url.
+os.environ['ORCA_WORKTREE_ID'] = 'synthetic-worktree'
+with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+    launcher['cmd_desk'](['Synthetic.Map'])
+assert opened == [script, script]
+assert '因 Orca 暂时无法安全接收地址，已在默认浏览器打开' in output.getvalue()
+assert key not in output.getvalue()
+
 for change in ['disabled', 'shared', 'symlink']:
     launcher['get_json'] = lambda _: {} if change == 'disabled' else {'desk': {}}
     if change == 'shared':
@@ -79,7 +88,7 @@ for change in ['disabled', 'shared', 'symlink']:
             raise AssertionError('unsafe desk was opened')
         except SystemExit:
             pass
-assert len(opened) == 1
+assert len(opened) == 2
 assert key not in output.getvalue()
 path.unlink()
 path.write_text(key)

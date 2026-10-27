@@ -33,8 +33,8 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
     throw new Error('Invalid MCP author configuration');
   }
   const identity = { actorId: configuration.actorId, clientId: configuration.clientId };
-  const { viewerOrigin, answerDeskEnabled = false } = configuration;
-  if (!answerDeskEnabled && storage.hasDeskHistory()) throw new Error('The configured private SQLite database has used Answer Desk; enable answerDeskEnabled.');
+  const { viewerOrigin, answerDeskEnabled = true } = configuration;
+  if (!answerDeskEnabled) throw new Error('Answer Desk is required by this release; remove answerDeskEnabled: false.');
   const tools = answerDeskEnabled
     ? (configuration.toolsOnly ? toolsOnlyAnswerDeskMapTools : answerDeskMapTools)
     : (configuration.toolsOnly ? toolsOnlyMapTools : mapTools);

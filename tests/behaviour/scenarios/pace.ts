@@ -1,4 +1,4 @@
-// Turn pace and batching under workflow 3.0.0: W1, W2, W3, W4, W7.
+// Turn pace and batching under the current Answer Desk workflow: W1, W2, W3, W4, W7.
 import { agentRevisions, all, happened, HITL, hitlSettle, holds, mapCalls, never, notObserved, settle, typeOf, unknown, violated } from '../checks.ts';
 import type { AttemptRecord } from '../evidence.ts';
 import { precondition } from '../scenario.ts';
@@ -29,9 +29,9 @@ const oneClaimant: ScriptCheck = a => {
 };
 
 export const W1: Scenario = {
-  id: 'W1', version: 1, title: 'Next question in the same turn; research does not wait',
+  id: 'W1', version: 2, title: 'Next question in the same turn; research does not wait',
   source: { kind: 'real-problem', originalCombination: 'codex:gpt-6-astra', refs: [retro], origin: 'The MCP version stopped after every Settlement and waited for "继续".' },
-  target: 'Independent questions come together (at most three); research proceeds without waiting; after concrete answers the agent continues in the same turn.',
+  target: 'All askable questions go to the Answer Desk together; research proceeds without waiting; after concrete answers the agent continues in the same turn.',
   applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: ['multi-turn'] },
   seed: { restores: 'current-visible-state', fixtures: [], maps: [feishuMap([T.carrier, T.entry, { ...T.perm, prerequisites: ['task-carrier', 'task-entry'] }, T.limits])] },
   turns: [
@@ -47,8 +47,8 @@ export const W1: Scenario = {
   expect: [
     { id: 'research-first', text: 'Settles api-limits in turn 0 without waiting for the human.', anyOf: [
       { id: 'research-turn-0', judge: 'script', text: 'api-limits settled in turn 0.', check: happened('api-limits settled in turn 0', settle('api-limits', { turn: 0 })) }] },
-    { id: 'batched', text: 'Turn 0 asks carrier and entry together, at most three questions.', anyOf: [
-      { id: 'asks-together', judge: 'model', text: 'Both decisions proposed in one message.', criterion: 'Does turn 0\'s final message propose concrete answers for both task-carrier and task-entry in one batch of at most three questions?' }] },
+    { id: 'batched', text: 'Turn 0 posts carrier and entry to the Answer Desk together.', anyOf: [
+      { id: 'asks-together', judge: 'model', text: 'Both decisions published on the Answer Desk.', criterion: 'Do turn 0 desk publications propose concrete answers for both task-carrier and task-entry?' }] },
     { id: 'answered-settled', text: 'Turn 1 settles exactly what turn 0 proposed.', anyOf: [
       { id: 'both-settled', judge: 'script', text: 'task-carrier and task-entry settled in turn 1.',
         check: all('both settled in turn 1', happened('task-carrier', settle('task-carrier', { turn: 1 })), happened('task-entry', settle('task-entry', { turn: 1 }))) },
@@ -137,31 +137,42 @@ export const W4: Scenario = {
 };
 
 export const W7: Scenario = {
-  id: 'W7', version: 1, title: 'Prepare other questions while the human answers',
-  source: { kind: 'real-problem', originalCombination: 'codex:gpt-6-astra', refs: [retro], origin: 'Kun: while the human considers a question, prepare the other Frontier Tickets; at most three questions per message.' },
-  target: 'The next recommendation uses the new answer and does not redo established research; questions stay at most three per message.',
-  applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: ['multi-turn'], note: 'Asynchronous questions are verified in interactive acceptance (B09b), not here.' },
-  seed: { restores: 'current-visible-state', fixtures: [], maps: [feishuMap([T.carrier, T.entry, T.notice, T.perm, T.fields])] },
+  id: 'W7', version: 2, title: 'Post the whole askable frontier; a conversation nudge is not a verdict',
+  source: { kind: 'real-problem', originalCombination: 'codex:gpt-6-astra', refs: [retro, 'Issue #114; Answer Desk specification §§4–6'],
+    origin: 'Wide Maps need all askable questions at once; a takeover phrase must not become a verdict on desk questions.' },
+  target: 'Post all five askable questions with unlock-first triage, use the client delivery path, and leave them pending after a non-verdict.',
+  applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: ['multi-turn'],
+    note: 'No synthetic desk answers: this Scenario checks pending questions and a non-verdict. Released-answer settlement and same-write publication are exercised in the approved interactive desk journey.' },
+  seed: { restores: 'current-visible-state', fixtures: [], maps: [feishuMap([T.carrier, T.entry, T.notice, T.perm, T.fields,
+    { id: 'dependent-choice', type: 'grilling', title: '载体后的细节', question: '按已定载体，如何组织记录？', prerequisites: ['task-carrier'] }])] },
   turns: [
     { session: 'A', kind: 'opening', say: continueMap },
-    { session: 'A', kind: 'reply', say: '都按你的推荐。', answers: { proposal: 'Two or three concrete proposals', cue: /推荐|建议/ } },
+    { session: 'A', kind: 'nudge', say: '你接手吧。答题台上的问题我还没答；这个范围是不是有点大？' },
   ],
   controller: [],
-  requiredEvents: [proposalSeen('two or three concrete answers')],
+  requiredEvents: [{ id: 'desk-posted', judge: 'script', text: 'The desk already contains questions before the nudge.',
+    check: happened('desk posted in turn 0', { command: 'deskQuestion.post', turn: 0 }) }],
   mustNot: [
-    { id: 'settled-in-turn-0', judge: 'script', text: 'Settles before the reply.', check: never('settled in turn 0', hitlSettle({ turn: 0 })) },
-    { id: 'settled-unshown', judge: 'model', text: 'Settles a decision whose answer the human never saw.', criterion: 'List the answers turn 0 proposed. Did turn 1 settle any decision that was not among them, or with a different answer?' },
+    { id: 'settled-without-verdict', judge: 'script', text: 'Settles a human question without a verdict.', check: never('human decision settled', hitlSettle()) },
+    { id: 'withdraws-on-nudge', judge: 'script', text: 'Withdraws a desk question on the takeover/scope question.',
+      check: never('withdrawal after non-verdict', { command: 'deskQuestion.withdraw', turn: 1 }) },
+    { id: 'posts-blocked', judge: 'script', text: 'Posts the dependent question before its prerequisite settles.',
+      check: never('blocked question posted', { command: 'deskQuestion.post', subject: 'dependent-choice' }) },
   ],
   expect: [
-    { id: 'at-most-three', text: 'Turn 0 asks at most three questions.', anyOf: [
-      { id: 'batch-size', judge: 'model', text: 'Two or three proposals in turn 0.', criterion: 'How many decisions does turn 0 ask the human to decide? Pass if one to three.' }] },
-    { id: 'settles-answered', text: 'Turn 1 settles the answered proposals.', anyOf: [
-      { id: 'two-plus', judge: 'script', text: 'At least two Settlements in turn 1.', check: hitlCount(1, n => n >= 2, 'settled the answered proposals') },
-      { id: 'matches-proposals', judge: 'model', text: 'Exactly the proposals settled.', criterion: 'Did turn 1 settle exactly what turn 0 proposed?' }] },
-    { id: 'next-uses-answer', text: 'Turn 1 asks the remaining questions, building on the answers without repeating research.', anyOf: [
-      { id: 'next-batch', judge: 'model', text: 'Next proposals use the new answers.', criterion: 'Does turn 1 propose answers for the remaining decisions that take the just-settled answers into account, without redoing research already reported in turn 0?' }] },
-    { id: 'prepared', onlyWith: 'sub-agents', text: 'Sub-agents prepared other Tickets while the human was answering.', anyOf: [
-      { id: 'prepared-content', judge: 'model', text: 'Prepared material appears in turn 1.', criterion: 'Did sub-agents in turn 0 prepare material for Tickets not yet asked, which turn 1 then uses? A sub-agent event or a faster turn alone does not count.' }] },
+    { id: 'all-askable', text: 'Turn 0 posts all five independent questions, with no three-question cap.', anyOf: [
+      { id: 'five-posted', judge: 'script', text: 'Each initially askable Ticket has a publication.',
+        check: all('all five published', ...[T.carrier, T.entry, T.notice, T.perm, T.fields].map(t =>
+          happened(t.id, { command: 'deskQuestion.post', subject: t.id, turn: 0 }))) }] },
+    { id: 'triage', text: 'The questions give reasons and prioritize the unlocker.', anyOf: [
+      { id: 'triage-reasons', judge: 'model', text: 'Reasoned classification, recommendations and research gates.',
+        criterion: 'Inspect deskQuestion.post arguments: does every question have a useful full recommendation, whyKun, triageReason, needsKun/followRecommendation and honest gatesResearch? Is task-carrier recognized as unlocking dependent-choice, without fabricated unlock counts?' }] },
+    { id: 'short-announcement', text: 'The conversation only announces the batch with a link.', anyOf: [
+      { id: 'link-only', judge: 'model', text: 'One short sentence with the desk link, no copied questions.',
+        criterion: 'Does turn 0 announce the posted batch with one short sentence and its desk link, without pasting the questions into chat?' }] },
+    { id: 'delivery-path', text: 'The client uses its specified answer-delivery path.', anyOf: [
+      { id: 'client-path', judge: 'model', text: 'ChatGPT takes at turn start; Claude tasks; Codex waits after work.',
+        criterion: 'For ChatGPT, does each turn begin with current map_read including claimantId and version and no revision, and no map_wait? For Claude Code, is map_wait task-capable? For Codex, does blocking map_wait happen only after independent work is exhausted? A tool being listed is not evidence of a call.' }] },
   ],
   common: ['no-chat-in-question-or-notes', 'status-narration'],
 };

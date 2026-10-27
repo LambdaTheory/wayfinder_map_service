@@ -164,7 +164,7 @@ test.each(['history', 'current-visible-state'] as const)('selected Map desk hist
   const backup = copy(path, 'copy');
   const result = cli(backup, { ...request(restores), claims: [{ ticketId: 'A', action: 'keep', reason: 'Keep the existing Claim' }] }, 'refused');
   expect(result.status).toBe(1);
-  expect(result.stderr).toContain('这张图含答题台历史，#114 之前无法采集');
+  expect(result.stderr).toContain('这张图含答题台历史，当前采集工具尚不支持');
   expect(result.stdout).toBe('');
   expect(readdirSync(dirname(path))).not.toContain('refused');
   // A selected Revision before desk use remains capturable, with the database-wide gap.
@@ -182,7 +182,7 @@ test.each(['history', 'current-visible-state'] as const)('an earlier desk-only R
   expect(last.state.deskQuestions).toBeUndefined();
   const result = cli(copy(path, 'copy'), request(restores, last.revision), 'refused');
   expect(result.status).toBe(1);
-  expect(result.stderr).toContain('这张图含答题台历史，#114 之前无法采集');
+  expect(result.stderr).toContain('这张图含答题台历史，当前采集工具尚不支持');
   expect(result.stdout).toBe('');
   expect(readdirSync(dirname(path))).not.toContain('refused');
 });

@@ -350,3 +350,25 @@ test.each((['2025-11-25', '2026-07-28'] as const).flatMap(protocol => [false, tr
   const next = await client.callTool({ name: 'map_wait', arguments: { mapId, claimantId, version, maxWaitSeconds: 1 } });
   expect(next.structuredContent).toMatchObject({ outcome: 'delivered', items: [a] });
 });
+
+
+test('W114: a turn-start taking read can settle and post its newly unlocked question in one write', async () => {
+  clock(); const f = await fixture(); const client = await memory(f, true);
+  const next = id('Ticket', 'Next');
+  await f.apply([{ kind: 'ticket.create', ticket: { id: next, title: 'Next', question: 'Next choice?', type: 'grilling' } },
+    { kind: 'dependency.add', dependentId: next, prerequisiteId: ticketId }]);
+  const a = f.answer(2); f.quiet();
+  const read = (await client.callTool({ name: 'map_read', arguments: { mapId, claimantId, version } })).structuredContent as Record<string, unknown>;
+  expect(read).toMatchObject({ delivery: { outcome: 'delivered', items: [a] } });
+  const head = (read.revision as { revision: number }).revision;
+  const written = await client.callTool({ name: 'map_apply', arguments: { mapId, version, expectedRevision: head, commands: [
+    { ...settle, deskAnswer: { answerId: a.answerId, questionVersion: a.questionVersion },
+      settlement: { ...settle.settlement, outcome: { kind: 'decision', statement: 'B — Second', rationale: 'Kun selected option 2' } } },
+    { kind: 'claim.acquire', ticketId: next, claimantId },
+    { kind: 'deskQuestion.post', ticketId: next, claimantId, question: { ...question, questionId: 'Q.Next' } },
+  ] } });
+  expect(written.structuredContent).toMatchObject({ kind: 'committed', revision: head + 1 });
+  expect(f.inspect().desk.deskQuestions).toEqual(expect.arrayContaining([
+    expect.objectContaining({ ticketId, state: 'settled' }), expect.objectContaining({ ticketId: next, state: 'pending' }),
+  ]));
+});

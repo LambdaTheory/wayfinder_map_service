@@ -573,24 +573,10 @@ try {
   await page.reload(); await page.getByRole('button', { name: '答题台', exact: true }).click();
   await page.getByText('当前仅查看。', { exact: false }).waitFor(); assert(await page.locator('.desk-history').getByRole('button', { name: '修改答复' }).first().isDisabled());
   assert.deepEqual(errors, []);
-  // Default off: same browser, fresh unused database, no desk UI or write route.
-  await service.stop(); const disabledPath = join(directory, 'disabled', 'maps.sqlite'); initializeSQLite(disabledPath); storage = openSQLite(disabledPath);
-  await storage.adapter.commit(created.value); service = await serveLocalMcp(storage, { ...config, databasePath: disabledPath, answerDeskEnabled: false });
-  await page.getByRole('button', { name: '答题台', exact: true }).waitFor({ state: 'detached' });
-  await page.locator('.map-drawing').waitFor();
-  // On an unused database, enable then disable at the SAME Revision: an open page must remove the desk.
-  await service.stop(); storage = openSQLite(disabledPath); service = await serveLocalMcp(storage, { ...config, databasePath: disabledPath });
-  await page.getByRole('button', { name: '答题台', exact: true }).waitFor();
-  await service.stop(); storage = openSQLite(disabledPath); service = await serveLocalMcp(storage, { ...config, databasePath: disabledPath, answerDeskEnabled: false });
-  await page.getByRole('button', { name: '答题台', exact: true }).waitFor({ state: 'detached' });
-  assert.equal(await page.locator('.desk').count(), 0);
-  for (const fragment of ['#section', `#key=${key}`]) {
-    await page.goto(`${url}${fragment}`); await page.locator('.map-drawing').waitFor();
-    assert.equal(new URL(page.url()).hash, fragment);
-    assert.equal(await page.locator('.desk').count(), 0);
-  }
-  assert.equal((await page.request.post(`http://127.0.0.1:${port}/api/desk`, { data: {} })).status(), 404);
-  console.log('Browser evidence passed: light/dark/375px; fragment/storage; Tab/Space controls; 12 armed/unarmed polling/focus interleavings; 27 dialog interleavings; 599/600 ms continuous keyboard, root/revision/queue-order preservation and refocus/write/reopen delays; explicit selection and unchanged-poll positive controls; changed-question pause; keyboard/text/bulk/edit; live polling; stale reopen list; cancellation; Taken/Settled; requested-option marker and text context; restart; disabled UI and preserved fragments; no script/CSP errors across all pages.');
+  // The retired disable input fails before listening, even for an unused database.
+  await service.stop(); const unusedPath = join(directory, 'unused', 'maps.sqlite'); initializeSQLite(unusedPath); storage = openSQLite(unusedPath);
+  await assert.rejects(serveLocalMcp(storage, { ...config, databasePath: unusedPath, answerDeskEnabled: false }), /Answer Desk is required/);
+  console.log('Browser evidence passed: light/dark/375px; fragment/storage; Tab/Space controls; 12 armed/unarmed polling/focus interleavings; 27 dialog interleavings; 599/600 ms continuous keyboard, root/revision/queue-order preservation and refocus/write/reopen delays; explicit selection and unchanged-poll positive controls; changed-question pause; keyboard/text/bulk/edit; live polling; stale reopen list; cancellation; Taken/Settled; requested-option marker and text context; restart; retired disable refusal; no script/CSP errors across all pages.');
 } finally {
   await browser?.close(); await service?.stop(); storage.close(); rmSync(directory, { recursive: true, force: true });
 }

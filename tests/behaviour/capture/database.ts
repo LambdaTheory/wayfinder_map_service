@@ -38,10 +38,10 @@ export function readCaptureSource(path: string, mapId: string, revision: number,
     const format = db.prepare('PRAGMA user_version').get()?.user_version;
     if (db.prepare('PRAGMA application_id').get()?.application_id !== 0x57464d31
       || (format !== 1 && format !== 2)) throw new CaptureError('Unsupported Wayfinder database format');
-    // Check presence only, across the database: desk payloads are outside B04 until #114.
+    // Check presence only, across the database: desk payloads are outside the current B04 capture contract.
     const gaps = format === 2 && ['desk_questions', 'desk_answers', 'reopen_requests', 'desk_maps']
       .some(table => db.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get())
-      ? ['答题台状态未采集 (Answer Desk state not captured): this database contains desk records, possibly on another Map; desk tables and their state are outside capture until #114.'] : [];
+      ? ['答题台状态未采集 (Answer Desk state not captured): this database contains desk records, possibly on another Map; desk tables and their state are outside the current capture contract.'] : [];
     const head = db.prepare('SELECT head FROM catalog WHERE map_id=?').get(mapId);
     if (!head || Number(head.head) < revision) throw new CaptureError('Source Map or Revision not found');
     const rows = db.prepare('SELECT revision, record FROM revisions WHERE map_id=? AND revision BETWEEN ? AND ? ORDER BY revision')
@@ -53,7 +53,7 @@ export function readCaptureSource(path: string, mapId: string, revision: number,
         || r.priorRevision !== (r.revision === 1 ? null : r.revision - 1)
         || r.kind !== (r.revision === 1 ? 'create' : 'apply')) throw new CaptureError('Inconsistent source Revision');
       // Even visible-state capture must not silently lose earlier desk-only Revisions.
-      if (hasDeskHistory(r)) throw new CaptureError('这张图含答题台历史，#114 之前无法采集 (Selected Map has Answer Desk history; capture is unavailable until #114)');
+      if (hasDeskHistory(r)) throw new CaptureError('这张图含答题台历史，当前采集工具尚不支持 (Selected Map has Answer Desk history; desk-history conversion is not implemented)');
       return r;
     });
     return { revisions: history ? records : records.slice(-1), gaps };

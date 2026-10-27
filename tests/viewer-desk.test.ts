@@ -67,17 +67,12 @@ async function fixture(enabled?: boolean) {
   };
 }
 
-test.each([undefined, false])('disabled (%s): no UI projection/key; answer endpoint is 404 and unchanged viewer methods/polling', async enabled => {
-  const f = await fixture(enabled);
-  expect(existsSync(f.keyPath)).toBe(false);
-  expect((await f.view()).json()).not.toHaveProperty('desk');
-  expect((await f.view(1)).status).toBe(204);
-  for (const method of ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'OPTIONS']) expect((await f.http('/api/desk', method)).status).toBe(404);
-  expect((await f.http('/viewer/desk.js')).status).toBe(404);
-  expect((await f.http('/api/maps', 'POST', '{}')).status).toBe(405);
-  expect((await f.http(`/maps/${mapId}`)).body).not.toContain('答题台');
+test('the default service provides the keyed desk; explicit disable is refused', async () => {
+  const f = await fixture();
+  expect(existsSync(f.keyPath)).toBe(true);
+  expect((await f.view()).json()).toHaveProperty('desk');
+  await expect(fixture(false)).rejects.toMatchObject({ code: 'answer_desk_required' });
 });
-
 test('one keyed entry: no token substitution, query keys, cross-origin, Host, unkeyed writes or general mutations', async () => {
   const f = await fixture(true); await f.apply([create('A'), claim('A'), question()]);
   const before = await f.history(); const value = f.answer();

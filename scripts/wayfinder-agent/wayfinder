@@ -421,12 +421,17 @@ def agent_token(identity):
 
 # ---------------------------------------------------------------- harness setup
 
+def without_desk_authority(env):
+    """Only the launcher holds the browser capability, including during harness probes."""
+    return {name: value for name, value in env.items() if not name.startswith("WAYFINDER_ANSWER_DESK_")}
+
+
 def check_harness(harness):
     binary = HARNESSES[harness]["bin"]
     if not shutil.which(binary):
         die("找不到 {}。".format(binary))
     # A broken global install (e.g. a half-finished npm upgrade) shows here, before any state is touched.
-    if subprocess.run([binary, "--version"], capture_output=True).returncode != 0:
+    if subprocess.run([binary, "--version"], capture_output=True, env=without_desk_authority(os.environ)).returncode != 0:
         die("全局 {} 无法运行。在日常终端里修复后，用 {} --version 检查。".format(binary, binary))
 
 
@@ -540,7 +545,7 @@ def claude_env(state):
     for key in PROXY_VARS:
         if key in daily and key not in os.environ:
             env[key] = daily[key]
-    return env
+    return without_desk_authority(env)
 
 
 def daily_claude_ids():
@@ -627,7 +632,7 @@ def start_cwd(method):
     return cwd
 
 
-def launch(options, prompt=None, passthrough=(), resume_id=None, cwd=None):
+def launch(options, prompt=None, passthrough=(), resume_id=None, cwd=None, map_id=None):
     harness, method, model, effort = options["harness"], options["method"], options["model"], options["effort"]
     check_harness(harness)
     state = state_dir(harness, method)
@@ -658,7 +663,7 @@ def launch(options, prompt=None, passthrough=(), resume_id=None, cwd=None):
             argv += ["resume", resume_id]
         argv += list(passthrough)
     else:
-        env = claude_env(state)
+        env = without_desk_authority(claude_env(state))
         prepare_claude(state, method, str(cwd), env)
         argv = ["claude", "--model", model, "--effort", effort, "--dangerously-skip-permissions", "--strict-mcp-config",
                 "--append-system-prompt-file", str(state / "wayfinder-instructions.md")]
@@ -667,6 +672,8 @@ def launch(options, prompt=None, passthrough=(), resume_id=None, cwd=None):
         if resume_id:
             argv += ["--resume", resume_id]
         argv += list(passthrough)
+    # Browser response authority never enters the harness, even if inherited from an operator shell.
+    env = without_desk_authority(env)
     if token:
         env["WAYFINDER_TOKEN"] = token
     if prompt:
@@ -675,6 +682,8 @@ def launch(options, prompt=None, passthrough=(), resume_id=None, cwd=None):
     if os.environ.get("WAYFINDER_AGENT_DRY_RUN"):  # tests: show the launch instead of running it
         print(json.dumps({"cwd": str(cwd), "argv": argv}, ensure_ascii=False))
         return
+    if method == "mcp" and map_id:
+        cmd_desk([map_id])
     os.chdir(str(cwd))
     os.execvpe(argv[0], argv, env)
 
@@ -921,7 +930,7 @@ def cmd_desk(args):
         if not isinstance(view, dict) or "desk" not in view:
             raise ValueError("desk disabled")
     except (OSError, ValueError):
-        die("答题台未启用或钥匙不可用；当前版本默认关闭，启用 WAYFINDER_ANSWER_DESK_ENABLED=true 后重启服务。")
+        die("答题台或钥匙不可用；请确认服务版本、地图 ID 和私有钥匙文件。")
     url = "http://127.0.0.1:{}/maps/{}#key={}".format(PORT, args[0], key)
     try:
         # Generic webbrowser controllers (including BROWSER) put the URL in argv.
@@ -935,14 +944,17 @@ def cmd_desk(args):
         die("浏览器未打开答题台；请检查默认浏览器后重试。")
     if not opened:
         die("浏览器未打开答题台；请检查默认浏览器后重试。")
-    say("✓ 已打开答题台 {}。刷新页面后请再运行此命令。".format(args[0]))
+    # Current Orca CLI exposes URL input only in argv. No secure input contract is
+    # available to negotiate, so keep the Apple-event stdin path (follow-up #145).
+    note = "因 Orca 暂时无法安全接收地址，已在默认浏览器打开" if os.environ.get("ORCA_WORKTREE_ID") else "已在默认浏览器打开"
+    say("http://127.0.0.1:{}/maps/{} · {}".format(PORT, args[0], note))
 
 
 def cmd_help(_args):
     print("""用法：
   wayfinder [地图 ID] [--harness codex|claude] [--model 模型] [--effort 档位] [--method mcp|matt] [-- harness 参数]
       开一个专用 Agent；写了地图 ID 就开场续接它。flag 只管这一次，不带就是 Codex · gpt-6-astra · xhigh · MCP 版。
-  wayfinder desk <地图 ID>           打开带钥匙的答题台（需服务启用）
+  wayfinder desk <地图 ID>           打开带钥匙的答题台
   wayfinder maps                     列出所有地图（两个方法版本）
   wayfinder sessions [地图 ID]       列出专用 Agent 的会话，可按地图筛
   wayfinder resume <会话 ID>          接着某个会话，harness 和方法版本按原会话
@@ -987,7 +999,7 @@ def main():
         if len(positional) > 1 or (positional and not ID_PATTERN.match(positional[0])):
             die("只认一个地图 ID；要原样交给 harness 的参数放在 -- 后面。wayfinder help 看用法。")
         prompt = "继续 Wayfinder 地图 {}".format(positional[0]) if positional else None
-        launch(options, prompt=prompt, passthrough=passthrough)
+        launch(options, prompt=prompt, passthrough=passthrough, map_id=positional[0] if positional else None)
 
 
 if __name__ == "__main__":

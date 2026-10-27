@@ -217,7 +217,9 @@ describe('Attempt verdicts on fixed evidence', () => {
     const reviews: Review[] = [...items.required, ...items.mustNot, ...items.expect.flatMap(g => g.anyOf)]
       .filter(i => i.judge !== 'script').map(i => ({ itemId: i.id, role: 'human', by: 'fixture',
         status: expected.has(i.id) ? 'violated' : 'holds', reason: 'Fixed expectation-absence fixture; not an acceptance reading.' }));
-    const a = sample(s.id, [], { run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
+    const writes: AgentWrite[] = s.id === 'W7'
+      ? [{ changes: [{ commandIndex: 0, command: 'deskQuestion.post', subjectId: 'task-carrier' }] }] : [];
+    const a = sample(s.id, writes, { run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
     if (s.id === 'S6') a.events.push(call(3, 'map_apply', { kind: 'conflict' }));
     if (s.id === 'W5') a.events.push({ ...call(3, 'map_read', undefined, { turn: 1 }), failed: true } as EventRecord,
       { seq: 4, at: '', session: 'A', turn: 1, actor: 'controller', kind: 'controller', action: 'relay-cut', detail: { tool: 'map_read' } });

@@ -31,7 +31,7 @@ export interface LocalServiceConfiguration {
   readonly credentialsPath?: string;
   // The primary credential's client shows its model no server instructions (compatibility mode).
   readonly toolsOnly?: boolean;
-  // Staged Answer Desk capability; #114 enables it by default.
+  // Deprecated compatibility input: only true is accepted; Answer Desk is always enabled.
   readonly answerDeskEnabled?: boolean;
   // Private operator handoff to the launcher; never served over HTTP.
   readonly answerDeskKeyPath?: string;
@@ -43,7 +43,7 @@ export interface LocalMcpService {
 export class LocalServiceFailure extends Error {
   constructor(readonly code: 'invalid_configuration' | 'storage_not_ready' | 'port_unavailable' | 'service_failure' | 'answer_desk_required') {
     super(code === 'answer_desk_required'
-      ? 'The configured private SQLite database has used Answer Desk; enable answerDeskEnabled (WAYFINDER_ANSWER_DESK_ENABLED=true).'
+      ? 'Answer Desk is required by this release; remove answerDeskEnabled: false (WAYFINDER_ANSWER_DESK_ENABLED=false).'
       : `Local MCP ${code}`);
     this.name = 'LocalServiceFailure';
   }
@@ -62,7 +62,8 @@ export function captureConfiguration(input: LocalServiceConfiguration): LocalSer
     || (input.credentialsPath !== undefined && (typeof input.credentialsPath !== 'string' || !isAbsolute(input.credentialsPath)))) {
     throw new LocalServiceFailure('invalid_configuration');
   }
-  return structuredClone(input);
+  if (input.answerDeskEnabled === false) throw new LocalServiceFailure('answer_desk_required');
+  return structuredClone({ ...input, answerDeskEnabled: true });
 }
 function localOrigin(value: unknown): boolean {
   if (typeof value !== 'string') return false;
