@@ -7,7 +7,7 @@ import { mapTools, toolsOnlyMapTools } from '../src/mcp-schemas.js';
 // @ts-expect-error the build script is outside the TypeScript source graph
 const { parseWorkflow } = await import('../scripts/build-workflow.mjs') as {
   parseWorkflow(markdown: string, version: string, previous?: { markdown: string; version: string }):
-    { version: string; safetyCore: string; instructions: string };
+    { version: string; safetyCore: string; instructions: string; prompt: string };
 };
 const source = readFileSync('docs/agents/exploration-mcp.md', 'utf8');
 const approvedVerdicts = "A question from the human is not an instruction or a verdict, even when you agree: answer it and ask before acting on it. Changing what a Map covers is the human's call: add or remove Scope Exclusions, change the Destination or Notes, or narrow a question or remove a Dependency to move work out, only on the human's explicit instruction or agreement to that proposal.";
@@ -73,15 +73,21 @@ test.each([['instructions', mapTools], ['toolsOnly', toolsOnlyMapTools]] as cons
       { tools: ['map_create', 'map_list'], passages: ['give an actionable recommendation and its reasons now',
         'even if the opening request asks for a Map', 'If the human still wants a Map after that explanation'] },
       { tools: ['map_apply'], passages: ['explicitly authorizes clearing or taking over the identified Tickets',
-        'Ask about takeover separately from continuing after a Conflict', 'even when it answers a combined takeover-and-continue question'] },
+        'After a Conflict, ask about takeover as its own question, naming the Tickets and the session holding them',
+        'An explicit reply to take over those Tickets is sufficient; the human need not repeat their IDs',
+        'even when it answers a combined takeover-and-continue question'] },
       { tools: ['map_list', 'map_read', 'map_apply'], passages: ['state the capability limit, offer supported next steps',
-        'ask which the human wants before changing the Map', 'Deletion is unsupported', 'never simulate deletion'] },
-      { tools: ['map_apply'], passages: ['name the dependent Tickets affected by the change, including open ones',
+        'ask which the human wants before changing the Map', 'Deletion is unsupported',
+        'add a Notes line that it is abandoned, changing nothing else', 'never simulate deletion'] },
+      { tools: ['map_apply'], passages: ['When you reopen a settled decision, in the same reply name the other Tickets affected by the change, including open ones',
         'A direct change request covers only the parts the human states', 'Propose those details for a fresh verdict',
         'Reopening and Settlement still follow the verdict and Answer Desk rules'] },
       { tools: ['map_read', 'map_apply'], passages: ['check the accepted decisions against the Destination, open or claimed Tickets, and Fog',
-        'an empty Frontier alone is not enough', 'hand off in the same turn', 'Otherwise name the specific unresolved decision',
-        'Add Tickets only for decisions still needed for that route'] },
+        'Count every open or claimed Ticket relevant to the route as unfinished',
+        'The route is clear only when every relevant Ticket is settled',
+        'an empty Frontier alone is not enough', 'hand off in the same turn', 'Otherwise name the specific unfinished Ticket or undecided choice',
+        'Add Tickets only for decisions an answer made precise and the route still needs',
+        'implementation elaboration that leaves the settled plan unchanged'] },
     ];
     for (const rule of rules) for (const passage of rule.passages) {
       expect(instructions).toContain(passage);
@@ -91,6 +97,17 @@ test.each([['instructions', mapTools], ['toolsOnly', toolsOnlyMapTools]] as cons
     expect(readFileSync('scripts/wayfinder-agent/agent-instructions.md', 'utf8'))
       .toContain('前沿为空不等于完成，有缺口就点明');
   });
+
+test('workflow fixes: Prompt and skill keep the human choice to create and the completion gate', () => {
+  const prompt = parseWorkflow(source, '5.0.0').prompt;
+  expect(prompt).toContain('answer a one-turn question with an actionable recommendation and its reasons');
+  expect(prompt).toContain('explaining that no Map is needed even if the opening request asks for one');
+  expect(prompt).toContain('If the human still wants a Map after that explanation, confirm its Destination');
+  expect(prompt).not.toContain('If a Map is still needed');
+  const skill = readFileSync('.agents/skills/wayfinder/SKILL.md', 'utf8');
+  expect(skill).not.toMatch(/If there is no fog|the whole way fits one session|ask how to proceed|otherwise hand off/);
+  expect(skill).toContain('If no new Ticket is needed, continue existing unfinished Tickets; hand off only when the completion check above passes.');
+});
 
 // Pin each governed tool, not just initialization instructions: ChatGPT sees tools only.
 test.each([['instructions', mapTools], ['toolsOnly', toolsOnlyMapTools]] as const)(

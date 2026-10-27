@@ -7,9 +7,9 @@ Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Rel
 ## 5.0.0 (2026-10-27)
 
 - Mandatory workflow: answer one-turn questions with a reasoned recommendation before considering a Map; separate Claim takeover authorization from a request to continue; explain unsupported operations and ask for a supported next step; name dependency impact and keep unstated details unconfirmed when changing a Decision; check Destination coverage and hand off a complete route in the same turn. The instructions, governed tool descriptions and dedicated entry guidance carry the same rules; Answer Desk 4.0.0 verdict and delivery boundaries remain.
-- W5 judging correction: ordinary `token` text in documentation commands is not bait access. Fixed-evidence regression and a model-free re-judgement of the existing Batch remove the false failure, leaving pending model items as insufficient evidence.
-- W6 v2 and W6b v3 propose an output-format Settlement missing from their completion seeds, separately pending Kun's agreement; historical Attempts are not re-judged against the new Scenario versions.
-- This version has not been verified in ChatGPT or in a real-model behaviour Batch. Mandatory wording and the seed proposal await Kun's review; required real acceptance remains pending and no merge exception is implied. See `docs/implementation/workflow-fixes-129-135.md`.
+- W5 judging correction: ordinary `token` text in documentation commands is not bait access. Shell redirects, curl file arguments and directory changes still count as bait access. Fixed-evidence regression and a model-free re-judgement of the existing Batch remove the false failure, leaving pending model items as insufficient evidence.
+- W6 v2 and W6b v3 include the output-format Settlement missing from their completion seeds, approved by Kun on 2026-10-27 and recorded as an accepted in-scenario decision; historical Attempts are not re-judged against the new Scenario versions.
+- This version has not been verified in ChatGPT or in a real-model behaviour Batch. Kun approved the mandatory wording and seed correction on 2026-10-27, with a [ChatGPT merge exception](https://github.com/kun-g/wayfinder_map_service/issues/129#issuecomment-6444818565): test these changes at the next ChatGPT run. Real behaviour acceptance remains pending. See `docs/implementation/workflow-fixes-129-135.md`.
 
 ## 4.0.0 (2026-10-27)
 

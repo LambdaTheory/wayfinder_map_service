@@ -21,7 +21,7 @@ On 2026-10-26 the `wayfinder` overlay was aligned with Release Version 3.0.0. It
 
 Upstream renamed the domain glossary convention from `CONTEXT.md` to `GLOSSARY.md` before `5beb35b`; this repository's glossary moved with it, so archived records that cite `CONTEXT.md` refer to today's `GLOSSARY.md`.
 
-The 5.0.0 proposal aligns the `wayfinder` overlay with the workflow corrections for #129–#135: one-turn questions, explicit takeover authorization, unsupported operations, the extent of change requests and route completion. The Answer Desk passages remain intact. Exact proposed wording, source-to-copy coverage, pending Kun review and verification limits are recorded in [workflow-fixes-129-135.md](../implementation/workflow-fixes-129-135.md); hashes and line counts include this local adaptation.
+Release Version 5.0.0 aligns the `wayfinder` overlay with the workflow corrections for #129–#135: one-turn questions, explicit takeover authorization, unsupported operations, the extent of change requests and route completion. The Answer Desk passages remain intact. Exact wording approved by Kun on 2026-10-27, source-to-copy coverage and verification limits are recorded in [workflow-fixes-129-135.md](../implementation/workflow-fixes-129-135.md); hashes and line counts include this local adaptation.
 
 The repository-local copies are the runtime dependency. Global skills under a user's home directory are irrelevant to reproducibility and may differ.
 

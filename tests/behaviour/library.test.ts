@@ -69,6 +69,9 @@ describe('library', () => {
       expect(tickets.find(t => t.id === 'output-format')?.settlement?.outcome).toMatchObject({
         kind: 'decision', statement: expect.stringContaining('month,category,expense_yuan'),
       });
+      const output = tickets.find(t => t.id === 'output-format')!.settlement!;
+      expect(output.provenance.method).toBe('与 Kun 确认账单汇总输出的 grilling 会话');
+      expect(JSON.stringify(output)).not.toMatch(/pending|approval|synthetic|fixture|#134|#135|场景|Destination/i);
       expect(tickets.filter(t => !t.settlement).map(t => t.id)).toEqual(id === 'W6' ? [] : ['no-category']);
     }
     expect([byId('W6').version, byId('W6b').version]).toEqual([2, 3]);
