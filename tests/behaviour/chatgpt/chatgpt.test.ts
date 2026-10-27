@@ -764,6 +764,27 @@ test('out-of-turn discovery reaches the service and wire while Map access stays 
   } finally { await client?.close(); await f.cleanup(); }
 }, 30_000);
 
+test('out-of-turn server/discover is forwarded unchanged so a modern-era client can fall back to initialize', async () => {
+  const root = fresh(); const a = await ChatGPTAttempt.start(attemptOptions(root, 'F11'));
+  try {
+    assert.deepEqual(refusalsOf(a.dir), []);
+    // The shape ChatGPT App 26.1016.62342 sent to open Refresh tools (#80); no turn has begun.
+    const discover = { jsonrpc: '2.0', id: 'openai-mcp-discover', method: 'server/discover',
+      params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28' } } };
+    const response = await fetch(`http://127.0.0.1:${a.relay.port}/mcp`, { method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify(discover) });
+    const text = await response.text();
+    const recorded = () => existsSync(join(a.dir, 'raw/wire.json')) ? wireOf(a).find(e => e.request.method === 'server/discover') : undefined;
+    await eventually(() => recorded() !== undefined, () => `server/discover was not forwarded: HTTP ${response.status} ${text}`);
+    const exchange = recorded()!;
+    // Whatever the service answers (SDK v1: HTTP 400 / JSON-RPC -32000), the client receives it, not a relay 503.
+    assert.equal(response.status, exchange.status, text);
+    assert.deepEqual(JSON.parse(text), exchange.response);
+    assert.equal(exchange.httpMethod, 'POST'); assert.deepEqual(exchange.request, discover); assert.equal(exchange.sessionId, null);
+    assert.deepEqual(refusalsOf(a.dir), []);
+  } finally { await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }
+}, 30_000);
+
 test('a session DELETE cannot fabricate a JSON-RPC tool call', async () => {
   const root = fresh(); const a = await ChatGPTAttempt.start(attemptOptions(root, 'F11'));
   const { client, transport } = await createHttpTestClient(a.relay.port, 'ignored');
