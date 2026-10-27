@@ -69,6 +69,7 @@ export function checklist(scenarios: Scenario[], surface: string, count: number,
         upgrade.recovery === 'old-chat' ? 'Keep the OLD chat. Do not start a new chat for turn 1. Preserve the refusal, unchanged history and request to refresh; do not help it guess or retry.'
           : 'Open a NEW chat, record `did new-chat`, mention the plugin and record `did plugin-mentioned`. Preserve new definitions and the committed canary Ticket title.', '');
       lines.push(`Turn ${i}, session ${t.session}, ${t.kind}:`, '', '```text', t.say, '```', '');
+      if (t.desk) lines.push(`Before this input, begin requires Pending desk questions on ${t.desk.mapId}: ${t.desk.ticketIds.join(', ')}. ${t.desk.submit?.length ? 'The Controller submits the specified displayed answers through the keyed route and waits for the Quiet Window.' : t.desk.conversationRecommendation ? 'Use the exact printed conversation verdict: begin quotes the currently displayed answer; this table is only a placeholder.' : 'No answer is submitted; keep this conversation input unchanged.'}`, '');
       if (t.answers) lines.push(`Before this reply, verify: ${t.answers.proposal}. If absent, do not send it: stop precondition-not-met. A matching word alone is insufficient.`, '');
     });
     lines.push('Collect: native messages, exact calls/results, receipts, before/after Map history, client tool snapshot, version-source evidence and preparation actions. Required verdict items:',

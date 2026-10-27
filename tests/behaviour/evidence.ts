@@ -171,9 +171,18 @@ export interface WireTicket {
   status: 'open' | 'settled'; claim: string | null; settlement?: WireSettlement;
 }
 export interface WireContent { id: string; text: string; references: WireReference[] }
+export interface WireDeskQuestion {
+  questionId: string; ticketId: string; questionVersion: number; question: string;
+  options: { label: string; description: string }[];
+  recommendedOption: number; recommendedAnswer: string; whyKun: string;
+  triage: string; triageReason: string; gatesResearch: boolean; postedAt: string;
+  state: string;
+}
 export interface WireState {
   id: string; title: string; destination: string; notes: string;
   fog: WireContent[]; scopeExclusions: WireContent[]; tickets: WireTicket[]; currentRevision: number;
+  /** Absent on historical pre-desk captures; absence is not an empty desk. */
+  deskQuestions?: WireDeskQuestion[];
 }
 export interface WireRevision {
   mapId: string; revision: number; priorRevision: number | null; kind: 'create' | 'apply';

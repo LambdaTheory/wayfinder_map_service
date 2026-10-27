@@ -120,3 +120,5 @@ WAYFINDER_AGENT_DRY_RUN=1 wayfinder …      # 只打印要执行的命令和目
 一次性库用产品检出的 `initializeSQLite(path)` 建，放在 `~/Library/Application Support/Wayfinder/` 下的新目录。非交互的冒烟测试：`wayfinder --effort low -- exec --skip-git-repo-check "…" < /dev/null`（Codex，`< /dev/null` 免得它等 stdin）、`wayfinder --harness claude --model haiku --effort low -- -p "…"`，再用 `maps` 看写入来源。
 
 `~/.local/bin/wayfinder` 和 `wayfinder-matt` 链到本仓库的 `scripts/wayfinder-agent/wayfinder`（2026-10-25 起；此前在工作区的 `runtime/tools/wayfinder_agent/`）。脚本只用 Python 标准库，兼容系统自带的 Python 3.9。
+
+启动时若答题台打不开（例如 SSH、非 Mac、地图 ID 有误或钥匙不可用），仍照常启动 agent，并给一行不含钥匙的说明；稍后可运行 `wayfinder desk <地图 ID>`。单独运行 `desk` 失败仍返回非零状态。

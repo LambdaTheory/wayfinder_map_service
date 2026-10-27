@@ -34,7 +34,7 @@ os.execvpe = execute
 os.environ["WAYFINDER_ANSWER_DESK_KEY"] = "synthetic-desk-secret"
 os.environ["WAYFINDER_ANSWER_DESK_KEY_FILE"] = "/synthetic-desk-secret/key"
 opened_desks = []
-launcher["cmd_desk"] = lambda args: opened_desks.append(args)
+launcher["open_desk"] = lambda map_id, **_: opened_desks.append([map_id])
 options = {"harness": "codex", "method": "mcp", "model": "synthetic", "effort": "high"}
 cwd = Path(os.environ["HOME"])
 

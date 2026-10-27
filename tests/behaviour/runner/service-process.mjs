@@ -2,7 +2,7 @@
 // never process arguments or environment. The required primary credential is unused and born here.
 import { randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 // Only the owning runner selects this build; it is never supplied by the agent or a CLI target flag.
 const build = process.env.WAYFINDER_TEST_BUILD;
 const { startLocalMcpService } = await import(build ? pathToFileURL(join(build, 'dist/mcp-service.js')).href : '../../../dist/mcp-service.js');
@@ -16,6 +16,7 @@ const service = await startLocalMcpService({
   clientId: process.env.WAYFINDER_CLIENT_ID,
   allowedOrigins: [],
   credentialsPath: process.env.WAYFINDER_CREDENTIALS_FILE,
+  answerDeskKeyPath: join(dirname(process.env.WAYFINDER_CREDENTIALS_FILE), 'answer-desk-key'),
 });
 console.log(`Wayfinder local MCP ready version=${workflowContract.version}`);
 const stop = () => { void service.stop().then(() => process.exit(0)); };

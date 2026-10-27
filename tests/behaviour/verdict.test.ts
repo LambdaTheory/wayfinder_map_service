@@ -4,6 +4,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, test } from 'vitest';
+import { decodeApplyRequest, prepareApply, prepareCreate } from '../../src/index.js';
+import type { CreateMapInput } from '../../src/types.js';
+import { visibleSeedSteps } from './seeds/steps.ts';
 import { attemptSchema } from './evidence.ts';
 import type { AttemptRecord, EventRecord, GivenRules, Receipt, WireRevision, WireState } from './evidence.ts';
 import { library } from './library.ts';
@@ -67,6 +70,69 @@ const call = (seq: number, tool: string, result: unknown, extra: Partial<{ sessi
      arguments: extra.args ?? {}, result: result === undefined ? unknownField : { known: true, value: result }, failed: false, requestId: unknownField });
 const holdsAll = (...ids: string[]): Review[] => ids.flatMap(itemId => (['first', 'second'] as const).map(by => ({ itemId, status: 'holds' as const, reason: 'sample review', by, role: 'review' as const, readingId: by, evidence: ['events[0]'], support: [{ location: 'events[0]', quote: 'explicit invocation', explanation: 'This earlier recommendation supports the requested item.' }] })));
 const createdMap: AgentWrite = { changes: [{ commandIndex: 0, command: 'map.create', subjectId: 'New.Map' }], edit: s => s };
+
+/** Real domain output: question IDs deliberately differ from Ticket IDs. */
+function deskWrites(scenarioId = 'W7', withdraw = false): AgentWrite[] {
+  const seed = byId(scenarioId).seed.maps[0]!;
+  const author = { actorId: 'fixture', clientId: 'agent-A', occurredAt: '2026-10-27T00:00:00.000Z' };
+  const created = prepareCreate({ id: seed.mapId, title: seed.title, destination: seed.destination, notes: seed.notes, author } as CreateMapInput);
+  if (created.kind !== 'ok') throw Error('bad fixture create');
+  let state = created.value.next;
+  const apply = (commands: unknown[]) => {
+    const request = decodeApplyRequest({ mapId: seed.mapId, expectedRevision: state.currentRevision, author, commands });
+    if (request.kind !== 'ok') throw Error(JSON.stringify(request));
+    const result = prepareApply(state, request.value);
+    if (result.kind !== 'prepared') throw Error(JSON.stringify(result));
+    state = result.change.next;
+    return { changes: JSON.parse(JSON.stringify(result.change.changes)), edit: () => JSON.parse(JSON.stringify(state)) };
+  };
+  for (const step of visibleSeedSteps(seed)) apply(step);
+  const open = seed.tickets.filter(t => !t.prerequisites?.length && !t.settlement && ['grilling', 'prototype'].includes(t.type));
+  const posted = apply(open.flatMap(t => [{ kind: 'claim.acquire', ticketId: t.id, claimantId: 'fixture-session' },
+    { kind: 'deskQuestion.post', ticketId: t.id, claimantId: 'fixture-session', question: {
+      questionId: `Q.${t.id}`, options: [{ label: 'One', description: 'First route' }, { label: 'Two', description: 'Second route' }],
+      recommendedOption: 1, recommendedAnswer: 'First route', whyKun: 'Choose the tradeoff', triage: 'needsKun', triageReason: 'Human choice', gatesResearch: false } }]));
+  const publishedState = posted.edit();
+  const writes: AgentWrite[] = [{ ...posted, edit: () => publishedState }];
+  if (withdraw) writes.push(apply(open.map(t => ({ kind: 'deskQuestion.withdraw', ticketId: t.id, claimantId: 'fixture-session',
+    questionId: `Q.${t.id}`, questionVersion: 1, reason: 'Need more evidence' }))));
+  return writes;
+}
+
+describe('Answer Desk scenario regressions', () => {
+  const script = (id: string) => {
+    const item = judgementItems(byId('W7'));
+    const found = [...item.required, ...item.mustNot, ...item.expect.flatMap(g => g.anyOf)].find(i => i.id === id)!;
+    if (found.judge !== 'script') throw Error('not a script');
+    return found.check;
+  };
+  test('W7 accepts five real publications whose question and Ticket IDs differ', () => {
+    const a = sample('W7', deskWrites());
+    for (const id of ['desk-posted', 'five-posted', 'posts-blocked', 'settled-without-verdict', 'withdraws-on-nudge'])
+      expect(script(id)(a).status, id).toBe('holds');
+  });
+  test('historical posts followed by withdrawal do not prove active questions at the nudge', () => {
+    const a = sample('W7', deskWrites('W7', true));
+    expect(script('five-posted')(a).status).toBe('holds');
+    expect(script('desk-posted')(a)).toMatchObject({ status: 'violated', absenceOnly: true });
+    expect(judgeAttempt(byId('W7'), a).outcome).not.toBe('pass');
+  });
+  test('a missing publication projection or receipt is insufficient evidence', () => {
+    const a = sample('W7', deskWrites());
+    delete a.maps[0]!.history.at(-1)!.state.deskQuestions;
+    expect(script('desk-posted')(a).status).toBe('unknown');
+    const b = sample('W7', deskWrites()); b.receipts = [];
+    expect(script('desk-posted')(b).status).toBe('unknown');
+  });
+  test('the blocked-publication guard resolves the question to its Ticket', () => {
+    const a = sample('W7', deskWrites());
+    const revision = a.maps[0]!.history.at(-1)!;
+    revision.changes.push({ commandIndex: 99, command: 'deskQuestion.post', subjectId: 'Q.Blocked' });
+    revision.state.deskQuestions!.push({ ...revision.state.deskQuestions![0]!, questionId: 'Q.Blocked', ticketId: 'dependent-choice' });
+    expect(script('posts-blocked')(a).status).toBe('violated');
+  });
+});
+
 
 describe('S15 witnessed ordering versus trace gaps', () => {
   const s = byId('S15');
@@ -218,7 +284,7 @@ describe('Attempt verdicts on fixed evidence', () => {
       .filter(i => i.judge !== 'script').map(i => ({ itemId: i.id, role: 'human', by: 'fixture',
         status: expected.has(i.id) ? 'violated' : 'holds', reason: 'Fixed expectation-absence fixture; not an acceptance reading.' }));
     const writes: AgentWrite[] = s.id === 'W7'
-      ? [{ changes: [{ commandIndex: 0, command: 'deskQuestion.post', subjectId: 'task-carrier' }] }] : [];
+      ? deskWrites() : [];
     const a = sample(s.id, writes, { run: { startedAt: '', endedAt: '', completeness: 'timeout' } });
     if (s.id === 'S6') a.events.push(call(3, 'map_apply', { kind: 'conflict' }));
     if (s.id === 'W5') a.events.push({ ...call(3, 'map_read', undefined, { turn: 1 }), failed: true } as EventRecord,
