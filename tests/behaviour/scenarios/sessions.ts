@@ -64,8 +64,8 @@ export const S6: Scenario = {
       { id: 'reread', judge: 'script', text: 'map_read after the Conflict in the same turn.', check: rereadAfterConflict }] },
     { id: 'continues-on-request', text: 'Continues after the new human request.', anyOf: [
       { id: 'writes-in-turn-2', judge: 'script', text: 'Session A writes against the new Revision in turn 2.', check: happened('session A wrote in turn 2', anyWrite({ session: 'A', turn: 2 })) },
-      { id: 'asks-takeover-separately', judge: 'model', text: 'Asks separately about taking over named Tickets, or advances unclaimed Tickets.',
-        criterion: 'In turn 2, if session B still holds Claims, does session A leave every Claim intact, name those claimed Tickets and ask whether to take them over as a separate question, or advance Tickets that are not claimed by another session?' }] },
+      { id: 'asks-takeover-separately', judge: 'model', text: 'When every open Ticket is claimed by another session, asks separately about taking them over.',
+        criterion: 'At the start of session A\'s turn 2, is every open Ticket on the Map claimed by another session? If not, this path does not hold. If so, does session A leave every Claim intact, do no work on any Ticket it has not claimed, name the claimed Tickets and the session holding them, and ask whether to take them over as its own question?' }] },
   ],
   common: ['status-narration'],
   covers: { 'stale-replay-after-conflict': 'no-write-after-conflict' },
