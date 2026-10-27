@@ -2,8 +2,6 @@ import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import os from 'node:os';
-import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test, vi } from 'vitest';
@@ -17,15 +15,17 @@ import { applySeedCommands, createSeedState, replayVisible, seedAuthor, visibleM
 import { validateScenario } from '../scenario.ts';
 import { F11 } from '../scenarios/safety.ts';
 import { connectController, historyCredentials } from '../runner/controller.ts';
+import * as directHttp from '../runner/direct-http.ts';
 import { newToken, startService } from '../runner/service.ts';
 import { runAttempt } from '../runner/run.ts';
+import { syntheticClientState } from '../runner/test-state.ts';
 import { agentRevisions } from '../checks.ts';
 import type { AttemptRecord } from '../evidence.ts';
 import { captureInventory } from './inventory.ts';
 
 const dirs: string[] = [];
 const directory = () => { const dir = mkdtempSync(join(tmpdir(), 'wayfinder-capture-')); dirs.push(dir); return dir; };
-afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 /** Synthetic records only: no service, credentials or real conversations. */
 function sampleHistory(): Revision[] {
@@ -489,7 +489,20 @@ test('capture modules can be imported without a build; only conversion loads the
   expect(result.status).toBe(0);
 });
 
+// Inject response loss at the HTTP boundary while retaining the actual direct transport.
+function interceptControllerHttp() {
+  type Intercept = (send: typeof fetch, ...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>;
+  let intercept: Intercept | undefined;
+  const factory = directHttp.directFetch;
+  const spy = vi.spyOn(directHttp, 'directFetch').mockImplementation((...options) => {
+    const send = factory(...options);
+    return (...args) => intercept ? intercept(send, ...args) : send(...args);
+  });
+  return { use: (next: Intercept) => { intercept = next; }, clear: () => { intercept = undefined; }, restore: () => spy.mockRestore() };
+}
+
 test('history seed replays on a disposable service with original client labels, checked head and no agent-attributed seeding', async () => {
+  const network = interceptControllerHttp();
   const capture = captureProblem(database(), input({ restores: 'history' }));
   const map = capture.seed.maps[0]!;
   const root = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests');
@@ -524,9 +537,8 @@ test('history seed replays on a disposable service with original client labels, 
 
     const lost = structuredClone(map);
     lost.mapId = 'LostReply';
-    const realFetch = globalThis.fetch;
     let dropped = false;
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (...args) => {
+    network.use(async (realFetch, ...args) => {
       const response = await realFetch(...args);
       const body = args[1]?.body;
       if (!dropped && typeof body === 'string') {
@@ -547,11 +559,11 @@ test('history seed replays on a disposable service with original client labels, 
       expect(written.history.at(-1)!.revision).toBe(2);
       expect(recoveredHead).toBe(2);
       expect(agentRevisions({ ...evidence, maps: [{ ...written, seedHeadRevision: recoveredHead }] })).toEqual([]);
-    } finally { fetchSpy.mockRestore(); }
+    } finally { network.clear(); }
 
     const incorrectText = structuredClone(contentOnly);
     incorrectText.mapId = 'IncorrectMapText';
-    const textSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (...args) => {
+    network.use(async (realFetch, ...args) => {
       const response = await realFetch(...args);
       const body = args[1]?.body;
       if (typeof body === 'string') {
@@ -565,23 +577,21 @@ test('history seed replays on a disposable service with original client labels, 
       return response;
     });
     try { await expect(ctl.seed(incorrectText)).rejects.toThrow(/head differs/); }
-    finally { textSpy.mockRestore(); }
-  } finally { await ctl.close(); await service.stop(); rmSync(dir, { recursive: true, force: true }); }
+    finally { network.clear(); }
+  } finally { network.restore(); await ctl.close(); await service.stop(); rmSync(dir, { recursive: true, force: true }); }
 }, 30_000);
 
 test('a lost seed reply and failed reread retain setup failure but recover attribution from the final export', async () => {
+  const network = interceptControllerHttp();
   const capture = captureProblem(database(), input({ restores: 'history' }));
   const root = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests');
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const out = mkdtempSync(join(root, 'capture-fallback-'));
   dirs.push(out);
-  // Keep even client-login discovery inside a synthetic home for this Attempt.
-  const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(directory());
-  syncBuiltinESMExports();
-  const realFetch = globalThis.fetch;
+  const clientState = syntheticClientState(directory());
   let droppedReply = false;
   let failedReread = false;
-  const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (...args) => {
+  network.use(async (realFetch, ...args) => {
     const body = args[1]?.body;
     const request = typeof body === 'string' ? JSON.parse(body) as { params?: { name?: string; arguments?: { mapId?: string } } } : undefined;
     const ownMap = request?.params?.arguments?.mapId === 'Capture.Map';
@@ -599,7 +609,7 @@ test('a lost seed reply and failed reread retain setup failure but recover attri
   });
   try {
     const outcome = await runAttempt({ batchId: 'CaptureFallback', scenarios: [], count: 1, ceiling: 1, out,
-      scratchRoot: directory(), codex: { model: 'fake-model', effort: 'low', sandbox: false, timeoutMs: 10_000,
+      scratchRoot: directory(), ...clientState, codex: { model: 'fake-model', effort: 'low', sandbox: false, timeoutMs: 10_000,
         bin: fileURLToPath(new URL('../runner/fake-codex.mjs', import.meta.url)) } },
     { attemptId: 'LostReply-1', scenario: capture.scenario }, () => false, () => undefined);
     expect(droppedReply).toBe(true);
@@ -615,8 +625,10 @@ test('a lost seed reply and failed reread retain setup failure but recover attri
     expect(record.sessions.every(s => !s.turns.length && !s.nativeId.known)).toBe(true);
     expect(record.missing).not.toContain('maps');
     expect(agentRevisions(record)).toEqual([]);
+    expect(record.events.some(e => e.kind === 'tool-call' && e.actor === 'controller' && e.tool === 'map_apply' && e.failed)).toBe(true);
+    expect(record.events.some(e => e.actor === 'agent')).toBe(false);
     expect(record.isolation.attribution).toEqual({ agentRevisions: 0, committedReceipts: 0, mismatched: [], unplaced: [] });
-  } finally { fetchSpy.mockRestore(); homeSpy.mockRestore(); syncBuiltinESMExports(); }
+  } finally { network.restore(); }
 }, 30_000);
 
 test('README describes history support instead of refusing B04 seeds', () => {

@@ -12,7 +12,8 @@ import type { Capability, Scenario } from './scenario.ts';
  */
 export const clientProfiles: Record<Harness, { onboarded: Entry[]; entries: Entry[]; supports: Partial<Record<Capability, boolean | 'unverified'>> }> = {
   // MCP-only onboarded by Batch B2-20261025 under the allowlist sandbox (#65): resumed sessions, commands, complete records.
-  codex: { onboarded: ['mcp-only'], entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': true, commands: true, 'workspace-files': 'unverified',
+  // Dedicated onboarded by approved Batch B02d-onboarding-20261026 (#68): all five R2 checks, four Attempts.
+  codex: { onboarded: ['mcp-only', 'dedicated'], entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': true, commands: true, 'workspace-files': 'unverified',
     'new-session': 'unverified', 'concurrent-sessions': 'unverified', 'resource-read': 'unverified', 'sub-agents': 'unverified', 'async-questions': false } },
   claude: { onboarded: [], entries: ['mcp-only', 'dedicated', 'matt'], supports: { 'multi-turn': 'unverified', 'new-session': 'unverified', 'concurrent-sessions': 'unverified',
     'workspace-files': 'unverified', commands: 'unverified', 'resource-read': 'unverified', 'sub-agents': 'unverified', 'async-questions': false } },
@@ -21,6 +22,13 @@ export const clientProfiles: Record<Harness, { onboarded: Entry[]; entries: Entr
   pi: { onboarded: [], entries: ['mcp-only'], supports: {} },
   grok: { onboarded: [], entries: ['mcp-only'], supports: {} },
 };
+
+/** Capabilities proven for one Entry must not become evidence for an Entry still awaiting onboarding. */
+export function supportsFor(harness: Harness, entry: Entry): Partial<Record<Capability, boolean | 'unverified'>> {
+  const profile = clientProfiles[harness];
+  if (profile.onboarded.includes(entry)) return profile.supports;
+  return Object.fromEntries(Object.entries(profile.supports).map(([key, value]) => [key, value === false ? false : 'unverified']));
+}
 
 export type Cell = { state: 'applicable' } | { state: 'not-applicable' | 'unverified' | 'not-ready'; reasons: string[] };
 

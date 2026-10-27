@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -10,13 +10,13 @@ import { connectController } from '../runner/controller.ts';
 import type { Controller } from '../runner/controller.ts';
 import { receiptsFrom } from '../runner/normalize.ts';
 import { checkoutRoot, freePort, newToken } from '../runner/service.ts';
-import { createHttpTestClient } from '../../helpers/mcp-http-client.mjs';
+import { createControllerClient } from '../runner/controller-client.mjs';
 import { clientProfiles } from '../clients.ts';
 import { upgradeChecks } from '../upgrade-checks.ts';
 import { observeIsolation } from './isolation.ts';
 import type { Scenario } from '../scenario.ts';
 import { startRelay } from './relay.ts';
-import type { Exchange, Relay } from './relay.ts';
+import type { Exchange, RefusalReason, Relay, RelayRefusalEvent } from './relay.ts';
 import { writeCanaryCheckout } from '../../helpers/canary-release.mjs';
 
 type Tool = { name: string; description?: string | undefined; inputSchema: { properties?: Record<string, { description?: string | undefined }> | undefined } };
@@ -42,10 +42,24 @@ export interface Capture {
 const unknown = (reason: string) => ({ known: false as const, reason });
 const now = () => new Date().toISOString();
 const safeWrite = (path: string, value: unknown, secrets: Record<string, string>) => writeFileSync(path, redact(JSON.stringify(value, null, 2), secrets), { mode: 0o600 });
+export interface RelayRefusalSummary {
+  path: 'raw/relay-refusals.jsonl';
+  total: number;
+  byReason: Partial<Record<RefusalReason, number>>;
+  byStatus: Record<string, number>;
+  withinTurn: number;
+  outsideTurn: number;
+}
+/** Driver diagnostics do not add events or affect the shared Scenario verdicts. */
+export interface ChatGPTAttemptRecord extends AttemptRecord {
+  diagnostics: { relayRefusals: RelayRefusalSummary };
+}
+const emptyRefusalSummary = (): RelayRefusalSummary => ({ path: 'raw/relay-refusals.jsonl', total: 0,
+  byReason: {}, byStatus: {}, withinTurn: 0, outsideTurn: 0 });
 
 /** Stateful controller for one manual Attempt. It never operates the app or supplies an answer for Kun. */
 export class ChatGPTAttempt {
-  readonly record: AttemptRecord;
+  readonly record: ChatGPTAttemptRecord;
   readonly dir: string;
   readonly scenario: Scenario;
   readonly servicePort: number;
@@ -81,7 +95,8 @@ export class ChatGPTAttempt {
       run: { startedAt: now(), endedAt: '', completeness: 'cancelled' }, controller: { clientId: `${options.attemptId}.controller` }, baitClientIds: [],
       sessions: [...new Set(options.scenario.turns.map(t => t.session))].map(label => ({ label, nativeId: unknown('not captured'), clientId: `${options.attemptId}.${label}`,
         mcpSessionIds: { known: true, value: [] }, turns: [] })), events: [], maps: [], receipts: [], usage: unknown('ChatGPT does not expose usage here'),
-      raw: { path: `${options.attemptId}/raw`, files: [] }, missing: ['events.message', 'chatgpt.otherToolCalls', 'combination.visibleModel', 'client.version'] };
+      raw: { path: `${options.attemptId}/raw`, files: [] }, missing: ['events.message', 'chatgpt.otherToolCalls', 'combination.visibleModel', 'client.version'],
+      diagnostics: { relayRefusals: emptyRefusalSummary() } };
   }
 
   static async start(options: {
@@ -90,6 +105,8 @@ export class ChatGPTAttempt {
     const a = new ChatGPTAttempt(options, await freePort());
     mkdirSync(a.dir, { mode: 0o700 }); mkdirSync(join(a.dir, 'raw'), { mode: 0o700 });
     try {
+      writeFileSync(join(a.dir, a.record.diagnostics.relayRefusals.path), '', { mode: 0o600, flag: 'wx', flush: true });
+      a.record.raw.files.push('relay-refusals.jsonl');
       const { initializeSQLite } = await import(pathToFileURL(join(checkoutRoot, 'dist/sqlite-storage.js')).href) as { initializeSQLite(path: string): void };
       const existedBefore = existsSync(a.databasePath);
       initializeSQLite(a.databasePath);
@@ -103,7 +120,7 @@ export class ChatGPTAttempt {
       await a.startService(checkoutRoot);
       for (const map of a.scenario.seed.maps) a.seedHeads.set(map.mapId, await a.controller.seed(map));
       a.saveRaw('seed.json', { seed: a.scenario.seed, maps: await a.controller.exportCatalog() });
-      a.relay = await startRelay(a.servicePort, a.tokens.A, e => a.observe(e));
+      a.relay = await startRelay(a.servicePort, a.tokens.A, e => a.observe(e), event => a.observeRefusal(event));
       a.measureIsolation();
       a.persist();
       return a;
@@ -115,9 +132,9 @@ export class ChatGPTAttempt {
     this.service = await startLocalMcpService(this.serviceConfig);
     this.controller = await connectController(this.servicePort, this.tokens.controller);
     // Observe actual service metadata with a Controller credential in the same configured mode as ChatGPT.
-    const observation = await createHttpTestClient(this.servicePort, this.tokens.observer);
+    const observation = await createControllerClient(this.servicePort, this.tokens.observer);
     try { this.tools = (await observation.client.listTools()).tools as Tool[]; }
-    finally { await observation.client.close(); }
+    finally { await observation.close(); }
     this.saveRaw(`controller-tools-${this.phase}.json`, this.tools);
     const compatibilityMode = this.parameterDescription().includes(this.controller.version) ? 'toolsOnly' : 'instructions';
     if (this.phase === 'initial') this.record.service.version = this.controller.version;
@@ -157,6 +174,19 @@ export class ChatGPTAttempt {
       result: reply?.result?.structuredContent === undefined ? unknown(`no structured result (HTTP ${e.status})`) : { known: true, value: reply.result.structuredContent },
       failed: e.status >= 400 || reply?.result?.isError === true, requestId: { known: true, value: String(e.request.id) } });
     this.persist();
+  }
+
+  private observeRefusal(event: RelayRefusalEvent) {
+    // One bounded append per observation, flushed before response/failure handling.
+    // Complete earlier lines survive an interrupted append; late bodies keep the same index.
+    const summary = this.record.diagnostics.relayRefusals;
+    appendFileSync(join(this.dir, summary.path), redact(JSON.stringify(event), this.secrets) + '\n', { mode: 0o600, flush: true });
+    if (event.kind === 'body') return;
+    const { refusal } = event;
+    summary.total++;
+    summary.byReason[refusal.reason] = (summary.byReason[refusal.reason] ?? 0) + 1;
+    summary.byStatus[refusal.status] = (summary.byStatus[refusal.status] ?? 0) + 1;
+    if (refusal.withinTurn) summary.withinTurn++; else summary.outsideTurn++;
   }
 
   async begin(proposalConfirmed = false): Promise<string> {

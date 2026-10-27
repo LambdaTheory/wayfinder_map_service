@@ -1,11 +1,12 @@
 // Subscription CLIs only. The controller never reads/copies credentials, and never inherits API keys or hooks.
+import { localNetworkDenials } from './runner/network-policy.ts';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { modelMatches } from './model-review.ts';
 import { reportReason } from './review-verdict.ts';
-import { ReviewProxyError, reviewProxyEnvironment, reviewProxyRouting } from './review-proxy.ts';
+import { ProxyError, proxyEnvironment, proxyRouting } from './proxy.ts';
 import type { ReviewDriver, ReviewRequest, ReviewResponse, Reviewer } from './model-review.ts';
 
 const disabledCodexFeatures = ['apps', 'plugins', 'hooks', 'memories', 'shell_tool', 'shell_snapshot', 'unified_exec', 'multi_agent',
@@ -42,11 +43,7 @@ export function reviewSandbox(scratch: string, runtime: string, install: string,
     ...(auth ? [`(allow file-write* (literal ${q(auth)}) (regex #${q(`^${authTemp}`)}))`] : []),
     // Do not fetch cached managed/user preferences through cfprefsd around the file-read boundary.
     '(deny mach-lookup (global-name "com.apple.cfprefsd.daemon") (global-name "com.apple.cfprefsd.agent"))',
-    '(deny network-outbound (remote ip "localhost:*"))',
-    // Seatbelt's localhost matcher misses ::ffff:0.0.0.0, which can reach an IPv4 loopback listener.
-    // Review proxies are IPv4-only; deny every outbound IPv6 TCP socket, including mapped addresses.
-    // Keep narrow tcp4 proxy allows after the denies so IPv4 routing remains usable.
-    '(deny network-outbound (remote tcp6 "*:*"))', ...proxyRules, ''].join('\n');
+    ...localNetworkDenials, ...proxyRules, ''].join('\n');
 }
 export const codexReviewSandbox = reviewSandbox;
 
@@ -133,7 +130,8 @@ export class CliReviewDriver implements ReviewDriver {
     if (process.platform !== 'darwin') throw new Error('CLI review isolation is implemented for macOS only');
     const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'wayfinder-review-')));
     try {
-      const proxies = reviewProxyRouting(reviewProxyEnvironment(this.subscriptionHome, process.env));
+      // B03b retains #99's approved route for both reviewers; tested Codex clients select terminal-only elsewhere.
+      const proxies = proxyRouting(proxyEnvironment(this.subscriptionHome, process.env));
       const work = join(scratch, 'work'); const runtime = join(scratch, 'runtime');
       mkdirSync(work); mkdirSync(runtime, { mode: 0o700 });
       const resolved = spawnSync('/usr/bin/which', [target.cli], { encoding: 'utf8' }).stdout?.trim();
@@ -182,7 +180,7 @@ export class CliReviewDriver implements ReviewDriver {
       this.cancelled = response.cancelled ?? false;
       return { ...decodeResponse(target.cli, response, target.model), invocation: base.invocation! };
     } catch (error) {
-      if (!(error instanceof ReviewProxyError)) throw error;
+      if (!(error instanceof ProxyError)) throw error;
       return { status: 'unavailable', detail: error.message, text: '', stdout: '', stderr: '', responseId: null, visibleModel: null, cached: false };
     } finally { rmSync(scratch, { recursive: true, force: true }); }
   }

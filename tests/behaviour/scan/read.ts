@@ -29,6 +29,19 @@ const textContent = (v: unknown): string => typeof v === 'string' ? v : array(v)
 const toolName = (name: unknown): string | null => typeof name === 'string'
   ? /^(?:mcp__|mcp_)?wayfinder(?:__|_)(map_create|map_apply|map_list|map_read)$/.exec(name)?.[1] ?? null : null;
 
+function claudeHumanWords(value: unknown, questions: string[]): string {
+  const answers = obj(obj(value).answers);
+  const annotations = obj(obj(value).annotations);
+  // Structured values preserve free text without parsing the agent's question/summary.
+  // Only notes are human-authored; annotation previews and question keys are not.
+  return questions.flatMap(question => {
+    const answer = str(answers[question]);
+    if (!answer?.trim()) return [];
+    const notes = str(obj(annotations[question]).notes);
+    return notes?.trim() ? [answer, notes] : [answer];
+  }).join('\n');
+}
+
 export function blankSession(key: string, harness: Session['harness'], nativeId: string | null): Session {
   return { key, harness, nativeId, subagent: false, model: null, effort: null, entry: 'unknown', usage: 'unknown',
     usageBasis: [], sources: [], skill: [], mcpSessionIds: [], fingerprints: [], calls: [], fragments: [], gaps: [], ambiguities: [], correlationBasis: [] };
@@ -37,6 +50,9 @@ export function blankSession(key: string, harness: Session['harness'], nativeId:
 /** Parse the clients' native JSONL envelopes, retaining original words and stable line references. */
 export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harness: 'codex' | 'claude', fileRef: string): Session[] {
   const sessions = new Map<string, Session>();
+  const completedCalls = new WeakSet<NativeCall>();
+  const callInputs = new WeakMap<NativeCall, Session['fragments'][number]>();
+  const claudeQuestions = new Map<Session, Map<string, string[]>>();
   let current: Session | undefined;
   const get = (id: string | null, subagentId: string | null = null) => {
     const key = sessionKey(harness, id ?? fileRef, subagentId);
@@ -45,8 +61,17 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
   };
   const addCall = (s: Session, id: string | null, name: string | null, args: unknown, ref: string) => {
     if (!name) return;
-    s.calls.push({ id: id ?? ref, tool: name, ref, mapId: str(obj(parse(args)).mapId), requestId: null, requestIdType: null, result: null });
-    s.fragments.push({ ref, role: 'tool', text: JSON.stringify({ name, arguments: parse(args) }) });
+    const existing = harness === 'codex' && id ? s.calls.find(c => c.id === id) : undefined;
+    const call: NativeCall = existing ?? { id: id ?? ref, tool: name, ref, mapId: null, requestId: null, requestIdType: null, result: null };
+    call.mapId ??= str(obj(parse(args)).mapId);
+    // A function_call arriving after its completion still supplies the input and its locator.
+    call.ref = ref;
+    if (!existing) s.calls.push(call);
+    const input = { ref, role: 'tool' as const, text: JSON.stringify({ name, arguments: parse(args) }) };
+    const previous = callInputs.get(call);
+    if (previous) Object.assign(previous, input);
+    else { s.fragments.push(input); callInputs.set(call, input); }
+    return call;
   };
   const result = (s: Session, id: string | null, value: unknown, ref: string) => {
     const call = s.calls.find(c => c.id === id);
@@ -90,12 +115,29 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
         setting(s, 'model', settings.model, ref);
         setting(s, 'effort', settings.reasoning_effort ?? settings.model_reasoning_effort, ref);
       }
+      if (row.type === 'event_msg' && p.type === 'item_completed') {
+        const item = obj(p.item);
+        if (item.type === 'McpToolCall' && item.server === 'wayfinder'
+          && typeof item.tool === 'string' && ['map_create', 'map_apply', 'map_list', 'map_read'].includes(item.tool)
+          && (item.status === 'completed' || item.status === 'failed')) {
+          const id = str(item.id) ?? ref;
+          const call = s.calls.find(c => c.id === id) ?? addCall(s, id, item.tool, item.arguments, ref);
+          if (call) call.turnId = str(p.turn_id);
+          // Product kinds, not client status/isError, establish the outcome (src/call-metadata.ts).
+          // infrastructure_error is service-failure; absent/unrecognized results are transport-failure.
+          result(s, id, item.result ?? null, ref);
+          if (call) completedCalls.add(call);
+        }
+      }
       if (row.type === 'response_item') {
         if (p.type === 'message') message(s, p.role, p.content, ref);
         if (p.type === 'function_call') {
           addCall(s, str(p.call_id), toolName(p.name), p.arguments, ref);
         }
-        if (p.type === 'function_call_output') result(s, str(p.call_id), p.output, ref);
+        if (p.type === 'function_call_output') {
+          const call = s.calls.find(c => c.id === str(p.call_id));
+          if (!call || !completedCalls.has(call)) result(s, str(p.call_id), p.output, ref);
+        }
       }
       // EventMsg-only recordings can contain messages instead of ResponseItems. Do not count a mirror twice.
       if (row.type === 'event_msg' && (p.type === 'user_message' || p.type === 'agent_message')) {
@@ -115,14 +157,30 @@ export function nativeSessions(rows: { value: ObjectValue; ref: string }[], harn
       if (row.type === 'user' || row.type === 'assistant') {
         if (row.isMeta !== true && !(row.type === 'user' && /<(?:local-command-stdout|local-command-caveat|command-message)>/.test(textContent(m.content))
           && !/<command-name>\/wayfinder<\/command-name>/.test(textContent(m.content)))) message(s, row.type, m.content, ref);
-        for (const block of array(m.content).map(obj)) {
+        const blocks = array(m.content).map(obj);
+        const singleResult = blocks.filter(b => b.type === 'tool_result').length === 1;
+        for (const block of blocks) {
           if (block.type === 'tool_use') {
             addCall(s, str(block.id), toolName(block.name), block.input, ref);
+            if (block.name === 'AskUserQuestion' && row.type === 'assistant' && row.isMeta !== true && str(block.id)) {
+              if (!claudeQuestions.has(s)) claudeQuestions.set(s, new Map());
+              claudeQuestions.get(s)!.set(String(block.id), array(obj(block.input).questions).flatMap(q => str(obj(q).question) ?? []));
+              s.fragments.push({ ref, role: 'assistant', text: JSON.stringify({ name: block.name, input: block.input }) });
+            }
             if (block.name === 'Skill' && /^(?:[^:]+:)?wayfinder$/.test(String(obj(block.input).skill))) {
               s.skill.push(ref); s.fragments.push({ ref, role: 'tool', text: JSON.stringify({ name: 'Skill', skill: obj(block.input).skill }) });
             }
           }
-          if (block.type === 'tool_result') result(s, str(block.tool_use_id), textContent(block.content), ref);
+          if (block.type === 'tool_result') {
+            const id = str(block.tool_use_id);
+            const questions = id ? claudeQuestions.get(s)?.get(id) : undefined;
+            // toolUseResult belongs to the row, so multiple results would make its owner ambiguous.
+            const humanWords = questions && row.type === 'user' && row.isMeta !== true && block.is_error !== true
+              && singleResult ? claudeHumanWords(row.toolUseResult, questions) : '';
+            if (humanWords) s.fragments.push({ ref, role: 'user', text: humanWords });
+            else if (questions) s.fragments.push({ ref, role: 'tool', text: textContent(block.content) });
+            else result(s, id, textContent(block.content), ref);
+          }
         }
       }
     }
@@ -232,7 +290,8 @@ export function loadInputs(manifest: Manifest, base: string): Inputs {
           const c: Call = { ref, serviceStartedAt: String(v.serviceStartedAt), sequence: Number(v.sequence), missingObservations: Number(v.missingObservations),
             mcpSessionId: str(v.mcpSessionId), presentedMcpSessionId: str(v.presentedMcpSessionId), requestId: str(v.requestId),
             requestIdType: v.requestIdType === 'string' || v.requestIdType === 'number' ? v.requestIdType : null, requestIdHash: str(v.requestIdHash),
-            credentialFingerprint: str(v.credentialFingerprint), clientId: str(v.clientId), tool: str(v.tool), mapId: str(v.mapId), result: v.result as CallResult };
+            credentialFingerprint: str(v.credentialFingerprint), clientId: str(v.clientId), tool: str(v.tool), mapId: str(v.mapId),
+            result: v.httpStatus === 401 ? 'unauthenticated' : v.result as CallResult };
           out.calls.push(c);
           if (c.missingObservations > 0) out.gaps.push(`${ref}: ${c.missingObservations} missing service observations`);
         } else if (source.kind === 'launches' && v.schema === 'wayfinder-launch/1') {

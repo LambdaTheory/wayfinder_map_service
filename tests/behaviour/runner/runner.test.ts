@@ -1,3 +1,4 @@
+import { syntheticClientState } from './test-state.ts';
 // The runner without a model: refusals before running, seeds against the real service, the sandbox profile,
 // and one end-to-end S0b Attempt played by a Codex stand-in that makes real MCP calls.
 import { spawnSync } from 'node:child_process';
@@ -10,16 +11,17 @@ import { requiredFields } from '../evidence.ts';
 import type { AttemptRecord } from '../evidence.ts';
 import { library } from '../library.ts';
 import { itemsOf } from '../scenario.ts';
-import { sandboxProfile } from './codex.ts';
+import { prepareSandbox, prepareSession, writeProfile } from './codex.ts';
 import { connectController } from './controller.ts';
 import { normalizeTurn, readsIn, receiptsFrom, relativePath } from './normalize.ts';
 import { preflight, runAttempt, runBatch } from './run.ts';
 import type { BatchOptions } from './run.ts';
 import type { Scenario } from '../scenario.ts';
-import { freePort, newToken, startService } from './service.ts';
+import { checkoutRoot, freePort, newToken, startService } from './service.ts';
 import { createServer } from 'node:net';
 
 const scratch = realpathSync(mkdtempSync('/private/tmp/wf-behave-test-'));
+const clientState = syntheticClientState(scratch);
 const sandboxAvailable = spawnSync('which', ['sandbox-exec']).status === 0;
 const fakeCodex = fileURLToPath(new URL('./fake-codex.mjs', import.meta.url));
 // The service refuses databases under temporary directories or inside a repository; tests keep theirs in Caches.
@@ -31,11 +33,17 @@ afterAll(() => { rmSync(scratch, { recursive: true, force: true }); rmSync(recor
 
 describe('preflight', () => {
   test('refuses what this runner cannot do, before anything runs', () => {
-    const { refusals } = preflight({ batchId: 'T1', scenarios: ['S6', 'W5', 'S7', 'P1'], count: 1, ceiling: 4 });
-    expect(refusals.join('\n')).toMatch(/S6: Controller actions \(conflicting-write\)/);
-    expect(refusals.join('\n')).toMatch(/W5: Controller actions \(cut-agent-route\)/);
+    const { refusals } = preflight({ batchId: 'T1', scenarios: ['S5', 'S6', 'S10', 'W5', 'S7', 'P1'], count: 1, ceiling: 4 });
+    expect(refusals.join('\n')).not.toMatch(/S6|W5/);
     expect(refusals.join('\n')).toMatch(/P1: no such Scenario/);
     expect(refusals.join('\n')).not.toMatch(/S7/);
+  });
+  test('refuses raw output inside the checkout before starting a service or client', async () => {
+    const out = join(checkoutRoot, 'tests/behaviour/must-not-create');
+    const options: BatchOptions = { batchId: 'T', scenarios: ['S0b'], count: 1, ceiling: 1, out, scratchRoot: scratch, ...clientState,
+      codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs: 1000 } };
+    expect((await runBatch(options)).refusals).toEqual(['raw records must stay outside repositories']);
+    expect(existsSync(out)).toBe(false);
   });
   test('plans count Attempts per Scenario', () => {
     const { plan, refusals } = preflight({ batchId: 'T1', scenarios: ['S0b', 'F11'], count: 2, ceiling: 4 });
@@ -74,8 +82,10 @@ describe('sandbox', () => {
     const listener = createServer(socket => socket.end('hi'));
     const port = await freePort();
     await new Promise<void>(resolve => listener.listen(port, '127.0.0.1', resolve));
-    const profile = join(own, 'probe.sb');
-    writeFileSync(profile, sandboxProfile(own, [port]));
+    const { controlDir } = prepareSandbox(own);
+    const session = prepareSession(own, 'A', 'synthetic', clientState.loginSource);
+    const work = join(own, 'work'); mkdirSync(work);
+    const profile = writeProfile(controlDir, session, work, '/bin/sh').path;
     const q = JSON.stringify;
     const run = (cmd: string) => spawnSync('sandbox-exec', ['-f', profile, '/bin/sh', '-c', cmd], { encoding: 'utf8' }).status;
     try {
@@ -86,7 +96,7 @@ describe('sandbox', () => {
       expect(run(`touch ${q(join(homedir(), '.wf-behave-probe'))}`)).not.toBe(0);
       expect(run('touch /opt/homebrew/.wf-behave-probe || touch /usr/local/.wf-behave-probe')).not.toBe(0);
       expect(existsSync(join(homedir(), '.wf-behave-probe'))).toBe(false);
-      expect(run(`echo ok > ${q(join(own, 'probe.txt'))} && cat ${q(join(own, 'probe.txt'))}`)).toBe(0);
+      expect(run(`echo ok > ${q(join(work, 'probe.txt'))} && cat ${q(join(work, 'probe.txt'))}`)).toBe(0);
       expect(run(`node -e 1`)).toBe(0);
       expect(run(`node -e "require('net').connect(${port}, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"`)).not.toBe(0);
     } finally { listener.close(); rmSync(other, { recursive: true, force: true }); }
@@ -94,6 +104,46 @@ describe('sandbox', () => {
 });
 
 describe('normalizer', () => {
+  const resourcePayload = { server: 'wayfinder', uri: 'wayfinder://workflow/exploration',
+    contents: [{ uri: 'wayfinder://workflow/exploration', text: 'version: 9.9.9\nSynthetic rules' }] };
+  const resourceResult = { content: [{ type: 'text', text: JSON.stringify(resourcePayload) }], structured_content: null };
+  test('a completed text-only Resource result retains its native payload', () => {
+    const { events } = normalizeTurn([{ type: 'item.completed', item: { id: 'resource', type: 'mcp_tool_call', server: 'wayfinder',
+      tool: 'read_mcp_resource', arguments: { uri: resourcePayload.uri }, status: 'completed', result: resourceResult } }], 'A', 0, 'go', '', 0, '/w');
+    expect(events.find(e => e.kind === 'tool-call')).toMatchObject({ result: { known: true, value: resourcePayload }, failed: false });
+    expect(events.find(e => e.kind === 'resource-read')).toMatchObject({ ok: true, uri: resourcePayload.uri });
+  });
+  test('a text Resource result stays present when it is not JSON', () => {
+    const content = [{ type: 'text', text: 'version: 9.9.9\nSynthetic text or truncated payload' }];
+    const { events } = normalizeTurn([{ type: 'item.completed', item: { id: 'resource', type: 'mcp_tool_call', server: 'wayfinder',
+      tool: 'read_mcp_resource', status: 'completed', result: { content, structured_content: null } } }], 'A', 0, 'go', '', 0, '/w');
+    expect(events.find(e => e.kind === 'tool-call')).toMatchObject({ result: { known: true, value: { content } } });
+  });
+  test.each([
+    { name: 'failed status', status: 'failed', result: resourceResult },
+    { name: 'native error', status: 'completed', result: resourceResult, error: { message: 'Synthetic failure' } },
+    { name: 'MCP error flag', status: 'completed', result: { ...resourceResult, is_error: true } },
+    { name: 'protocol camelCase error flag', status: 'completed', result: { ...resourceResult, isError: true } },
+    { name: 'absent result', status: 'completed', result: null },
+    { name: 'empty result', status: 'completed', result: { content: [], structured_content: null } },
+  ])('an unsuccessful or absent Resource result stays unknown: $name', row => {
+    const { events } = normalizeTurn([{ type: 'item.completed', item: { id: 'resource', type: 'mcp_tool_call', server: 'wayfinder',
+      tool: 'read_mcp_resource', arguments: { uri: resourcePayload.uri }, ...row } }], 'A', 0, 'go', '', 0, '/w');
+    expect(events.find(e => e.kind === 'tool-call')).toMatchObject({ result: { known: false } });
+    expect(events.find(e => e.kind === 'resource-read')).toMatchObject({ ok: false });
+  });
+  test('Resource text fallback never manufactures a Map write receipt', () => {
+    const { events } = normalizeTurn([{ type: 'item.completed', item: { id: 'write', type: 'mcp_tool_call', server: 'wayfinder',
+      tool: 'map_apply', arguments: { mapId: 'M' }, status: 'completed', result: { content: [{ type: 'text', text: JSON.stringify({ kind: 'committed', mapId: 'M', revision: 1 }) }] } } }], 'A', 0, 'go', '', 0, '/w');
+    expect(receiptsFrom(events)[0]!.outcome.kind).toBe('unknown');
+  });
+  test('the repository synthetic McpToolCall result keeps its protocol field names', () => {
+    // B08 format fixture only, never a real session log; adapt its envelope to exec's item.completed.
+    const rows = readFileSync(fileURLToPath(new URL('../fixtures/scan/codex-mcp-0.164.jsonl', import.meta.url)), 'utf8').trim().split('\n').map(s => JSON.parse(s));
+    const item = rows.find(r => r.payload?.item?.id === 'read').payload.item;
+    const { events } = normalizeTurn([{ type: 'item.completed', item: { ...item, type: 'mcp_tool_call' } }], 'A', 0, 'go', '', 0, '/w');
+    expect(events.find(e => e.kind === 'tool-call')).toMatchObject({ result: { known: true, value: item.result.structuredContent } });
+  });
   test('paths are workdir-relative; reads come from common read commands', () => {
     expect(relativePath('/private/tmp/w/work/src/a.js', '/private/tmp/w/work')).toBe('src/a.js');
     expect(relativePath('/Users/someone/secret/x', '/private/tmp/w/work')).toBe('<outside>/secret/x');
@@ -111,7 +161,7 @@ describe('one Attempt end to end, without a model', () => {
   test('S0b with the Codex stand-in: isolated, recorded, attributed, cleaned up', async () => {
     const out = join(records, 'runs', 'T-fake');
     const options: BatchOptions = { batchId: 'T-fake', scenarios: ['S0b'], count: 1, ceiling: 1, out,
-      codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs: 60_000 }, scratchRoot: scratch };
+      codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs: 60_000 }, scratchRoot: scratch, ...clientState };
     const { outcomes, refusals } = await runBatch(options);
     expect(refusals).toEqual([]);
     expect(outcomes.map(o => [o.attemptId, o.completeness])).toEqual([['S0b-1', 'complete']]);
@@ -136,7 +186,7 @@ describe('one Attempt end to end, without a model', () => {
 
 describe('every planned Attempt gets a result', () => {
   const options = (out: string, timeoutMs = 60_000): BatchOptions => ({ batchId: 'T-fail', scenarios: [], count: 1, ceiling: 1,
-    out, codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs }, scratchRoot: scratch });
+    out, codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs }, scratchRoot: scratch, ...clientState });
   const drill = (say: string): Scenario => ({ ...library.find(s => s.id === 'S12')!, id: 'Drill', turns: [{ session: 'A', kind: 'opening', say }] });
   const attempt = async (say: string, timeoutMs?: number, cancelled = () => false) => {
     const out = join(records, `fail-${Math.random().toString(36).slice(2)}`);
@@ -177,7 +227,7 @@ describe('inside the sandbox', () => {
     const s15 = library.find(s => s.id === 'S15')!;
     const drill: Scenario = { ...s15, id: 'Drill', turns: [s15.turns[0]!] };
     const outcome = await runAttempt({ batchId: 'T-sandbox', scenarios: [], count: 1, ceiling: 1, out,
-      codex: { model: 'fake-model', effort: 'low', bin: fake, sandbox: true, timeoutMs: 60_000 }, scratchRoot: scratch }, { attemptId: 'D-1', scenario: drill }, () => false, () => undefined);
+      codex: { model: 'fake-model', effort: 'low', bin: fake, sandbox: true, timeoutMs: 60_000 }, scratchRoot: scratch, ...clientState }, { attemptId: 'D-1', scenario: drill }, () => false, () => undefined);
     expect(outcome.completeness).toBe('complete');
     const record = JSON.parse(readFileSync(join(out, 'D-1', 'attempt.json'), 'utf8')) as AttemptRecord;
     const commands = record.events.flatMap(e => e.kind === 'command' ? [[e.command.replace(homedir(), '~'), e.exitCode]] : []);
@@ -189,4 +239,74 @@ describe('inside the sandbox', () => {
       expect(value === undefined ? field : null, field).toBeNull();
     }
   }, 60_000);
+});
+
+test.skipIf(!sandboxAvailable).each(['plain', 'encoded', 'run', 'id', 'user', 'schema', 'dedicated'])('an entire Batch forwards normalized proxies and scrubs URL and userinfo echo forms (%s)', async style => {
+  let connections = 0;
+  const proxy = createServer(socket => { connections++; socket.end('fixture'); });
+  const port = await freePort();
+  await new Promise<void>(resolve => proxy.listen(port, '127.0.0.1', resolve));
+  const user = style === 'plain' ? 'synthetic-user' : style === 'encoded' ? 'synthetic%20user' : style === 'dedicated' ? 'run' : style;
+  const password = style === 'plain' ? 'synthetic-password' : style === 'encoded' ? 'synthetic%20password' : '1';
+  const bin = join(scratch, 'proxy-client.mjs');
+  writeFileSync(bin, readFileSync(fakeCodex, 'utf8').replace('const url =', `
+const proxy = new URL(process.env.HTTPS_PROXY);
+if (proxy.hostname !== '127.0.0.1' || process.env.ALL_PROXY || process.env.OPENAI_API_KEY) throw new Error('proxy environment mismatch');
+await new Promise((resolve, reject) => {
+  import('node:net').then(({connect}) => {
+    const socket = connect(Number(proxy.port), proxy.hostname); socket.on('data', () => {});
+    socket.once('end', resolve); socket.once('error', reject);
+  });
+});
+console.error('ordinary run id user schema text');
+console.error(process.env.HTTPS_PROXY);
+console.error(process.env.HTTPS_PROXY.slice(0, -1));
+console.error('CONNECT via ' + process.env.HTTPS_PROXY.slice(0, -1) + ' failed');
+for (const value of [proxy.username + ':' + proxy.password, proxy.username, proxy.password]) { console.error(value); console.error(decodeURIComponent(value)); }
+const url =`), { mode: 0o700 });
+  const out = join(records, 'proxy-batch-' + style);
+  try {
+    const result = await runBatch({ entry: style === 'dedicated' ? 'dedicated' : 'mcp-only', batchId: 'T-proxy', scenarios: ['S0b'], count: 1, ceiling: 1, out,
+      codex: { model: 'fake-model', effort: 'low', bin, sandbox: true, timeoutMs: 10_000 }, scratchRoot: scratch, ...clientState,
+      proxyEnv: { HTTPS_PROXY: `http://${user}:${password}@localhost:${port}`, NO_PROXY: '127.0.0.1,localhost' } });
+    expect(result.refusals).toEqual([]); expect(result.outcomes[0]?.completeness).toBe('complete');
+    expect(connections).toBe(2);
+    const metadata = { enabled: true, variables: ['HTTPS_PROXY', 'NO_PROXY'] };
+    expect(JSON.parse(readFileSync(join(out, 'batch.json'), 'utf8')).proxy).toEqual(metadata);
+    const attempt = readFileSync(join(out, 'S0b-1/attempt.json'), 'utf8');
+    const record = JSON.parse(attempt) as AttemptRecord;
+    expect(record.run.completeness).toBe('complete');
+    expect(record.schema).toBe('wayfinder-behaviour-attempt/1');
+    expect(record.events.some(e => e.kind === 'message' && e.role === 'user')).toBe(true);
+    const { buildReport } = await import('../report.ts');
+    expect(buildReport([out]).cells[0]!.key.scenario).toBe('S0b');
+    expect(readFileSync(join(out, 'S0b-1/raw/turn-0-A.stderr.txt'), 'utf8')).toContain('ordinary run id user schema text');
+    expect(JSON.parse(attempt).events.filter((e: { action: string }) => e.action === 'isolation-check')[0].detail.proxy).toEqual(metadata);
+    for (const text of [attempt, ...[0, 1].map(turn => readFileSync(join(out, `S0b-1/raw/turn-${turn}-A.stderr.txt`), 'utf8'))]) {
+      for (const secret of [user, password, decodeURIComponent(user), decodeURIComponent(password)]) {
+        if (style === 'plain' || style === 'encoded') expect(text).not.toContain(secret);
+        else expect(text.split('\n')).not.toContain(secret);
+      }
+    }
+  } finally { await new Promise<void>(resolve => proxy.close(() => resolve())); }
+}, 30_000);
+
+test('a Batch refuses invalid proxy settings before creating output or a service', async () => {
+  const out = join(records, 'refused-proxy');
+  const result = await runBatch({ batchId: 'T-refused', scenarios: ['S0b'], count: 1, ceiling: 1, out, scratchRoot: scratch, ...clientState,
+    codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: true, timeoutMs: 1000 }, proxyEnv: { HTTPS_PROXY: 'http://localhost:18766' } });
+  expect(result).toEqual({ outcomes: [], refusals: ['Proxy uses a reserved Wayfinder port'] });
+  expect(existsSync(out)).toBe(false);
+});
+
+test.each(['mcp-only', 'dedicated'].flatMap(entry => ['settings-only', 'malformed-settings', 'invalid-terminal'].map(mode => ({ entry, mode }))))('Codex $entry CLI selects terminal proxies only and prints safe refusals ($mode)', ({ entry, mode }) => {
+  const home = mkdtempSync(join(scratch, 'cli-home-'));
+  mkdirSync(join(home, '.codex')); writeFileSync(join(home, '.codex/auth.json'), '{}');
+  mkdirSync(join(home, '.claude')); writeFileSync(join(home, '.claude/settings.json'), mode === 'malformed-settings'
+    ? '{synthetic-private' : JSON.stringify({ env: { HTTPS_PROXY: 'http://localhost:18766' } }));
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('./run.ts', import.meta.url)), '--batch', 'source-test',
+    '--entry', entry, '--scenarios', 'missing', '--ceiling', '1', '--codex', fakeCodex], { encoding: 'utf8',
+    env: { PATH: process.env.PATH, HOME: home, ...(mode === 'invalid-terminal' ? { HTTPS_PROXY: 'http://localhost:18766' } : {}) } });
+  expect(result.status).toBe(1);
+  expect(result.stderr).toBe(mode === 'invalid-terminal' ? 'refused: Proxy uses a reserved Wayfinder port\n' : 'refused: missing: no such Scenario\n');
 });

@@ -2,17 +2,18 @@
 // A stand-in for `codex exec` in tests: makes real MCP calls to the run's service and prints Codex-shaped JSON
 // events, so the runner, normalizer and receipts are exercised without a model. It plays S0b: the first turn
 // pages the catalog and asks to confirm the Destination; a reply creates one Map and publishes a Ticket.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 // The account's real home, not the private HOME the runner gives the client.
 const realHome = userInfo().homedir;
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const args = process.argv.slice(2);
 if (args[0] === '--version') { console.log('codex-cli 0.0.0-fake'); process.exit(0); }
 const url = /mcp_servers\.wayfinder\.url="([^"]+)"/.exec(args.join(' '))[1];
-const resume = args[1] === 'resume' ? args.at(-2) : null;
+const sessionDrill = args[args.indexOf('-m') + 1] === 'fake-sessions';
+const resume = args[args.indexOf('exec') + 1] === 'resume' ? args.at(-2) : null;
 const thread = resume ?? randomUUID();
 const prompt = await new Promise(resolve => { let text = ''; process.stdin.on('data', d => { text += d; }); process.stdin.on('end', () => resolve(text)); });
 const emit = event => console.log(JSON.stringify(event));
@@ -21,9 +22,10 @@ if (prompt.includes('FAKE-CRASH')) { console.error('fake launch failure'); proce
 if (prompt.includes('FAKE-SLEEP')) await new Promise(resolve => setTimeout(resolve, 30_000));
 let session; let n = 0;
 async function rpc(method, params, notify = false) {
-  const response = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${process.env.WAYFINDER_TOKEN}`, 'Content-Type': 'application/json',
-    Accept: 'application/json, text/event-stream', ...(session ? { 'mcp-session-id': session, 'mcp-protocol-version': '2025-11-25' } : {}) },
+  const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream', ...(process.env.WAYFINDER_TOKEN ? { Authorization: `Bearer ${process.env.WAYFINDER_TOKEN}` } : {}), ...(session ? { 'mcp-session-id': session, 'mcp-protocol-version': '2025-11-25' } : {}) },
     body: JSON.stringify({ jsonrpc: '2.0', method, params, ...(notify ? {} : { id: ++n }) }) });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
   session ??= response.headers.get('mcp-session-id');
   return notify ? null : (await response.json()).result;
 }
@@ -34,19 +36,92 @@ const rollout = join(process.env.CODEX_HOME, 'sessions', '2026', '10', '25');
 mkdirSync(rollout, { recursive: true });
 const log = join(rollout, `rollout-2026-10-25T00-00-00-${thread}.jsonl`);
 const record = e => appendFileSync(log, JSON.stringify(e) + '\n');
-if (!resume) record({ type: 'session_meta', payload: { id: thread, cli_version: '0.0.0-fake' } });
+if (!resume) record({ type: 'session_meta', payload: { id: thread, cli_version: prompt === 'FAKE-VERSION-B' ? '0.0.1-fake' : '0.0.0-fake' } });
 record({ type: 'event_msg', payload: { type: 'thread_settings_applied', thread_settings: { model: 'fake-model', reasoning_effort: 'low' } } });
+if (prompt === 'FAKE-EARLY-SKILL') {
+  const dir = join(process.env.CODEX_HOME, 'skills', 'early-only'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'SKILL.md'), 'synthetic');
+}
 const tools = await rpc('tools/list', {});
 record({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: init.instructions }] } });
 record({ type: 'response_item', payload: { type: 'additional_tools', tools: tools.tools.map(t => ({ name: t.name, description: t.description })) } });
+// Exercise the launcher's actual context installation, without claiming a real model read it.
+if (process.env.CODEX_HOME.endsWith('/.codex-wayfinder')) {
+  const instructions = readFileSync(join(process.env.CODEX_HOME, 'AGENTS.md'), 'utf8');
+  const skill = readFileSync(join(process.env.HOME, '.agents/skills/wayfinder/SKILL.md'), 'utf8');
+  writeFileSync('entry-probe.json', JSON.stringify({ privateHome: process.env.HOME, codexHome: process.env.CODEX_HOME,
+    authTarget: readlinkSync(join(process.env.CODEX_HOME, 'auth.json')), authReadable: Boolean(readFileSync(join(process.env.CODEX_HOME, 'auth.json'), 'utf8')), instructionsAvailable: Boolean(instructions), skillAvailable: Boolean(skill),
+    bootstrapKeys: Object.keys(process.env).filter(k => k.startsWith('WAYFINDER_AGENT_')), args, resumed: Boolean(resume) }));
+}
+if (prompt.includes('FAKE-REFRESH')) {
+  const auth = join(process.env.CODEX_HOME, 'auth.json');
+  const token = `synthetic-refreshed-token-${randomUUID()}`;
+  rmSync(auth);
+  writeFileSync(auth, JSON.stringify({ access_token: token }), { mode: 0o600 });
+  const newer = new Date(Date.now() + 1000);
+  utimesSync(auth, newer, newer);
+  console.log(token); // Deliberate native-output leak: the runner must discover the refreshed token first.
+}
 emit({ type: 'thread.started', thread_id: thread });
 emit({ type: 'turn.started' });
 let item = 0;
-async function tool(name, args) {
-  const result = await rpc('tools/call', { name, arguments: args });
-  emit({ type: 'item.completed', item: { id: `item_${item++}`, type: 'mcp_tool_call', server: 'wayfinder', tool: name, arguments: args,
-    result: { content: [], structured_content: result.structuredContent }, error: null, status: 'completed' } });
-  return result.structuredContent;
+async function tool(name, args, dropReceipt = false) {
+  const id = `item_${item++}`;
+  const base = { id, type: 'mcp_tool_call', server: 'wayfinder', tool: name, arguments: args };
+  emit({ type: 'item.started', item: base });
+  try {
+    const result = await rpc('tools/call', { name, arguments: args });
+    if (!dropReceipt) emit({ type: 'item.completed', item: { ...base,
+      result: { content: [], structured_content: result.structuredContent }, error: null, status: 'completed' } });
+    return result.structuredContent;
+  } catch (error) {
+    emit({ type: 'item.completed', item: { ...base, result: null, error: String(error), status: 'failed' } });
+    return null;
+  }
+}
+const say = text => emit({ type: 'item.completed', item: { id: `item_${item++}`, type: 'agent_message', text } });
+const done = () => emit({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } });
+if (sessionDrill || prompt.startsWith('FAKE-CONCURRENT') || prompt === 'FAKE-LOST' || prompt === 'FAKE-FRESH') {
+  const catalog = await tool('map_list', { limit: 100 });
+  if (!catalog) { say('Wayfinder tools are unreachable; stopping.'); done(); process.exit(0); }
+  const maps = catalog.maps;
+  if (maps.length === 2 && !resume) { say('两张：feishu-access-20261020 和 feishu-access-20261022，哪张？'); done(); process.exit(0); }
+  const mapId = maps.find(m => prompt.includes(m.mapId))?.mapId ?? maps[0]?.mapId;
+  if (!mapId) { say('No Map'); done(); process.exit(0); }
+  let head = await tool('map_read', { mapId });
+  if (!head) { say('Wayfinder tools are unreachable; stopping.'); done(); process.exit(0); }
+  const claimed = head.revision.state.tickets.find(t => t.claim);
+  if (claimed) {
+    if (!resume) say('这个 Ticket 被另一个会话认领；请确认接手。');
+    else { await tool('map_apply', { version, mapId, expectedRevision: head.revision.revision,
+      commands: [{ kind: 'claim.clear', ticketId: claimed.id, expectedClaimantId: claimed.claim, reason: 'The human explicitly requested takeover.' }] }); say('建议任务承载用多维表，请确认。'); }
+  } else if (maps.length === 2 || prompt === 'FAKE-FRESH') {
+    say(`Read ${mapId} from the current Revision.`);
+  } else {
+    const concurrent = /^FAKE-CONCURRENT ([AB])/.exec(prompt)?.[1];
+    if (concurrent) {
+      const otherHome = join(dirname(process.env.HOME), `home-${concurrent === 'A' ? 'B' : 'A'}`);
+      const probe = (name, action) => {
+        let exitCode = 0; try { action(); } catch { exitCode = 1; }
+        emit({ type: 'item.completed', item: { id: `item_${item++}`, type: 'command_execution', command: name, exit_code: exitCode, status: 'completed' } });
+      };
+      probe('probe-other-home-read', () => readdirSync(join(otherHome, '.codex')));
+      probe('probe-other-home-write', () => writeFileSync(join(otherHome, 'intrusion'), 'synthetic'));
+      writeFileSync(`ready-${concurrent}`, thread);
+      const until = Date.now() + 5000;
+      while (!(existsSync('ready-A') && existsSync('ready-B'))) {
+        if (Date.now() > until) throw new Error('concurrent partner never started');
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    }
+    const commands = [{ kind: 'content.add', section: 'fog', item: { id: `fake-${thread}`, text: 'A synthetic observation', references: [] } }];
+    let result = await tool('map_apply', { version, mapId, expectedRevision: head.revision.revision + (prompt === 'FAKE-NO-CONFLICT' ? 1 : 0), commands }, prompt === 'FAKE-LOST');
+    if (result?.kind === 'conflict') {
+      head = await tool('map_read', { mapId });
+      if (concurrent) result = await tool('map_apply', { version, mapId, expectedRevision: head.revision.revision, commands });
+      say(`Conflict; reread Revision ${head.revision.revision}. Stopping until a new request.`);
+    } else say('Current Revision recorded; waiting.');
+  }
+  done(); process.exit(0);
 }
 // Real file access, so a sandboxed run shows what the agent can and cannot reach.
 const tryFile = (command, action) => { let code = 0; try { action(); } catch { code = 1; }

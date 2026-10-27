@@ -12,7 +12,7 @@ import type { AttemptRecord } from '../evidence.ts';
 import { buildReport, renderMarkdown } from '../report.ts';
 import { checkoutRoot } from '../runner/service.ts';
 import { ChatGPTAttempt } from './attempt.ts';
-import type { Capture } from './attempt.ts';
+import type { Capture, ChatGPTAttemptRecord } from './attempt.ts';
 import { checklist, initialFive, selectScenarios } from './plan.ts';
 import { acquireTunnel } from './tunnel.ts';
 import type { TunnelLease } from './tunnel.ts';
@@ -53,14 +53,19 @@ export async function runBatch(options: Options, input: AsyncIterable<string>, l
     writeFileSync(join(dir, 'batch.json'), JSON.stringify(batch, null, 2), { mode: 0o600 });
     const report = buildReport([dir]);
     const visibility = batch.outcomes.map(item => {
-      const record = item.record ? JSON.parse(readFileSync(join(dir, item.record), 'utf8')) as AttemptRecord : null;
+      const record = item.record ? JSON.parse(readFileSync(join(dir, item.record), 'utf8')) as ChatGPTAttemptRecord : null;
       return { attemptId: item.attemptId, missing: record ? record.missing : ['Attempt not recorded'],
-        phases: clientVisibility(record), surface: options.surface };
+        phases: clientVisibility(record), surface: options.surface,
+        relayRefusals: record?.diagnostics?.relayRefusals ?? { known: false, reason: 'Relay refusal diagnostics not recorded' } };
     });
     writeFileSync(join(dir, 'report.json'), JSON.stringify({ ...report, chatgptAcceptance: { fakeTunnel: options.fake, surfaces: batch.surfaces, visibility, humanVerdict: 'pending' } }, null, 2), { mode: 0o600 });
     writeFileSync(join(dir, 'report.md'), renderMarkdown(report) + `\n## ChatGPT acceptance evidence\n\nSurface: ${options.surface}; all other surfaces are untested.\n\n`
       + 'For each Attempt inspect raw/capture-N.json (native client snapshot and versionSourceEvidence), raw/wire.json (write version), and given (visibility and optional surfaces). Missing client visibility is not proof that the model read the definitions.\n\n'
       + visibility.map(v => `- ${v.attemptId}: mode ${Array.isArray(v.phases) ? v.phases.map(p => `${p.phase}=${p.compatibilityMode}`).join(', ') : 'unknown'}; ${v.missing.length ? `missing ${v.missing.join(', ')}` : 'no declared evidence gaps; human review still required'}`).join('\n') + '\n\n'
+      + '### Relay refusal diagnostics\n\nThese counts are diagnostic evidence only; they do not change Scenario verdicts.\n\n'
+      + visibility.map(v => `- ${v.attemptId}: ${'total' in v.relayRefusals
+        ? `${v.relayRefusals.total} refused; reasons: ${Object.entries(v.relayRefusals.byReason).map(([reason, count]) => `${reason}=${count}`).join(', ') || 'none'}; HTTP: ${Object.entries(v.relayRefusals.byStatus).map(([status, count]) => `${status}=${count}`).join(', ') || 'none'}; within turn=${v.relayRefusals.withinTurn}, outside turn=${v.relayRefusals.outsideTurn}; ${v.attemptId}/${v.relayRefusals.path}`
+        : 'unknown (no recorded diagnostics)'}`).join('\n') + '\n\n'
       + `Fake tunnel: ${options.fake}. Fake runs never count as ChatGPT acceptance.\n\n`
       + 'These are Scenario verdicts, not final B09a acceptance. The initial five, both upgrade checks, onboarding evidence, any missing native records and Kun’s verdict remain explicit acceptance gates. The full human journey belongs to B09c.\n', { mode: 0o600 });
   };
@@ -112,8 +117,7 @@ export async function runBatch(options: Options, input: AsyncIterable<string>, l
       await tunnel.start(attempt.relay.port);
       if (cancelled) return;
       const current = tunnel;
-      let checking: Promise<void> | undefined;
-      const check = () => checking ??= current.check().finally(() => { checking = undefined; });
+      const check = () => current.check(); // The lease shares concurrent inspections, including direct begin calls.
       attempt.relay.beforeForward = check;
       attempt.relay.onFailure = error => fail(error, 'relay-or-ownership-failure');
       timer = setInterval(() => {

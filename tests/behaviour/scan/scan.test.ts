@@ -21,6 +21,22 @@ function scratch() { const path = mkdtempSync(join(tmpdir(), 'wayfinder-scan-'))
 afterEach(() => { temporary.splice(0).forEach(path => rmSync(path, { recursive: true, force: true })); });
 
 describe('native usage inventory and conservative correlation', () => {
+  it('screens HTTP 401 as unauthenticated refusal, while 503 and missing status remain failures', () => {
+    const root = scratch();
+    const sample = JSON.parse(readFileSync(join(fixtures, 'service.calls.jsonl'), 'utf8').split('\n')[0]!);
+    const rows = [401, 503, null].map((httpStatus, i) => ({ ...sample, sequence: i + 1, httpStatus,
+      result: 'transport-failure', credentialFingerprint: null, mcpSessionId: `synthetic-status-${i}`,
+      presentedMcpSessionId: null, clientId: null, tool: null, mapId: null, requestId: null }));
+    writeFileSync(join(root, 'calls.jsonl'), rows.map(row => JSON.stringify(row)).join('\n'));
+    const selected: Manifest = { schema: 'wayfinder-usage-input/1', sources: [{ id: 'status', kind: 'calls', path: 'calls.jsonl' }] };
+    const data = loadInputs(selected, root);
+    expect(data.calls.map(c => c.result)).toEqual(['unauthenticated', 'transport-failure', 'transport-failure']);
+    const report = analyze(data, selected);
+    expect(report.matches[0]!.call.result).toBe('unauthenticated');
+    expect(report.leads.filter(l => l.kind === 'refusal').flatMap(l => l.refs)).toEqual(['status/calls.jsonl#L1']);
+    expect(report.leads.filter(l => l.kind === 'failure').flatMap(l => l.refs)).not.toContain('status/calls.jsonl#L1');
+  });
+
   it('does not invent Claude sessions for summary and file-history rows', () => {
     const rows = [
       { ref: 'claude#1', value: { type: 'summary', summary: 'synthetic summary' } },

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +10,9 @@ import { reviewInput, verifyReviews } from './reviews.ts';
 import type { ReviewArtifact } from './reviews.ts';
 import type { Assessment } from './acceptance.ts';
 import { importAttempt, localFile, main } from './cli.ts';
-import { launcher } from './host.ts';
+import { launcher as createLauncher } from './host.ts';
+import type { LaunchOptions } from './host.ts';
+import { readManifest } from './launch.ts';
 import { normalizeNative } from './native.ts';
 import type { InteractiveClient } from './native.ts';
 
@@ -19,6 +21,8 @@ const read = (name: string) => readFileSync(join(fixtures, name), 'utf8');
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function temporary() { const dir = mkdtempSync(join(tmpdir(), 'b09b-fixture-')); dirs.push(dir); return dir; }
+function subscription() { const dir = temporary(); mkdirSync(join(dir, '.codex')); writeFileSync(join(dir, '.codex/auth.json'), 'synthetic-login'); return dir; }
+function launcher(options: LaunchOptions) { const prepared = createLauncher(options); dirs.push(prepared.controlDir); return { ...prepared, manifest: readManifest(prepared.manifestPath, prepared.manifestHash) }; }
 function fixture(client: InteractiveClient, kind = 'supported') {
   const assessment = JSON.parse(read(`${client}-assessment.json`)) as Assessment;
   assessment.reviews = abilities.flatMap(a => [1, 2].map(i => ({ itemId: `${a}.content`, role: 'review' as const, by: `synthetic-reader-${i}`, status: 'holds' as const, reason: 'Synthetic review for a unit test.' })));
@@ -130,7 +134,12 @@ for (const client of ['codex', 'claude'] as const) describe(client, () => {
     writeFileSync(join(dir, 'capture.json'), read(`${client}-capture.json`));
     const assessment = JSON.parse(read(`${client}-assessment.json`)) as Assessment;
     const imported = importAttempt(dir, `${client}-supported.jsonl`, assessment);
+    // R9 confirms capability before judging dependent temporal behaviour.
     expect(outcomes(imported)).toEqual(abilities.map(() => 'insufficient-evidence'));
+    if (client === 'claude') {
+      expect(imported.verdicts[0]!.verdict.required[0]!.status).toBe('unknown');
+      expect(imported.verdicts[0]!.verdict.expect[0]!.status).toBe('unknown');
+    }
     main([dir, `${client}-supported.jsonl`, `${client}-assessment.json`, join(dir, 'judged')]);
     const record = JSON.parse(readFileSync(join(dir, 'judged/async-question.attempt.json'), 'utf8')) as AttemptRecord;
     expect(record.subject.id).toBe('B09Async'); expect(record.events).toHaveLength(6);
@@ -158,37 +167,40 @@ it('a tool started before the answer but completed afterwards is not preparation
 it('manual launchers isolate HOME/configuration, use their own credential and contain no model execution until invoked', () => {
   for (const client of ['codex', 'claude'] as const) {
     const dir = temporary();
-    const script = launcher({ scratch: dir, client, bin: process.execPath, port: 23456, token: 'synthetic-token', model: 'synthetic-model', effort: 'high', subscriptionHome: temporary() });
-    expect(script).toContain('env -i'); expect(script).toContain('/usr/bin/sandbox-exec');
-    expect(script).toContain(`HOME=${dir}/home`); expect(script).toContain('WAYFINDER_TOKEN=synthetic-token');
-    expect(script).not.toContain('18766/mcp');
-    expect(script).toContain(client === 'codex' ? '--no-daemon' : '--strict-mcp-config');
-    expect(readFileSync(join(dir, 'sandbox.sb'), 'utf8')).toContain('localhost:18766');
+    const script = launcher({ scratch: dir, client, bin: process.execPath, port: 23456, model: 'synthetic-model', effort: 'high', subscriptionHome: subscription() });
+    expect(script.manifest.env.HOME).toBe(`${realpathSync(dir)}/home`);
+    expect(script.manifest.env).not.toHaveProperty('WAYFINDER_TOKEN');
+    expect(script.command).toContain(script.manifestHash);
+    expect(JSON.stringify(script.manifest)).not.toContain('18766/mcp');
+    expect(script.manifest.args).toContain(client === 'codex' ? '--no-daemon' : '--strict-mcp-config');
+    expect(readFileSync(script.profile.path, 'utf8')).toContain('localhost:18766');
   }
 });
 
-it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'claude-proxy'])('the manual host stops only its own service and preserves subscription state (%s)', async mode => {
+it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'protocol-refusal', 'claude-proxy', 'codex-settings', 'codex-malformed-settings', 'codex-terminal', 'claude-settings', 'claude-terminal', 'native-link', 'control-tamper', 'exit-nonzero', 'exit-signal', 'launch-failure', 'no-start', 'exit-without-start', 'missing-exit', 'no-start-precondition-not-met', 'no-start-rate-limited', 'no-start-timeout', 'no-start-cancelled', 'repeat-launch', 'duplicate-start', 'reported-precondition-not-met', 'reported-rate-limited', 'reported-timeout', 'reported-cancelled'])('the manual host stops only its own service and preserves subscription state (%s)', async mode => {
   const { spawn } = await import('node:child_process');
   const { cacheRoot } = await import('./host.ts');
   const attempt = `fixture-${process.pid}-${Date.now()}`;
   const dir = join(cacheRoot(), `B09Fixture-${attempt}`); dirs.push(dir);
   const result = await new Promise<{ code: number | null; output: string }>((resolve, reject) => {
     const child = spawn(process.execPath, [fileURLToPath(new URL('../fixtures/interactive/fake-host.mjs', import.meta.url)), 'B09Fixture', attempt,
-      mode === 'claude-proxy' ? 'claude' : 'codex', 'synthetic-model', 'high', 'W7', process.execPath], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, B09_SYNTHETIC_REFRESH: mode } });
+      (mode.startsWith('claude-') || mode === 'launch-failure') ? 'claude' : 'codex', 'synthetic-model', 'high', 'W7', process.execPath], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, B09_SYNTHETIC_REFRESH: mode } });
     let output = ''; let answered = false;
     const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(output)); }, 20_000);
-    child.stdout.on('data', data => { output += data; if (!answered && output.includes('Client exited; enter')) { answered = true; if (mode === 'cancel') child.stdin.end(); else child.stdin.write('complete\n'); } });
+    child.stdout.on('data', data => { output += data; if (!answered && output.includes('Client exited; enter')) { answered = true; if (mode === 'cancel') child.stdin.end(); else child.stdin.write((mode.startsWith('no-start-') ? mode.slice('no-start-'.length) : mode.startsWith('reported-') ? mode.slice('reported-'.length) : 'complete') + '\n'); } });
     child.stderr.on('data', data => { output += data; });
     child.on('error', reject); child.on('close', code => { clearTimeout(timer); resolve({ code, output }); });
   });
   expect(result, result.output).toMatchObject({ code: ['failure', 'cancel'].includes(mode) ? 1 : 0 });
   const isolation = JSON.parse(readFileSync(join(dir, 'isolation.json'), 'utf8'));
   expect(isolation).toMatchObject({ serviceStopped: { known: true }, scratchRemoved: !['failure', 'cancel'].includes(mode), credentialsRemoved: true });
-  expect(isolation.codexLoginSync.status).toBe(mode === 'claude-proxy' ? 'not-applicable' : mode === 'cancel' ? 'deferred' : mode === 'failure' ? 'failed' : mode === 'refresh' ? 'synced' : 'linked');
+  expect(isolation.codexLoginSync.status).toBe((mode.startsWith('claude-') || mode === 'launch-failure') ? 'not-applicable' : mode === 'cancel' ? 'deferred' : mode === 'failure' ? 'failed' : mode === 'refresh' ? 'synced' : 'linked');
   if (mode === 'failure' || mode === 'cancel') {
-    const retained = isolation.codexLoginSync.retainedScratch; dirs.push(retained);
+    const retained = isolation.codexLoginSync.retainedScratch; dirs.push(retained, isolation.retainedControlDirectory);
     expect(readFileSync(join(retained, 'home/.codex/auth.json'), 'utf8')).toBe('synthetic-refreshed-login');
   }
+  expect(isolation.controlIntegrity).toEqual({ known: true, value: mode !== 'control-tamper' });
+  expect(isolation.controlDirectoryRemoved).toBe(!['failure', 'cancel'].includes(mode));
   expect(isolation.measurements).toHaveProperty('before');
   expect(isolation.measurements).toHaveProperty('after');
   const opened = isolation.measurements.servedOwnDatabase;
@@ -201,10 +213,31 @@ it.each(['', 'refresh', 'failure', 'cancel', 'no-open-files', 'claude-proxy'])('
   expect(isolation.database).toContain(`/B09Fixture-${attempt}/db/`);
   const capture = JSON.parse(readFileSync(join(dir, 'capture.json'), 'utf8')) as AttemptRecord;
   expect(capture.maps).toHaveLength(1);
+  if (['native-link', 'control-tamper', 'missing-exit', 'duplicate-start'].includes(mode)) expect(capture.run.completeness).toBe('driver-failed');
+  if (mode === 'protocol-refusal') {
+    expect(capture.run.completeness).toBe('driver-failed');
+    expect(capture.missing).toContain('raw.protocol.jsonl');
+    expect(existsSync(join(dir, 'protocol.jsonl'))).toBe(false);
+  }
+  if (mode === 'native-link') expect(capture.raw.files).toEqual(['raw/proxy-channel.json', 'raw/launch.jsonl']);
+  if (mode.startsWith('no-start') || ['launch-failure', 'exit-without-start'].includes(mode)) expect(capture.run.completeness).toBe('launch-failed');
+  if (mode.startsWith('reported-')) expect(capture.run.completeness).toBe(mode.slice('reported-'.length));
+  if (['exit-nonzero', 'exit-signal', 'repeat-launch'].includes(mode)) expect(capture.run.completeness).toBe('complete');
+  if (!mode.startsWith('no-start')) {
+    expect(capture.raw.files).toContain('raw/launch.jsonl');
+    const log = readFileSync(join(dir, 'raw/launch.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    if (mode === 'launch-failure') expect(log.at(-1)).toMatchObject({ phase: 'refused', launched: false, launchFailure: 'client launch failed' });
+    else {
+      if (mode !== 'exit-without-start') expect(log.find(row => row.phase === 'started')).toMatchObject({ phase: 'started', launched: true });
+      if (mode === 'repeat-launch') expect(log.at(-1)).toMatchObject({ phase: 'refused', launched: false, duplicateLaunch: true });
+      if (mode !== 'missing-exit') expect(log.find(row => row.phase === 'exited')).toMatchObject({ phase: 'exited', code: mode === 'exit-signal' ? null : mode === 'exit-nonzero' ? 7 : 0,
+        signal: mode === 'exit-signal' ? 'SIGTERM' : null });
+    }
+  }
   if (mode === 'claude-proxy') {
     const native = readFileSync(join(dir, 'raw/native-0.jsonl'), 'utf8');
     expect(native).toContain('http://127.0.0.1:23456/mcp'); expect(native).toContain('http://localhost:23456/mcp');
-    expect(native).not.toContain('synthetic-password'); expect(native).toContain('<proxy-HTTPS_PROXY>');
+    expect(native).not.toContain('synthetic-password'); expect(native).not.toContain('synthetic-user'); expect(native).toContain('<proxy-HTTPS_PROXY');
   } else expect(capture.missing).toContain('events');
 }, 30_000);
 
@@ -246,18 +279,16 @@ it('invalid support values and missing capture times cannot bypass the capabilit
 
 it('uses subscription authentication and clears API-key billing routes', () => {
   const dir = temporary();
-  const codex = launcher({ scratch: dir, client: 'codex', bin: process.execPath, port: 23456, token: 'synthetic-token', model: 'synthetic-model', effort: 'high', subscriptionHome: temporary() });
-  const claude = launcher({ scratch: temporary(), client: 'claude', bin: process.execPath, port: 23456, token: 'synthetic-token', model: 'synthetic-model', effort: 'high', subscriptionHome: temporary() });
-  expect(codex).not.toContain('CODEX_API_KEY=');
-  expect(claude).not.toContain('ANTHROPIC_API_KEY=');
-  expect(claude).toContain('CLAUDE_CODE_OAUTH_TOKEN');
-  expect(codex).toContain('unset CODEX_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY');
+  const codex = launcher({ scratch: dir, client: 'codex', bin: process.execPath, port: 23456, model: 'synthetic-model', effort: 'high', subscriptionHome: subscription() });
+  const claude = launcher({ scratch: temporary(), client: 'claude', bin: process.execPath, port: 23456, model: 'synthetic-model', effort: 'high', subscriptionHome: subscription() });
+  for (const prepared of [codex, claude]) for (const key of ['CODEX_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'WAYFINDER_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']) expect(prepared.manifest.env).not.toHaveProperty(key);
+  expect(claude.manifest.client).toBe('claude');
 });
 
 it('launches interactive Codex in its own process with supported flags', () => {
-  const script = launcher({ scratch: temporary(), client: 'codex', bin: process.execPath, port: 23456, token: 'synthetic-token', model: 'synthetic-model', effort: 'high', subscriptionHome: temporary() });
-  expect(script).toContain('--no-daemon');
-  expect(script).not.toContain('--ignore-user-config');
+  const script = launcher({ scratch: temporary(), client: 'codex', bin: process.execPath, port: 23456, model: 'synthetic-model', effort: 'high', subscriptionHome: subscription() });
+  expect(script.manifest.args).toContain('--no-daemon');
+  expect(script.manifest.args).not.toContain('--ignore-user-config');
 });
 
 it.each(['Agent', 'Task', 'close_agent', 'send_input', 'exec_command'])('does not treat %s launch/control/wait as preparation', tool => {
@@ -471,15 +502,18 @@ it('distinguishes observed own, unexpected and unobserved databases without trea
   expect(isolationMeasurements(snapshot, snapshot, unavailable, '/synthetic/maps.sqlite').servedOwnDatabase.known).toBe(false);
 });
 
-it('links only the subscription login path, without copying or reading it', async () => {
-  const { lstatSync, readlinkSync } = await import('node:fs');
-  const dir = temporary(); const loginRoot = temporary();
-  launcher({ scratch: dir, client: 'codex', bin: process.execPath, port: 23456, token: 'synthetic-token', model: 'synthetic-model', effort: 'high', subscriptionHome: loginRoot });
+it('links only a staged subscription copy without granting the personal source path', async () => {
+  const { lstatSync, readlinkSync, statSync } = await import('node:fs');
+  const dir = temporary(); const loginRoot = subscription();
+  const prepared = launcher({ scratch: dir, client: 'codex', bin: process.execPath, port: 23456, model: 'synthetic-model', effort: 'high', subscriptionHome: loginRoot });
   const path = join(dir, 'home/.codex/auth.json');
-  expect(lstatSync(path).isSymbolicLink()).toBe(true); expect(readlinkSync(path)).toBe(join(loginRoot, '.codex/auth.json'));
-  const profile = readFileSync(join(dir, 'sandbox.sb'), 'utf8');
-  expect(profile).toContain(`(literal "${join(loginRoot, '.codex/auth.json')}")`);
-  expect(profile).not.toContain(`(subpath "${join(loginRoot, '.codex')}")`);
+  expect(lstatSync(path).isSymbolicLink()).toBe(true);
+  expect(readlinkSync(path)).toBe(prepared.profile.mutableReadOnlyFiles[0]);
+  expect(readFileSync(path, 'utf8')).toBe(''); // Opaque bytes are copied only by the approved launch.
+  expect(statSync(path).mode & 0o777).toBe(0o600);
+  const profile = readFileSync(prepared.profile.path, 'utf8');
+  expect(profile).toContain(`(literal "${readlinkSync(path)}")`);
+  expect(profile).not.toContain(loginRoot);
 });
 
 it('redacts summaries and recognizable subscription tokens without loading credentials', async () => {
@@ -598,11 +632,11 @@ it('preserves a newer synthetic Codex refresh and backs up the old login before 
 });
 
 it('Claude receives only the six proxy keys, with terminal environment taking precedence', async () => {
-  const { mkdirSync } = await import('node:fs'); const { claudeProxyEnvironment } = await import('./subscription.ts');
+  const { mkdirSync } = await import('node:fs'); const { proxyEnvironment } = await import('../proxy.ts');
   const home = temporary(); mkdirSync(join(home, '.claude'));
   writeFileSync(join(home, '.claude/settings.json'), JSON.stringify({ env: { HTTPS_PROXY: 'http://synthetic-settings:1',
     http_proxy: 'http://synthetic-settings:2', NO_PROXY: 'localhost', ANTHROPIC_API_KEY: 'synthetic-disallowed', OTHER: 'synthetic-disallowed' } }));
-  expect(claudeProxyEnvironment(home, { HTTPS_PROXY: 'http://synthetic-terminal:3', CODEX_API_KEY: 'synthetic-disallowed' }))
+  expect(proxyEnvironment(home, { HTTPS_PROXY: 'http://synthetic-terminal:3', CODEX_API_KEY: 'synthetic-disallowed' }))
     .toEqual({ HTTPS_PROXY: 'http://synthetic-terminal:3', http_proxy: 'http://synthetic-settings:2', NO_PROXY: 'localhost' });
 });
 
@@ -637,12 +671,22 @@ it('a failed login sync preserves the refreshed synthetic file for recovery', as
   expect(readFileSync(own, 'utf8')).toBe('synthetic-refresh');
 });
 
+it('login synchronization refuses a client-created parent symlink before reading outside scratch', async () => {
+  const { symlinkSync } = await import('node:fs'); const { syncCodexLogin } = await import('./subscription.ts');
+  const scratch = temporary(); const daily = subscription(); const privateRoot = temporary();
+  mkdirSync(join(scratch, 'home'));
+  writeFileSync(join(privateRoot, 'auth.json'), 'synthetic-private-marker');
+  symlinkSync(privateRoot, join(scratch, 'home/.codex'));
+  expect(() => syncCodexLogin(scratch, daily)).toThrow(/login directory/);
+  expect(readFileSync(join(daily, '.codex/auth.json'), 'utf8')).toBe('synthetic-login');
+});
+
 it('the generated Claude launcher preserves the proxy allowlist without arbitrary environment keys', () => {
-  const script = launcher({ scratch: temporary(), client: 'claude', bin: process.execPath, port: 23456, token: 'synthetic-token',
-    model: 'synthetic-model', effort: 'high', subscriptionHome: temporary(), proxyEnv: { HTTPS_PROXY: 'http://synthetic-proxy:1', NO_PROXY: 'localhost',
+  const script = launcher({ scratch: temporary(), client: 'claude', bin: process.execPath, port: 23456,
+    model: 'synthetic-model', effort: 'high', subscriptionHome: subscription(), proxyEnv: { HTTPS_PROXY: 'http://127.0.0.1:23457/', NO_PROXY: 'localhost',
       ANTHROPIC_API_KEY: 'synthetic-excluded', OTHER: 'synthetic-excluded' } });
-  expect(script).toContain('HTTPS_PROXY=http://synthetic-proxy:1'); expect(script).toContain('NO_PROXY=localhost');
-  expect(script).not.toContain('synthetic-excluded');
+  expect(script.manifest.env).toMatchObject({ HTTPS_PROXY: 'http://127.0.0.1:23457/', NO_PROXY: 'localhost' });
+  expect(JSON.stringify(script.manifest)).not.toContain('synthetic-excluded');
 });
 
 it('a rejection notice beside a failed Claude tool result is not human input', () => {

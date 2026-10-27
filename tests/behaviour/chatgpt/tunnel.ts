@@ -32,25 +32,68 @@ export function readTunnelConfig(path: string): TunnelConfig {
 // Do not inherit TUNNEL_TOKEN, TUNNEL_URL or other routing/authentication overrides.
 const childEnv = () => ({ PATH: process.env.PATH ?? '', HOME: homedir() });
 
-export function hasLocalConnector(stdout: string, ownPid?: number): boolean {
+type LocalTunnelTarget = TunnelConfig & { configPath: string };
+
+function isConnectorCommand(command: string): boolean {
+  const executable = /^(?:\S*\/)?cloudflared(?:\s|$)/.exec(command);
+  if (!executable) return false;
+  const args = command.slice(executable[0].length);
+  const value = String.raw`(?:"[^"]*"|'[^']*'|\S+)`;
+  const tunnel = /(?:^|\s)tunnel(?:\s|$)/.exec(args);
+  if (tunnel) {
+    // A visible target identity is unsafe unless the entire command is a known read-only
+    // inspection. In particular, unknown options must not hide a connector or masquerade
+    // as a diagnostic action through their values. No launch-option allowlist is needed.
+    const inspection = `${args.slice(0, tunnel.index)} ${args.slice(tunnel.index + tunnel[0].length)}`;
+    const argument = /(?:[^\s"']+|"[^"]*"|'[^']*')+/g;
+    if (inspection.replace(argument, '').trim()) return true; // Unbalanced quotes are ambiguous too.
+    const tokens = inspection.match(argument) ?? [];
+    const positional: string[] = [];
+    let help = false;
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i]!;
+      if (!token.startsWith('-')) { positional.push(token); continue; }
+      if (['--help', '-h', '--version'].includes(token)) { help = true; continue; }
+      if (/^--no-autoupdate(?:=(?:true|false))?$/.test(token)) continue;
+      if (!/^(?:--(?:name|config|credentials-file|output|loglevel)|-n|-o|-config)(?:=.+)?$/.test(token)) return true;
+      if (!token.includes('=')) {
+        if (!tokens[i + 1] || tokens[i + 1]!.startsWith('-')) return true;
+        i++;
+      }
+    }
+    if (help) return false;
+    return !(['info', 'list', 'token'].includes(positional[0] ?? '')
+      || positional[0] === 'ingress' && ['validate', 'rule'].includes(positional[1] ?? ''));
+  }
+  if (/(?:^|\s)(?:--help|-h|--version)(?=\s|$)/.test(args)) return false;
+  // Legacy config-only launch: known options, no positional subcommand such as "service".
+  const option = String.raw`(?:--(?:no-autoupdate|hello-world)|--(?:config|credentials-file|token|token-file)(?:=|\s+)${value})`;
+  return new RegExp(String.raw`^${option}(?:\s+${option})*$`).test(args);
+}
+
+export function hasLocalConnector(stdout: string, target: LocalTunnelTarget, ownPid?: number): boolean {
+  const identifiers = [target.id, target.credentialsFile, target.configPath, 'opencode'].map((value, index) =>
+    new RegExp(`(?:^|[\\s="'])${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s"'])`, index === 0 || index === 3 ? 'i' : ''));
   return stdout.split('\n').some(line => {
     const match = /^\s*(\d+)\s+(.*)$/.exec(line);
     if (!match || Number(match[1]) === ownPid) return false;
     const command = match[2]!;
-    return /(?:^|\/)cloudflared\s+.*\btunnel\b.*\brun\b/.test(command)
+    // Token-only connectors have no visible tunnel identity; the remote inventory decides ownership.
+    return (isConnectorCommand(command) && identifiers.some(id => id.test(command)))
       || /(?:^|\s|\/)node(?:\s+[^\n]*?)?\s+(?:[^\s]*\/)?scripts\/local-chatgpt-test\.mjs(?:\s|$)/.test(command);
   });
 }
-export async function assertNoLocalConnector(ownPid?: number) {
-  const { stdout } = await exec('ps', ['-axo', 'pid=,command='], { timeout: 5000 });
+export async function assertNoLocalConnector(target: LocalTunnelTarget, ownPid?: number, fakeProcesses?: string) {
+  const stdout = fakeProcesses ?? (await exec('ps', ['-axo', 'pid=,command='], { timeout: 5000 })).stdout;
   // Never print process command lines: another process can carry a secret in argv.
-  if (hasLocalConnector(stdout, ownPid)) throw new Error('Another local tunnel connector or daily ChatGPT runner is active; ask its operator to stop it');
+  if (hasLocalConnector(stdout, target, ownPid)) throw new Error('Another local tunnel connector or daily ChatGPT runner is active; ask its operator to stop it');
 }
 
 /** Unknown remote state fails closed; pending reconnects also count as occupied. */
 export function connectorsFrom(text: string, id: string): string[] {
   const info = JSON.parse(text) as { id?: unknown; name?: unknown; conns?: { id?: unknown; conns?: unknown }[] | null };
-  if (info.id !== id || info.name !== 'opencode' || !(info.conns === null || Array.isArray(info.conns)))
+  if (typeof info.id !== 'string' || info.id.toLowerCase() !== id.toLowerCase()
+    || info.name !== 'opencode' || !(info.conns === null || Array.isArray(info.conns)))
     throw new Error('Cannot confirm the opencode tunnel identity and connectors');
   const ids: string[] = [];
   for (const c of info.conns ?? []) {
@@ -69,7 +112,7 @@ export interface TunnelLease {
 }
 
 export const fakeExecutable = fileURLToPath(new URL('./fake-cloudflared.mjs', import.meta.url));
-export async function acquireTunnel(options: { root: string; dir: string; configPath: string; hostname: string; fake?: boolean }): Promise<TunnelLease> {
+export async function acquireTunnel(options: { root: string; dir: string; configPath: string; hostname: string; fake?: boolean; fakeProcesses?: string }): Promise<TunnelLease> {
   if (!/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9-]+$/i.test(options.hostname)) throw new Error('Expected the existing connector hostname, without a scheme or path');
   const config = readTunnelConfig(options.configPath);
   if (options.fake) {
@@ -81,7 +124,9 @@ export async function acquireTunnel(options: { root: string; dir: string; config
   }
   // No arbitrary executable or bypass switch: fake mode always runs the checked-in non-networking double.
   const executable = options.fake ? fakeExecutable : '/opt/homebrew/bin/cloudflared';
-  const localCheck = options.fake ? async () => {} : assertNoLocalConnector;
+  // Synthetic process inventories apply only to the non-networking fake; real runs always query ps.
+  const localCheck = (ownPid?: number) => assertNoLocalConnector({ ...config, configPath: options.configPath }, ownPid,
+    options.fake ? options.fakeProcesses ?? '' : undefined);
   const lock = join(options.root, `opencode-${config.id}.lock`);
   // No stale-lock stealing: a lost owner must be investigated before another connector starts.
   try { mkdirSync(lock, { mode: 0o700 }); }
@@ -146,12 +191,15 @@ export async function acquireTunnel(options: { root: string; dir: string; config
     await localCheck();
     if ((await remote()).length) throw new Error('opencode already has a registered connector; inspect cloudflared tunnel info and the lease owner before restarting any route, stop only a confirmed orphan or ask the active operator to stop, then retry');
   } catch (error) { await stop(); throw error; }
-  const check = async () => {
+  // A turn and the monitor can overlap. Share one in-flight inspection and its outcome.
+  // Diagnostic subprocesses are excluded by their action, independently of this sharing.
+  let checking: Promise<void> | undefined;
+  const check = () => checking ??= (async () => {
     if (stopped || !child?.pid || child.exitCode !== null || child.signalCode !== null) throw new Error('Tunnel is not running');
     await localCheck(child.pid);
     const ids = await remote();
     if (ids.length !== 1 || ids[0] !== connectorId) throw new Error('Exclusive tunnel ownership lost or unverifiable');
-  };
+  })().finally(() => { checking = undefined; });
   return { config,
     async start(relayPort) {
       if (stopped || child) throw new Error('Tunnel lease is not startable');
