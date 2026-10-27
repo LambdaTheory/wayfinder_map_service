@@ -757,7 +757,7 @@ test('P08/P09: actual operator command startup failures return nonzero with fixe
 });
 
 test.each(protocols.flatMap(protocol => [undefined, false, true].map(answerDeskEnabled => ({ protocol, answerDeskEnabled }))))(
-  'Answer Desk setting $answerDeskEnabled reaches $protocol with four matching tool definitions', async ({ protocol, answerDeskEnabled }) => {
+  'Answer Desk setting $answerDeskEnabled reaches $protocol with the exact matching tool set', async ({ protocol, answerDeskEnabled }) => {
   const f = storageFixture(); const port = await freePort();
   const service = await serveLocalMcp(f.storage, { ...configuration(f.path, port), ...(answerDeskEnabled === undefined ? {} : { answerDeskEnabled }) });
   cleanups.push(() => service.stop()); const c = await connect(port, token, protocol); await c.create();
@@ -773,7 +773,7 @@ test.each(protocols.flatMap(protocol => [undefined, false, true].map(answerDeskE
   expect(result).toMatchObject(answerDeskEnabled === true ? { kind: 'committed', revision: 2 }
     : { kind: 'rejected', rejection: { stage: 'input', error: { code: 'invalid_input', path: ['commands', 2, 'kind'], constraint: 'Unsupported command kind' } } });
   expect(tools).toEqual(answerDeskEnabled ? answerDeskMapTools : mapTools);
-  expect(tools.map(t => t.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply']);
+  expect(tools.map(t => t.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply', ...(answerDeskEnabled ? ['map_wait'] : [])]);
   const read = (await c.client.callTool({ name: 'map_read', arguments: { mapId: 'Acceptance.Alpha' } })).structuredContent;
   expect(read).toMatchObject({ kind: 'found', revision: { revision: answerDeskEnabled ? 2 : 1 } });
   if (answerDeskEnabled) expect(read).toMatchObject({ deskQuestions: [{ state: 'pending' }], reopenRequests: [], reopenContexts: [] });
