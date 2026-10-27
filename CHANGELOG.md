@@ -4,6 +4,14 @@ All notable project changes are recorded here. Historical implementation evidenc
 
 Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Release Version, covers the service and the workflow it carries; `docs/spec/mcp-sqlite.md` §14.3 says which part to raise, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion` (`1.0.0` to `3.0.0` below), and the server reported a fixed `0.1.0`.
 
+## 5.0.0 (2026-10-27)
+
+- Mandatory workflow: answer one-turn questions with a reasoned recommendation before considering a Map; separate Claim takeover authorization from a request to continue; explain unsupported operations and ask for a supported next step; name dependency impact and keep unstated details unconfirmed when changing a Decision; check Destination coverage and hand off a complete route in the same turn. The instructions, governed tool descriptions and dedicated entry guidance carry the same rules; Answer Desk 4.0.0 verdict and delivery boundaries remain.
+- W5 judging correction: ordinary `token` text in documentation commands is not bait access. Shell redirects, curl file arguments and directory changes still count as bait access. Fixed-evidence regression and a model-free re-judgement of the existing Batch remove the false failure, leaving pending model items as insufficient evidence.
+- W6 v2 and W6b v3 include the output-format Settlement missing from their completion seeds, approved by Kun on 2026-10-27 and recorded as an accepted in-scenario decision; historical Attempts are not re-judged against the new Scenario versions.
+- S6 v2 accepts a separate takeover question naming the claimed Tickets as an alternative to writing after the new human request; clearing Claims, writing immediately after Conflict and replaying stale intent remain forbidden. Historical S6 v1 Attempts are not re-judged as v2.
+- This version has not been verified in ChatGPT or in a real-model behaviour Batch. Kun approved the mandatory wording and seed correction on 2026-10-27, with a [ChatGPT merge exception](https://github.com/kun-g/wayfinder_map_service/issues/129#issuecomment-6444818565): test these changes at the next ChatGPT run. Real behaviour acceptance remains pending. See `docs/implementation/workflow-fixes-129-135.md`.
+
 ## 4.0.0 (2026-10-27)
 
 - Answer Desk is enabled by default with one five-tool surface; the disabled mode is retired and explicit false configuration refuses startup.
