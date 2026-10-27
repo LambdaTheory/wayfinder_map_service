@@ -32,12 +32,6 @@ export async function prepareDeskTurn(port: number, keyPath: string, turn: Turn,
       throw new DeskPrecondition('Required Pending desk questions were not displayed');
     // Keep exact question/version and options as evidence of what the scripted human saw.
     record('desk-observed', { mapId: plan.mapId, questions: pending });
-    if (plan.conversationRecommendation) {
-      const q = pending.find(q => q.ticketId === plan.conversationRecommendation)!;
-      const option = q.options[q.recommendedOption - 1];
-      if (!option) throw new DeskPrecondition('Displayed recommendation is missing');
-      return `关于答题台上的「${q.question}」（Ticket ${q.ticketId}，问题 ${q.questionId} 第 ${q.questionVersion} 版），我明确选择第 ${q.recommendedOption} 项「${option.label}」：${option.description}。请按这个具体答案结算。${turn.say}`;
-    }
     for (const reply of plan.submit ?? []) {
       const q = pending.find(q => q.ticketId === reply.ticketId)!;
       const choice = reply.choice === 'recommendation' ? { option: q.recommendedOption } : reply.choice;

@@ -110,13 +110,11 @@ export interface Turn {
   };
   /** Gate on current Pending desk publications instead of the last chat message.
    * The Controller alone submits scripted verdicts; `say` contains only the conversation input.
-   * conversationRecommendation quotes one actual displayed option for the explicit chat-verdict control.
    */
   desk?: {
     mapId: string;
     ticketIds: string[];
     submit?: { ticketId: string; choice: 'recommendation' | { text: string } }[];
-    conversationRecommendation?: string;
   };
   /** Start this session's client afresh (recovery in a new session) instead of resuming it. */
   freshProcess?: boolean;
@@ -217,8 +215,6 @@ export function validateScenario(s: Scenario, kind: 'scenario' | 'upgrade-check'
     if (turn.desk) {
       if (!turn.desk.mapId || !turn.desk.ticketIds.length) err(`turn ${index} needs a Map and desk Tickets`);
       if (turn.desk.submit?.some(s => !turn.desk!.ticketIds.includes(s.ticketId))) err(`turn ${index} submits outside the observed questions`);
-      if (turn.desk.conversationRecommendation && (turn.desk.submit?.length || !turn.desk.ticketIds.includes(turn.desk.conversationRecommendation)))
-        err(`turn ${index} has an invalid conversation verdict target`);
     }
     if (turn.kind !== 'reply' && turn.answers) err(`turn ${index} declares a proposal but is not a reply`);
     if (turn.concurrent && index === 0) err('the first turn cannot be concurrent');

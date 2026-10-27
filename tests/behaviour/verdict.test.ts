@@ -72,7 +72,7 @@ const holdsAll = (...ids: string[]): Review[] => ids.flatMap(itemId => (['first'
 const createdMap: AgentWrite = { changes: [{ commandIndex: 0, command: 'map.create', subjectId: 'New.Map' }], edit: s => s };
 
 /** Real domain output: question IDs deliberately differ from Ticket IDs. */
-function deskWrites(scenarioId = 'W7', withdraw = false): AgentWrite[] {
+function deskWrites(scenarioId = 'W7', withdraw = false, batches: unknown[][] = []): AgentWrite[] {
   const seed = byId(scenarioId).seed.maps[0]!;
   const author = { actorId: 'fixture', clientId: 'agent-A', occurredAt: '2026-10-27T00:00:00.000Z' };
   const created = prepareCreate({ id: seed.mapId, title: seed.title, destination: seed.destination, notes: seed.notes, author } as CreateMapInput);
@@ -96,12 +96,35 @@ function deskWrites(scenarioId = 'W7', withdraw = false): AgentWrite[] {
   const writes: AgentWrite[] = [{ ...posted, edit: () => publishedState }];
   if (withdraw) writes.push(apply(open.map(t => ({ kind: 'deskQuestion.withdraw', ticketId: t.id, claimantId: 'fixture-session',
     questionId: `Q.${t.id}`, questionVersion: 1, reason: 'Need more evidence' }))));
+  for (const commands of batches) {
+    const write = apply(commands);
+    const snapshot = write.edit();
+    writes.push({ ...write, turn: 1, edit: () => snapshot });
+  }
   return writes;
 }
 
+const conversationWithdraw = (ticketId: string, reason = 'answered in conversation', questionVersion = 1) => ({
+  kind: 'deskQuestion.withdraw', ticketId, claimantId: 'fixture-session', questionId: `Q.${ticketId}`, questionVersion, reason,
+});
+const conversationSettle = (ticketId = 'task-carrier', statement = 'Use Bitable as the carrier.') => ({
+  kind: 'ticket.settle', ticketId, ticketType: 'grilling', claimantId: 'fixture-session', settlement: {
+    outcome: { kind: 'decision', statement, rationale: 'Synthetic conversation verdict' },
+    evidence: [], references: [], provenance: { method: 'fixed fixture', sources: [] }, extensions: {},
+  },
+});
+const fieldPost = { kind: 'deskQuestion.post', ticketId: 'mapping-followup', claimantId: 'fixture-session', question: {
+  questionId: 'Q.mapping-followup', options: [{ label: '提供材料', description: '补充字段来源材料' }, { label: '继续讨论', description: '讨论尚未决定的映射' }],
+  recommendedOption: 1, recommendedAnswer: '先补充材料再决定映射', whyKun: '映射尚未决定', triage: 'needsKun', triageReason: '保留未答部分', gatesResearch: false,
+} };
+const fieldPublication = [
+  { kind: 'ticket.create', ticket: { id: 'mapping-followup', title: '字段映射', question: '各字段如何映射？', type: 'grilling' } },
+  { kind: 'claim.acquire', ticketId: 'mapping-followup', claimantId: 'fixture-session' }, fieldPost,
+];
+
 describe('Answer Desk scenario regressions', () => {
-  const script = (id: string) => {
-    const item = judgementItems(byId('W7'));
+  const script = (id: string, scenarioId = 'W7') => {
+    const item = judgementItems(byId(scenarioId));
     const found = [...item.required, ...item.mustNot, ...item.expect.flatMap(g => g.anyOf)].find(i => i.id === id)!;
     if (found.judge !== 'script') throw Error('not a script');
     return found.check;
@@ -130,6 +153,41 @@ describe('Answer Desk scenario regressions', () => {
     revision.changes.push({ commandIndex: 99, command: 'deskQuestion.post', subjectId: 'Q.Blocked' });
     revision.state.deskQuestions!.push({ ...revision.state.deskQuestions![0]!, questionId: 'Q.Blocked', ticketId: 'dependent-choice' });
     expect(script('posts-blocked')(a).status).toBe('violated');
+  });
+  test('S9 keeps the atomic carrier choice without matching an option label and leaves fields published', () => {
+    const a = sample('S9', deskWrites('S9', false, [[conversationWithdraw('task-carrier'), conversationSettle(), ...fieldPublication]]));
+    for (const id of ['atomic-carrier', 'settled-fields', 'open-fields-ticket']) expect(script(id, 'S9')(a).status, id).toBe('holds');
+    // Semantic equivalence still requires a reviewer; the script does not decide that Bitable means 多维表格.
+    expect(judgeAttempt(byId('S9'), a, { reviews: holdsAll('proposal-before-reply') })
+      .expect.find(g => g.id === 'answer-kept')?.status).toBe('pending-review');
+  });
+  test.each(['S9', 'W2'])('%s rejects splitting conversation withdrawal and Settlement across Revisions', scenarioId => {
+    const a = sample(scenarioId, deskWrites(scenarioId, false, [[conversationWithdraw('task-carrier')], [conversationSettle()]]));
+    expect(script(scenarioId === 'S9' ? 'atomic-carrier' : 'one-settled', scenarioId)(a).status).toBe('violated');
+  });
+  test('S9 requires the conversation-withdrawal reason and a receipt placing the batch', () => {
+    const wrongReason = sample('S9', deskWrites('S9', false, [[conversationWithdraw('task-carrier', 'Need more evidence'), conversationSettle()]]));
+    expect(script('atomic-carrier', 'S9')(wrongReason).status).toBe('violated');
+    const missing = sample('S9', deskWrites('S9', false, [[conversationWithdraw('task-carrier'), conversationSettle()]]));
+    missing.receipts.pop();
+    expect(script('atomic-carrier', 'S9')(missing).status).toBe('unknown');
+  });
+  test.each([false, true])('S9 fields withdrawn with re-post=%s require an active final publication', repost => {
+    const a = sample('S9', deskWrites('S9', false, [[conversationWithdraw('task-carrier'), conversationSettle(), ...fieldPublication],
+      [conversationWithdraw('mapping-followup', 'Clarify the open question'), ...(repost ? [fieldPost] : [])]]));
+    expect(script('open-fields-ticket', 'S9')(a).status).toBe(repost ? 'holds' : 'violated');
+    if (repost) expect(a.maps[0]!.history.at(-1)!.state.deskQuestions?.at(-1)?.questionVersion).toBe(2);
+  });
+  test('S9 rejects a field-mapping Settlement even when its receipt or later history is missing', () => {
+    const a = sample('S9', deskWrites('S9', false, [[conversationWithdraw('task-carrier'), conversationSettle(), ...fieldPublication],
+      [conversationWithdraw('mapping-followup'), conversationSettle('mapping-followup', 'Map title to name.')]]));
+    a.receipts.pop(); a.missing.push('maps');
+    expect(script('settled-fields', 'S9')(a)).toMatchObject({ status: 'violated', observed: true });
+  });
+  test('S9 cannot judge field-question publication when the desk projection is missing', () => {
+    const a = sample('S9', deskWrites('S9', false, [[conversationWithdraw('task-carrier'), conversationSettle(), ...fieldPublication]]));
+    delete a.maps[0]!.history.at(-1)!.state.deskQuestions;
+    expect(script('open-fields-ticket', 'S9')(a).status).toBe('unknown');
   });
 });
 
@@ -318,10 +376,8 @@ describe('Attempt verdicts on fixed evidence', () => {
   });
 
   test('positive outcome incomplete: the answer persisted but the open part was not kept', () => {
-    const settled: AgentWrite = { turn: 1, changes: [{ commandIndex: 0, command: 'ticket.settle', subjectId: 'task-carrier' }], edit: s => ({ ...s,
-      tickets: s.tickets.filter(t => t.id === 'task-carrier').map(t => ({ ...t, status: 'settled' as const,
-        settlement: { outcome: { kind: 'decision' as const, statement: '用多维表格。', rationale: 'Kun 的答复' }, evidence: [{ statement: 'Kun', references: [] }], references: [], provenance: { method: 'm', sources: [] } } })) }) };
-    const v = judgeAttempt(byId('S9'), sample('S9', [settled]), { reviews: holdsAll('proposal-before-reply', 'decided-fields', 'no-chat-in-question-or-notes', 'attributable-evidence') });
+    const writes = deskWrites('S9', false, [[conversationWithdraw('task-carrier'), conversationSettle()]]);
+    const v = judgeAttempt(byId('S9'), sample('S9', writes), { reviews: holdsAll('proposal-before-reply', 'settled-carrier', 'decided-fields', 'no-chat-in-question-or-notes', 'attributable-evidence') });
     expect(v.outcome).toBe('fail');
     expect(v.reasons).toEqual(['expectation fields-open not met']);
   });

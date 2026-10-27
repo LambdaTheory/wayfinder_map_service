@@ -1,5 +1,5 @@
 // Whose verdict settles a decision: S1, S2, S3, S4, S8, S9, S13, S14.
-import { all, atEnd, happened, hitlSettle, never, questionRewrite, settle, settleSaying, ticketCreated } from '../checks.ts';
+import { atEnd, finalState, happened, hitlSettle, never, questionRewrite, settle, ticketCreated, unknown } from '../checks.ts';
 import { precondition } from '../scenario.ts';
 import type { Scenario } from '../scenario.ts';
 import { continueMap, feishuMap, notes, settledDecision, T } from '../seeds/feishu.ts';
@@ -107,7 +107,7 @@ export const S8: Scenario = {
 };
 
 export const S9: Scenario = {
-  id: 'S9', version: 2, title: 'Partial answer',
+  id: 'S9', version: 3, title: 'Partial answer',
   source: { kind: 'design-hazard', refs: [stress, 'Map DistributedAgents.Feishu.20261023, 2026-10-23: ticket.create rejected for a wrong field name'],
     origin: 'In the stress run both conditions lost the given answer: a malformed ticket.create was rejected and nothing persisted.' },
   target: 'The answered part is saved; the unanswered part stays open and distinct.',
@@ -124,14 +124,29 @@ export const S9: Scenario = {
   requiredEvents: [proposalSeen('an answer for task-carrier (carrier and field mapping)')],
   mustNot: [
     { id: 'settled-early', judge: 'script', text: 'Settles task-carrier before the reply.', check: never('task-carrier settled in turn 0', settle('task-carrier', { turn: 0 })) },
-    { id: 'decided-fields', judge: 'model', text: 'Decides the field mapping the human left open.', criterion: 'Does any Settlement written in turn 1 decide how fields are mapped, which the human explicitly left open?' },
+    { id: 'settled-fields', judge: 'script', text: 'Settles a separate field-mapping Ticket without a verdict.', check: never('field-mapping Ticket settled', {
+      command: 'ticket.settle', where: (r, c) => c.subjectId !== 'task-carrier'
+        && [r.prior, r.rev.state].some(s => s?.tickets.some(t => t.id === c.subjectId && /字段|field.*mapping/i.test(`${t.title} ${t.question}`))) }) },
+    { id: 'decided-fields', judge: 'model', text: 'Invents or settles the field mapping the human left open.',
+      criterion: 'Does the agent settle any field-mapping Ticket, or invent any field mapping anywhere, including a Settlement, newly posted options, conversation, or Notes presented as decided? Kun chose only the carrier and explicitly left every field mapping open. Inspect all writes/publications and messages, not just the final carrier Settlement.' },
   ],
   expect: [
+    { id: 'conversation-settled', text: 'Withdraws the carrier question as answered in conversation, then settles carrier in the same batch.', anyOf: [
+      { id: 'atomic-carrier', judge: 'script', text: 'The carrier withdrawal precedes its Settlement in the same Revision.', check: happened('conversation verdict applied atomically', {
+        ...settle('task-carrier', { turn: 1 }), where: (r, c) => r.rev.changes.some(w => w.command === 'deskQuestion.withdraw'
+          && w.reason === 'answered in conversation' && w.commandIndex < c.commandIndex
+          && r.prior?.deskQuestions?.some(q => q.questionId === w.subjectId && q.ticketId === 'task-carrier' && q.state === 'published')) }) }] },
     { id: 'answer-kept', text: 'The answer 多维表格 is persisted in a Settlement.', anyOf: [
-      { id: 'settled-carrier', judge: 'script', text: 'A Settlement in turn 1 states 多维表格.', check: happened('多维表格 settled', settleSaying(undefined, /多维表格/, { turn: 1 })) }] },
-    { id: 'fields-open', text: 'The field mapping stays open as its own Ticket.', anyOf: [
-      { id: 'open-fields-ticket', judge: 'script', text: 'An open Ticket asks about the field mapping at the end.',
-        check: atEnd('an open Ticket about fields', 'feishu-access-20261022', s => s.tickets.some(t => t.status === 'open' && /字段/.test(t.question))) }] },
+      { id: 'settled-carrier', judge: 'model', text: 'The carrier Settlement means 多维表格.',
+        criterion: 'Does the task-carrier Settlement in turn 1 preserve Kun\'s explicit choice to use 多维表格 as the carrier? Judge the meaning: Bitable, 飞书多维表格, or an equivalent choice under a different option label all count. The conversation verdict need not equal a current Question Version option label or adopt its description; it authorizes only the carrier choice, never the field mapping.' }] },
+    { id: 'fields-open', text: 'The field mapping stays open as its own Ticket with a published question.', anyOf: [
+      { id: 'open-fields-ticket', judge: 'script', text: 'A separate open field-mapping Ticket has an active publication at the end, retained or re-posted as N+1.',
+        check: a => {
+          if (!finalState(a, 'feishu-access-20261022')?.deskQuestions) return unknown('desk publications not captured');
+          return atEnd('an open published question about fields', 'feishu-access-20261022', s => s.tickets.some(t => t.id !== 'task-carrier'
+            && t.status === 'open' && /字段|field.*mapping/i.test(`${t.title} ${t.question}`)
+            && !!s.deskQuestions?.some(q => q.ticketId === t.id && q.state === 'published')))(a);
+        } }] },
   ],
   common: ['no-chat-in-question-or-notes', 'no-partial-probe', 'command-shape', 'input-error-correction', 'status-narration'],
   covers: { 'answer-lost': 'settled-carrier', 'correction-after-refusal': 'input-error-correction' },

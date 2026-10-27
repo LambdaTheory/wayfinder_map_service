@@ -85,21 +85,19 @@ async function tool(name, args, dropReceipt = false) {
 }
 const say = text => emit({ type: 'item.completed', item: { id: `item_${item++}`, type: 'agent_message', text } });
 const done = () => emit({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } });
-if (prompt.startsWith('FAKE-DESK') || prompt.includes('请按这个具体答案结算')) {
+if (prompt.startsWith('FAKE-DESK') || prompt === '载体就用多维表格，入口我再想想。') {
   if (Object.keys(process.env).some(k => k.startsWith('WAYFINDER_ANSWER_DESK_'))) throw Error('desk authority leaked to client');
   writeFileSync('desk-agent-environment.json', JSON.stringify({ args, environment: Object.keys(process.env) }));
   const catalog = await tool('map_list', { limit: 100 });
   const mapId = catalog.maps[0].mapId;
   const claimantId = 'fake-desk-session';
   const head = await tool('map_read', { mapId, claimantId, version });
-  if (prompt.includes('请按这个具体答案结算')) {
+  if (prompt === '载体就用多维表格，入口我再想想。') {
     const q = head.deskQuestions.find(q => q.ticketId === 'task-carrier');
-    const option = q.options[q.recommendedOption - 1];
-    if (!prompt.includes(q.questionId) || !prompt.includes(option.description)) throw Error('verdict does not quote the displayed answer');
     const result = await tool('map_apply', { mapId, version, expectedRevision: head.revision.revision, commands: [
       { kind: 'deskQuestion.withdraw', ticketId: q.ticketId, claimantId, questionId: q.questionId, questionVersion: q.questionVersion, reason: 'answered in conversation' },
       { kind: 'ticket.settle', ticketId: q.ticketId, ticketType: 'grilling', claimantId, settlement: {
-        outcome: { kind: 'decision', statement: option.label + ': ' + option.description, rationale: 'Explicit conversation verdict' },
+        outcome: { kind: 'decision', statement: 'Use Bitable as the carrier.', rationale: 'Explicit conversation verdict' },
         evidence: [], references: [], provenance: { method: 'conversation verdict', sources: [] }, extensions: {} } },
     ] });
     if (result.kind !== 'committed') throw Error(JSON.stringify(result));
@@ -123,8 +121,14 @@ if (prompt.startsWith('FAKE-DESK') || prompt.includes('请按这个具体答案�
     const result = await tool('map_apply', { mapId, version, expectedRevision: head.revision.revision, commands: tickets.flatMap(t => [
       { kind: 'claim.acquire', ticketId: t.id, claimantId },
       { kind: 'deskQuestion.post', ticketId: t.id, claimantId, question: { questionId: 'Q.' + t.id,
-        options: [{ label: '保留未分类', description: '单独计入未分类小计' }, { label: '忽略', description: '不计入总额' }],
-        recommendedOption: 1, recommendedAnswer: '保留未分类并单列小计', whyKun: '选择统计口径', triage: 'needsKun', triageReason: '会改变汇总金额', gatesResearch: false } },
+        options: t.id === 'task-carrier'
+          ? [{ label: '飞书任务', description: '内置任务记录' }, { label: 'Bitable', description: '以表格保存任务记录' }]
+          : t.id === 'task-entry'
+            ? [{ label: '机器人私聊', description: '从私聊发起任务' }, { label: '群聊', description: '从群聊发起任务' }]
+            : [{ label: '保留未分类', description: '单独计入未分类小计' }, { label: '忽略', description: '不计入总额' }],
+        recommendedOption: 1, recommendedAnswer: t.id === 'task-carrier' ? '用飞书任务保存任务记录'
+          : t.id === 'task-entry' ? '从机器人私聊发起任务' : '保留未分类并单列小计',
+        whyKun: '选择使用方式', triage: 'needsKun', triageReason: '需要明确裁决', gatesResearch: false } },
     ]) });
     if (result.kind !== 'committed') throw Error(JSON.stringify(result));
     // Deliberately no proposal words: a compliant link-only announcement must pass the new gate.

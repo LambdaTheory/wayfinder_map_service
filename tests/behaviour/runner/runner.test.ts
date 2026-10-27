@@ -185,7 +185,7 @@ describe('one Attempt end to end, without a model', () => {
 });
 
 describe('scripted Answer Desk human', () => {
-  test('a specific conversation answer withdraws and settles one actual displayed question in one write', async () => {
+  test('a natural conversation answer reaches the agent unchanged and settles only carrier in one write', async () => {
     const original = library.find(s => s.id === 'W2')!;
     const scenario: Scenario = { ...original, turns: original.turns.map((t, i) => i ? t : { ...t, say: 'FAKE-DESK' }) };
     const out = join(records, 'desk-conversation-attempt');
@@ -195,8 +195,11 @@ describe('scripted Answer Desk human', () => {
     expect(result.completeness).toBe('complete');
     const record = JSON.parse(readFileSync(join(out, 'D-1/attempt.json'), 'utf8')) as AttemptRecord;
     expect(record.events.some(e => e.kind === 'controller' && e.action === 'desk-answer')).toBe(false);
-    expect(record.sessions[0]!.turns[1]!.input).toContain('Q.task-carrier');
-    expect(record.sessions[0]!.turns[1]!.input).toContain('任务入口我还要再想想');
+    expect(record.sessions[0]!.turns[1]!.input).toBe('载体就用多维表格，入口我再想想。');
+    const state = record.maps[0]!.history.at(-1)!.state;
+    expect(state.tickets.find(t => t.id === 'task-carrier')!.settlement?.outcome.statement).toBe('Use Bitable as the carrier.');
+    expect(state.tickets.find(t => t.id === 'task-entry')!.status).toBe('open');
+    expect(state.deskQuestions?.find(q => q.ticketId === 'task-entry')!.state).toBe('published');
     for (const item of itemsOf(scenario)) if (item.judge === 'script') expect(item.check(record).status, item.id).toBe('holds');
   }, 60_000);
   test('link-only chat → keyed answer → real taking read and cited Settlement, with no client key', async () => {

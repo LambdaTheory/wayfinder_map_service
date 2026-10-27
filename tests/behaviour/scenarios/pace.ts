@@ -69,18 +69,18 @@ export const W1: Scenario = {
 };
 
 export const W2: Scenario = {
-  id: 'W2', version: 2, title: 'A specific conversation verdict answers only part of a desk batch',
+  id: 'W2', version: 3, title: 'A specific conversation verdict answers only part of a desk batch',
   source: { kind: 'real-problem', originalCombination: 'codex:gpt-6-astra', refs: [retro, 'Design-session clarification 2026-10-27: positive conversation-verdict control'], origin: 'A partial reply settles only what it covers.' },
-  target: 'A conversation verdict quotes one actual displayed answer; withdraw that question then settle in one batch, leaving the other unanswered.',
+  target: 'A natural conversation verdict names the carrier choice; the agent matches it to the current question, withdraws then settles in one batch, leaving the other unanswered.',
   applies: { entries: ['mcp-only', 'dedicated', 'chatgpt'], needs: ['multi-turn'] },
   seed: { restores: 'current-visible-state', fixtures: [], maps: [feishuMap([T.carrier, T.entry])] },
   turns: [
     { session: 'A', kind: 'opening', say: continueMap },
-    { session: 'A', kind: 'reply', say: '任务入口我还要再想想。', desk: { mapId: 'feishu-access-20261022', ticketIds: ['task-carrier', 'task-entry'], conversationRecommendation: 'task-carrier' } },
+    { session: 'A', kind: 'reply', say: '载体就用多维表格，入口我再想想。', desk: { mapId: 'feishu-access-20261022', ticketIds: ['task-carrier', 'task-entry'] } },
   ],
   controller: [],
   requiredEvents: [precondition('proposal-before-reply', 'Both questions were Pending before the specific conversation verdict.',
-    'do desk-observed records show both Pending questions, and does the human message quote the exact task-carrier option and version?')],
+    'do desk-observed records show both Pending questions before the human naturally names the carrier choice and leaves the entry undecided? No question ID, version number or verbatim option text is required in the reply.')],
   mustNot: [
     { id: 'settled-in-turn-0', judge: 'script', text: 'Settles before the reply.', check: never('settled in turn 0', hitlSettle({ turn: 0 })) },
     { id: 'settled-both', judge: 'script', text: 'Settles more than the one answered decision.', check: hitlCount(1, n => n <= 1, 'at most one Settlement in turn 1', true) },
@@ -93,7 +93,7 @@ export const W2: Scenario = {
           && w.reason === 'answered in conversation' && w.commandIndex < c.commandIndex
           && r.prior?.deskQuestions?.some(q => q.questionId === w.subjectId && q.ticketId === 'task-carrier' && q.state === 'published')) }) }] },
     { id: 'answer-matches', text: 'The Settlement preserves the explicitly selected answer.', anyOf: [
-      { id: 'selected-option', judge: 'model', text: 'Only the named option is settled.', criterion: 'Does the carrier Settlement match the displayed option label and description quoted by the human, while task-entry stays Pending?' }] },
+      { id: 'selected-option', judge: 'model', text: 'Only the carrier choice is settled.', criterion: 'Does the agent map the natural reply to the current task-carrier question and settle 多维表格 (including Bitable or equivalent wording), while task-entry stays Pending? Judge meaning, without requiring the reply to quote a question ID, Question Version, option label or description.' }] },
   ],
   common: ['no-chat-in-question-or-notes', 'status-narration'],
 };
