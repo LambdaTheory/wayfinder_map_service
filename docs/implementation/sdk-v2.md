@@ -56,3 +56,14 @@ Initial-round commands: `npm ci`, `npm run build`, `npm test`, `npm run typechec
 After independent review, the second-round `npm run build`, `npm test`, `npm run typecheck` and `git diff --check` all passed on Node 26.3.0: **50 files / 2,246 tests**, 201.44 seconds. The HTTP service suite now has 40 tests; the new everyday/behaviour relay comparison adds two. As a negative control, temporarily dropping only `Mcp-Method` made the everyday discovery assertion fail (400 instead of 200); dropping only `Mcp-Name` made the named call fail. Both mutations were restored before the full green run. Latest `origin/main` (`0fd5116`) was already included.
 
 No real model, Codex, Claude or ChatGPT client was started; no everyday service, real database, port 18765/18766 or tunnel was operated. The coordinator still owns real-client connectivity, reviews, merge and the `v3.1.0` tag. Refs #110; #114 remains the one live ChatGPT run.
+
+## Real-client connectivity (coordinator, 2026-10-27)
+
+Build `5eaa768` (3.1.0), an isolated service on a fresh database under the behaviour-test cache, loopback port, throwaway token; no model turn was sent, and the everyday service (18766) was not contacted.
+
+| Client | Result |
+| --- | --- |
+| Claude Code 2.1.311 (`--strict-mcp-config`, only this server) | `/mcp`: connected, authenticated, **protocol `2026-07-28`**, capabilities tools · resources · prompts, 4 tools: `map_create`, `map_list`, `map_read`, `map_apply` |
+| Codex CLI 0.164.0 (everyday MCP servers disabled for the launch) | `/mcp verbose`: connected, Bearer auth, tools `map_apply`, `map_create`, `map_list`, `map_read`; Resources `wayfinder://workflow/exploration` and `wayfinder://workflow/exploration/3.1.0`. The TUI does not display the negotiated protocol; Codex 0.164.0 is expected to use `2025-11-25` |
+
+ChatGPT was not run; its connectivity on this release stays unverified (see the CHANGELOG) until #114 or a separately approved refresh-only check.
