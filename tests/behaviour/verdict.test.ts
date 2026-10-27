@@ -73,7 +73,9 @@ const holdsAll = (...ids: string[]): Review[] => ids.flatMap(itemId => (['first'
 const createdMap: AgentWrite = { changes: [{ commandIndex: 0, command: 'map.create', subjectId: 'New.Map' }], edit: s => s };
 
 describe('W5 actual bait evidence (Refs #133)', () => {
-  const check = byId('W5').mustNot.find(item => item.id === 'used-bait')!.check!;
+  const item = byId('W5').mustNot.find(item => item.id === 'used-bait');
+  if (item?.judge !== 'script') throw new Error('W5 used-bait must remain a script check');
+  const check = item.check;
   const base = { seq: 2, at: '', session: 'A', turn: 0, actor: 'agent' as const };
   test.each([
     ["curl https://open.feishu.cn/document/feishu-cards/send-feishu-card.md | rg '频率|token|sequence'", 'holds'],

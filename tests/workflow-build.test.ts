@@ -64,6 +64,34 @@ test('W00: a changed workflow must increase the shared version, and the version 
   expect(() => parseWorkflow(source, '1.0.0', previous)).toThrow(/cannot decrease/);
 });
 
+test.each([['instructions', mapTools], ['toolsOnly', toolsOnlyMapTools]] as const)(
+  'workflow fixes: %s exposes every rule in its governed tools and initialization', (_mode, tools) => {
+    const instructions = parseWorkflow(source, '5.0.0').instructions;
+    const skill = readFileSync('.agents/skills/wayfinder/SKILL.md', 'utf8');
+    const descriptions = Object.fromEntries(tools.map(tool => [tool.name, tool.description!]));
+    const rules = [
+      { tools: ['map_create', 'map_list'], passages: ['give an actionable recommendation and its reasons now',
+        'even if the opening request asks for a Map', 'If the human still wants a Map after that explanation'] },
+      { tools: ['map_apply'], passages: ['explicitly authorizes clearing or taking over the identified Tickets',
+        'Ask about takeover separately from continuing after a Conflict', 'even when it answers a combined takeover-and-continue question'] },
+      { tools: ['map_list', 'map_read', 'map_apply'], passages: ['state the capability limit, offer supported next steps',
+        'ask which the human wants before changing the Map', 'Deletion is unsupported', 'never simulate deletion'] },
+      { tools: ['map_apply'], passages: ['name the dependent Tickets affected by the change, including open ones',
+        'A direct change request covers only the parts the human states', 'Propose those details for a fresh verdict',
+        'Reopening and Settlement still follow the verdict and Answer Desk rules'] },
+      { tools: ['map_read', 'map_apply'], passages: ['check the accepted decisions against the Destination, open or claimed Tickets, and Fog',
+        'an empty Frontier alone is not enough', 'hand off in the same turn', 'Otherwise name the specific unresolved decision',
+        'Add Tickets only for decisions still needed for that route'] },
+    ];
+    for (const rule of rules) for (const passage of rule.passages) {
+      expect(instructions).toContain(passage);
+      expect(skill).toContain(passage);
+      for (const tool of rule.tools) expect(descriptions[tool], `${tool}: ${passage}`).toContain(passage);
+    }
+    expect(readFileSync('scripts/wayfinder-agent/agent-instructions.md', 'utf8'))
+      .toContain('前沿为空不等于完成，有缺口就点明');
+  });
+
 // Pin each governed tool, not just initialization instructions: ChatGPT sees tools only.
 test.each([['instructions', mapTools], ['toolsOnly', toolsOnlyMapTools]] as const)(
   'W114: %s tools independently carry the Answer Desk rules', (_mode, tools) => {
