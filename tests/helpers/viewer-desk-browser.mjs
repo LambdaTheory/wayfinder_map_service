@@ -45,8 +45,11 @@ const config = { databasePath, port, token: 'synthetic-browser-test-mcp-token-on
 const output = resolve(process.env.WAYFINDER_BROWSER_EVIDENCE_DIR ?? 'docs/implementation/answer-desk-viewer'); mkdirSync(output, { recursive: true });
 async function tabTo(page, control) {
   // Exercise native focus traversal, not locator.focus() or a synthetic key event.
+  // Move backward for an earlier queue control rather than visiting the browser
+  // toolbar, which legitimately causes window blur/refocus and its 600 ms guard.
+  const key = await control.evaluate(node => document.activeElement.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_PRECEDING ? 'Shift+Tab' : 'Tab');
   for (let i = 0; i < 60; i++) {
-    await page.keyboard.press('Tab');
+    await page.keyboard.press(key);
     if (await control.evaluate(node => node === document.activeElement)) return;
   }
   assert.fail('Tab did not reach the requested control');
@@ -71,19 +74,17 @@ async function verifyFocusAndChangedQuestions(context, origin, key) {
   const expectCard = name => page.locator('.desk-question h2').getByText(`Question ${name}?`, { exact: true }).waitFor();
   try {
     await page.goto(`${origin}/maps/${id}#key=${key}`); await expectCard('A');
-    await tabTo(page, queue('B')); await page.keyboard.press('Enter'); await expectCard('B');
+    await tabTo(page, queue('B')); await page.keyboard.press('Space'); await expectCard('B');
     assert.equal(count(), 0); assert.equal(writes, 0);
-    await tabTo(page, page.getByRole('button', { name: '写文字答复 · t' })); await page.keyboard.press('Enter');
+    await tabTo(page, page.getByRole('button', { name: '写文字答复 · t' })); await page.keyboard.press('Space');
     await page.getByRole('textbox', { name: '文字答复', exact: true }).waitFor();
     assert.equal(count(), 0); assert.equal(writes, 0);
     await tabTo(page, page.getByRole('button', { name: '取消', exact: true })); await page.keyboard.press('Enter');
     assert.equal(await page.locator('dialog[open]').count(), 0);
     await tabTo(page, page.locator('.desk-question .desk-option').nth(1));
-    await page.keyboard.press('1'); await page.keyboard.press('t');
-    assert.equal(count(), 0); assert.equal(writes, 0); assert.equal(await page.locator('dialog[open]').count(), 0);
-    await page.keyboard.press('Enter'); await expectCard('A');
+    await page.keyboard.press('Space'); await expectCard('A');
     assert.equal(questions().find(q => q.ticketId === 'B').currentAnswer.choice.option, 2);
-    await tabTo(page, page.locator('.desk-question .desk-option').nth(2)); await page.keyboard.press('Enter'); await expectCard('C');
+    await tabTo(page, page.locator('.desk-question .desk-option').nth(2)); await page.keyboard.press('Space'); await expectCard('C');
     assert.equal(questions().find(q => q.ticketId === 'A').currentAnswer.choice.option, 3);
     await queue('C').click(); await page.keyboard.press('Enter'); await page.locator('.desk-summary').getByText(/已答 3/).waitFor();
     assert.equal(questions().find(q => q.ticketId === 'C').currentAnswer.choice.option, 1);
@@ -103,7 +104,7 @@ async function verifyFocusAndChangedQuestions(context, origin, key) {
     await mutate([{ kind: 'map.update', patch: { title: 'Still awaiting selection' } }]);
     await page.getByRole('heading', { name: 'Still awaiting selection', exact: true }).waitFor();
     assert(await interrupted.isVisible());
-    await tabTo(page, queue('D')); await page.keyboard.press('Enter'); await expectCard('D');
+    await tabTo(page, queue('D')); await page.keyboard.press('Space'); await expectCard('D');
     assert.equal(count(), before); assert.equal(writes, beforeWrites);
     await page.keyboard.press('1'); await expectCard('E');
     const latest = questions().find(q => q.ticketId === 'D' && q.questionVersion === 2);
@@ -114,7 +115,7 @@ async function verifyFocusAndChangedQuestions(context, origin, key) {
     await mutate([create('F', 'F', 'Question F?'), claim('F'), posted('F')]); await queue('F').waitFor();
     assert(await interrupted.isVisible());
     await bodyKey('Enter'); assert.equal(count(), before + 1); assert.equal(writes, beforeWrites + 1);
-    await tabTo(page, queue('F')); await page.keyboard.press('Enter'); await expectCard('F');
+    await tabTo(page, queue('F')); await page.keyboard.press('Space'); await expectCard('F');
     assert.equal(count(), before + 1);
     await page.keyboard.press('2'); await page.locator('.desk-summary').getByText(/已答 5/).waitFor();
     // Settlement of the answer being edited also requires deliberate navigation.
@@ -123,15 +124,15 @@ async function verifyFocusAndChangedQuestions(context, origin, key) {
     await mutate([settle('B', questions().find(q => q.ticketId === 'B').currentAnswer)]); await interrupted.waitFor();
     await bodyKey('Enter'); assert.equal(count(), before + 2); assert.equal(writes, beforeWrites + 2);
     // Acknowledge with an empty queue so settled-history actions do not stay locked forever.
-    await tabTo(page, page.getByRole('button', { name: '已了解，查看当前题目', exact: true })); await page.keyboard.press('Enter');
+    await tabTo(page, page.getByRole('button', { name: '已了解，查看当前题目', exact: true })); await page.keyboard.press('Space');
     await page.getByRole('heading', { name: '当前没有待答题', exact: true }).waitFor();
     assert(await page.getByRole('button', { name: '请求重开', exact: true }).isEnabled());
     assert.equal(count(), before + 2); assert.equal(writes, beforeWrites + 2);
   } finally { await page.close(); }
 }
 async function verifyFocusAcrossPolling(context, origin, key) {
-  for (const change of ['publication', 'taken']) for (const focus of ['text', 'queue', 'option']) {
-    const id = `Synthetic.Poll.${change}.${focus}`;
+  for (const armed of [false, true]) for (const change of ['publication', 'taken']) for (const focus of ['text', 'queue', 'option']) {
+    const id = `Synthetic.Poll.${armed}.${change}.${focus}`;
     const created = prepareCreate({ id, title: 'Polling focus regression', destination: 'No unintended answers', author });
     assert.equal(created.kind, 'ok'); await storage.adapter.commit(created.value);
     const mutate = commands => apply(commands, undefined, id);
@@ -146,6 +147,7 @@ async function verifyFocusAcrossPolling(context, origin, key) {
     try {
       await page.goto(`${origin}/maps/${id}#key=${key}`);
       await page.locator('.desk-question h2').getByText('Question A?', { exact: true }).waitFor();
+      if (armed) await queue('A').click();
       const control = focus === 'text' ? page.getByRole('button', { name: '写文字答复 · t' })
         : focus === 'queue' ? queue('B') : page.locator('.desk-question .desk-option').nth(1);
       await tabTo(page, control);
@@ -160,6 +162,15 @@ async function verifyFocusAcrossPolling(context, origin, key) {
         assert.equal((await storage.adapter.readCurrent(id)).value.currentRevision, revision);
       }
       await page.keyboard.press('Enter');
+      if (armed) {
+        await page.locator('.desk-answer.answered').filter({ hasText: 'Question A?' }).waitFor();
+        assert.equal(count(), before + 1); assert.equal(writes, 1);
+        const questions = storage.desk.inspect(id).desk.deskQuestions;
+        assert.equal(questions.find(q => q.ticketId === 'A').currentAnswer.choice.option, 1);
+        assert.equal(questions.find(q => q.ticketId === 'B').currentAnswer, null);
+        console.log(`Armed polling focus passed: ${change}/${focus}`);
+        continue;
+      }
       await nextPoll();
       assert.equal(count(), before, `${change}/${focus}: Enter stored an answer after polling`);
       assert.equal(writes, 0, `${change}/${focus}: Enter sent a write after polling`);
@@ -169,8 +180,8 @@ async function verifyFocusAcrossPolling(context, origin, key) {
       await nextPoll();
       assert.equal(count(), before); assert.equal(writes, 0);
       assert.equal(await page.locator('dialog[open]').count(), 0);
-      // Explicitly choosing B resumes shortcuts without submitting on the selection Enter.
-      await tabTo(page, queue('B')); await page.keyboard.press('Enter');
+      // Explicitly choosing B with Space resumes shortcuts without submitting.
+      await tabTo(page, queue('B')); await page.keyboard.press('Space');
       await page.locator('.desk-question h2').getByText('Question B?', { exact: true }).waitFor();
       assert.equal(count(), before); assert.equal(writes, 0);
       await page.keyboard.press('2');
@@ -181,9 +192,9 @@ async function verifyFocusAcrossPolling(context, origin, key) {
     } finally { await page.close(); }
   }
 }
-async function verifyDialogAndWriteInvalidation(context, origin, key) {
-  // Each case starts with a deliberately selected question. The dialog operation
-  // may write its own answer/request; the subsequent global keys must add nothing.
+async function verifyDialogRearming(context, origin, key) {
+  // Preserve all 27 dialog/poll/close interleavings. Closing never answers; the
+  // displayed question becomes answerable after the delay, independent of focus.
   for (const kind of ['text', 'bulk', 'reopen']) for (const change of ['publication', 'taken', 'none']) for (const close of ['escape', 'cancel', 'confirm']) {
     const id = `Synthetic.Dialog.${kind}.${change}.${close}`;
     const created = prepareCreate({ id, title: 'Dialog selection regression', destination: 'No unintended answers', author });
@@ -228,13 +239,15 @@ async function verifyDialogAndWriteInvalidation(context, origin, key) {
       assert.equal(before, 1 + Number(close === 'confirm' && kind !== 'reopen'));
       assert.equal(beforeWrites, Number(close === 'confirm'));
       for (const shortcut of ['Enter', '1', '2', '3', 't']) await page.keyboard.press(shortcut);
+      assert(await paused.isVisible());
       await nextPoll();
       assert.equal(count(), before, `${kind}/${change}/${close}: shortcut stored an extra answer`);
       assert.equal(writes, beforeWrites, `${kind}/${change}/${close}: shortcut sent an extra POST`);
-      assert(await paused.isVisible()); assert.equal(await page.locator('dialog[open]').count(), 0);
-      // Fresh keyboard selection is the positive control, and does not itself answer.
-      const target = kind === 'text' && close === 'confirm' ? 'B' : 'A';
-      await tabTo(page, queue(target)); await page.keyboard.press('Enter');
+      assert.equal(await page.locator('dialog[open]').count(), 0);
+      const target = kind === 'text' && close === 'confirm'
+        ? storage.desk.inspect(id).desk.deskQuestions.find(q => q.state === 'pending').ticketId : 'A';
+      await page.locator('.desk[data-shortcuts=armed]').waitFor();
+      assert.equal(await page.locator('.desk-question').getAttribute('data-question-id'), `Q.${target}`);
       assert.equal(writes, beforeWrites); assert(!(await paused.isVisible()));
       await page.keyboard.press('Enter');
       await page.locator('.desk-answer.answered').filter({ hasText: `Question ${target}?` }).waitFor();
@@ -243,56 +256,155 @@ async function verifyDialogAndWriteInvalidation(context, origin, key) {
     } finally { await page.close(); }
   }
 }
-async function verifySelectionLifecycle(context, origin, key) {
-  const id = 'Synthetic.Selection';
-  const created = prepareCreate({ id, title: 'Selection lifecycle', destination: 'Only deliberate shortcuts', author });
+
+async function verifyContinuousKeyboard(browser, origin, key) {
+  // A separate browser context owns this clock. HTTP/SQLite are real; only the
+  // browser's 600 ms guard is advanced deterministically.
+  const context = await browser.newContext(); const page = await context.newPage();
+  page.setDefaultTimeout(10000);
+  const clockStart = new Date('2026-10-27T12:00:00Z');
+  await page.clock.install({ time: clockStart }); await page.clock.pauseAt(clockStart);
+  const id = 'Synthetic.Continuous';
+  const created = prepareCreate({ id, title: 'Continuous keyboard', destination: 'Answer only the displayed publication', author });
   assert.equal(created.kind, 'ok'); await storage.adapter.commit(created.value);
   const mutate = commands => apply(commands, undefined, id);
-  await mutate(['A', 'B'].flatMap(name => [create(name, name, `Question ${name}?`), claim(name), post(name, 'One')]));
+  const posted = (name, extra = {}) => post(name, 'One', 'needsKun', { options: [
+    { label: 'One', description: 'First' }, { label: 'Two', description: 'Second' }, { label: 'Three', description: 'Third' },
+  ], ...extra });
+  const withdraw = (name, version = 1) => ({ kind: 'deskQuestion.withdraw', ticketId: name,
+    claimantId: 'synthetic-worker', questionId: `Q.${name}`, questionVersion: version, reason: 'Changed premise' });
+  await mutate(['A', 'B', 'C', 'D', 'E', 'F', 'G'].flatMap(name => [create(name, name, `Question ${name}?`), claim(name), posted(name)]));
   await mutate([create('Previous', 'Previous', 'Previous?'), claim('Previous'), settle('Previous')]);
-  const page = await context.newPage(); page.setDefaultTimeout(10000);
-  let writes = 0;
-  page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/desk')) writes++; });
+  const answers = () => storage.desk.read(id).answers;
   const queue = name => page.locator('.desk-queue-item').filter({ hasText: `Question ${name}?` });
-  const nextPoll = () => page.waitForResponse(response => response.url().includes(`/api/maps/${id}/view?`));
-  const expectPaused = async () => {
-    const before = storage.desk.read(id).answers.length, beforeWrites = writes;
-    for (const key of ['Enter', '1', '2', '3', 't']) await page.keyboard.press(key);
-    await nextPoll();
-    assert.equal(storage.desk.read(id).answers.length, before); assert.equal(writes, beforeWrites);
-    assert(await page.locator('.desk > .desk-warning').isVisible());
+  const mode = () => page.locator('.desk').getAttribute('data-shortcuts');
+  const current = () => page.locator('.desk-question').getAttribute('data-question-id');
+  const waitMode = state => page.locator(`.desk[data-shortcuts=${state}]`).waitFor();
+  let pollNumber = 0, writes = 0;
+  const errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  await page.route('**/api/desk', async route => {
+    const body = route.request().postDataJSON(); writes++;
+    if (body.action === 'answer') {
+      const shown = await page.locator('.desk-question').evaluate(card => ({
+        questionId: card.dataset.questionId, questionVersion: Number(card.dataset.questionVersion),
+      }));
+      assert.equal(body.submissions.length, 1);
+      assert.deepEqual({ questionId: body.submissions[0].questionId, questionVersion: body.submissions[0].questionVersion }, shown);
+    }
+    await route.continue();
+  });
+  async function poll(commands = []) {
+    const title = `Poll ${++pollNumber}`;
+    await mutate([...commands, { kind: 'map.update', patch: { title } }]);
+    // Ask the existing poll loop to read now, without blurring or rearming.
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await page.getByRole('heading', { name: title, exact: true }).waitFor();
+  }
+  async function noShortcutWrites() {
+    const before = writes, count = answers().length;
+    for (const k of ['Enter', '1', '2', '3', 't']) await page.keyboard.press(k);
+    assert.equal(writes, before); assert.equal(answers().length, count);
     assert.equal(await page.locator('dialog[open]').count(), 0);
-  };
+  }
+  async function finishDelay() {
+    assert.equal(await mode(), 'waiting');
+    assert(await page.locator('.desk-question.desk-shortcuts-waiting').isVisible());
+    await page.clock.runFor(599); await noShortcutWrites(); assert.equal(await mode(), 'waiting');
+    await page.clock.runFor(1); assert.equal(await mode(), 'armed');
+  }
   try {
-    await page.goto(`${origin}/maps/${id}#key=${key}`); await queue('A').waitFor(); await expectPaused();
-    await queue('A').click(); await page.locator('body').click({ position: { x: 2, y: 2 } }); await expectPaused();
-    await queue('A').click();
-    // Native blur to BODY also invalidates a selection without a repaint.
-    await page.evaluate(() => document.activeElement.blur()); await expectPaused();
-    await queue('A').click();
-    await page.evaluate(() => { const root = document.querySelector('#main'); root.tabIndex = -1; root.focus(); }); await expectPaused();
-    await queue('A').click();
-    // Exercise both window event paths, even when the browser retains card focus.
-    await page.evaluate(() => { window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus')); }); await expectPaused();
-    await queue('A').click(); await mutate([{ kind: 'map.update', patch: { title: 'Revision changed without desk changes' } }]);
-    await page.getByRole('heading', { name: 'Revision changed without desk changes', exact: true }).waitFor(); await expectPaused();
-    // Clicking the visible question is explicit selection; unchanged polling preserves it.
-    await page.locator('.desk-question h2').click(); await nextPoll(); await page.keyboard.press('Enter');
-    await page.locator('.desk-summary').getByText(/已答 1/).waitFor(); await expectPaused();
-    assert.equal(writes, 1);
-    await queue('B').click(); await page.getByRole('button', { name: '请求重开', exact: true }).click();
-    await page.getByRole('textbox', { name: '重开原因和希望的答案' }).fill('Reopen without polling');
-    await page.getByRole('button', { name: '提交重开请求', exact: true }).click();
-    await page.getByRole('button', { name: '撤销重开请求', exact: true }).waitFor(); await expectPaused();
-    assert.equal(writes, 2); assert.equal(storage.desk.read(id).reopenRequests.length, 1);
-    await queue('B').click(); await page.getByRole('button', { name: '撤销重开请求', exact: true }).click();
-    await page.getByRole('button', { name: '撤销重开请求', exact: true }).waitFor({ state: 'detached' }); await expectPaused();
-    assert.equal(writes, 3); assert.equal(storage.desk.inspect(id).desk.reopenRequests.length, 0);
-    await tabTo(page, queue('B')); await page.keyboard.press('Enter'); assert.equal(writes, 3);
-    await page.keyboard.press('Enter'); await page.locator('.desk-summary').getByText(/已答 2/).waitFor(); assert.equal(writes, 4);
-    console.log('Selection lifecycle passed: initial/root/blur/window/revision/write/reopen/cancel; explicit selection survives unchanged poll.');
-  } finally { await page.close(); }
+    await page.goto(`${origin}/maps/${id}#key=${key}`); await queue('A').waitFor();
+    await page.clock.runFor(700); await noShortcutWrites(); assert.equal(await mode(), 'paused');
+    await tabTo(page, queue('A')); await page.keyboard.press('Space'); assert.equal(await mode(), 'armed');
+    // Queue order changes do not replace the displayed A, even if G jumps first.
+    await poll([withdraw('G'), posted('G', { gatesResearch: true })]);
+    assert.equal(await current(), 'Q.A'); assert.equal(await mode(), 'armed');
+    assert((await page.locator('.desk-queue-item').first().innerText()).includes('Question G?'));
+    // Focus and root loss cannot retarget a shortcut. Enter on queue B answers A.
+    await tabTo(page, queue('B')); await page.keyboard.press('Enter'); await waitMode('waiting');
+    assert.equal(answers().length, 1); assert.equal(answers()[0].questionId, 'Q.A');
+    assert.equal(await current(), 'Q.G');
+    // A second, non-repeat Enter inside 600 ms must not answer the next question.
+    await page.keyboard.press('Enter'); assert.equal(writes, 1); assert.equal(answers().length, 1);
+    await page.locator('.desk-layout').screenshot({ path: join(output, 'shortcut-delay.png') });
+    // Repeated unrelated publications/polls must neither reset nor complete the delay.
+    for (let n = 0; n < 3; n++) {
+      await poll([create(`Side${n}`, `Side${n}`, `Question Side${n}?`), claim(`Side${n}`), posted(`Side${n}`)]);
+      await page.clock.runFor(150); assert.equal(await mode(), 'waiting');
+    }
+    await page.clock.runFor(149); await noShortcutWrites();
+    await page.clock.runFor(1); assert.equal(await mode(), 'armed');
+    // Keyboard-only progression: no selection or click between these answers.
+    for (const k of ['2', '3', 'Enter']) {
+      const target = await current(), count = answers().length;
+      await poll(); assert.equal(await current(), target); assert.equal(await mode(), 'armed');
+      await page.evaluate(() => document.activeElement.blur());
+      assert.equal(await mode(), 'armed'); await page.keyboard.press(k); await waitMode('waiting');
+      assert.equal(answers().length, count + 1); assert.equal(answers().at(-1).questionId, target);
+      assert.equal(answers().at(-1).choice.option, k === 'Enter' ? 1 : Number(k));
+      await finishDelay();
+    }
+    // Buttons cannot override the current recommendation or number/text shortcut.
+    await page.locator('.desk-question .desk-option').nth(1).focus();
+    await page.keyboard.press('t'); await page.getByRole('textbox', { name: '文字答复', exact: true }).waitFor();
+    await page.keyboard.press('Escape'); await finishDelay();
+    const beforeOption = answers().length, optionTarget = await current();
+    await page.locator('.desk-question .desk-option').nth(2).focus(); await page.keyboard.press('Enter'); await waitMode('waiting');
+    assert.equal(answers().length, beforeOption + 1); assert.equal(answers().at(-1).questionId, optionTarget);
+    assert.equal(answers().at(-1).choice.option, 1); await finishDelay();
+    // BODY and the main root preserve an already armed current question.
+    await page.locator('body').click({ position: { x: 2, y: 2 } }); assert.equal(await mode(), 'armed');
+    await page.evaluate(() => { const root = document.querySelector('#main'); root.tabIndex = -1; root.focus(); });
+    assert.equal(await mode(), 'armed');
+    // Same-question refocus reads first, then re-arms after the full delay.
+    await page.evaluate(() => window.dispatchEvent(new Event('blur'))); await noShortcutWrites();
+    await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await waitMode('waiting'); await finishDelay();
+    // File/cancel Reopen Requests keep the displayed question, with the same guard.
+    const beforeRequests = writes, requestTarget = await current();
+    await page.getByRole('button', { name: '请求重开', exact: true }).click();
+    await page.getByRole('textbox', { name: '重开原因和希望的答案' }).fill('Reconsider');
+    await page.getByRole('button', { name: '提交重开请求', exact: true }).click(); await waitMode('waiting');
+    assert.equal(writes, beforeRequests + 1); assert.equal(await current(), requestTarget); await finishDelay();
+    await page.getByRole('button', { name: '撤销重开请求', exact: true }).click(); await waitMode('waiting');
+    assert.equal(writes, beforeRequests + 2); assert.equal(await current(), requestTarget); await finishDelay();
+    // A changed current publication while unfocused remains paused across time,
+    // refocus, further polls and dialog closure until explicitly reselected.
+    const currentName = (await current()).slice(2);
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+    await mutate([withdraw(currentName), posted(currentName)]);
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await page.getByRole('heading', { name: '问题已变，请重新选择题目后再回答。', exact: true }).waitFor();
+    await page.clock.runFor(1000); await poll(); await noShortcutWrites(); assert.equal(await mode(), 'paused');
+    await queue(currentName).click(); assert.equal(await mode(), 'armed');
+    // A current question removed while a delay is pending cancels that timer.
+    await page.keyboard.press('t'); await page.keyboard.press('Escape'); assert.equal(await mode(), 'waiting');
+    await poll([withdraw(currentName, 2)]); await page.clock.runFor(1000); await noShortcutWrites();
+    assert.equal(await mode(), 'paused');
+    // Release the interruption, but merely displaying another default is unarmed.
+    await page.getByRole('button', { name: '已了解，查看当前题目', exact: true }).click();
+    await page.clock.runFor(1000); await noShortcutWrites(); assert.equal(await mode(), 'paused');
+    // A different question ID must not inherit authority even at the same version.
+    await queue('Side0').click();
+    await poll([withdraw('Side0'), create('Replacement', 'Replacement', 'Question Replacement?'), claim('Replacement'), posted('Replacement')]);
+    await page.clock.runFor(1000); await noShortcutWrites(); assert.equal(await mode(), 'paused');
+    await queue('Replacement').click(); assert.equal(await current(), 'Q.Replacement'); assert.equal(await mode(), 'armed');
+    // Closing a dialog cannot erase a current-publication change observed inside it.
+    await page.keyboard.press('t');
+    await poll([withdraw('Replacement'), posted('Replacement')]);
+    assert(await page.getByRole('button', { name: '提交文字答复', exact: true }).isDisabled());
+    await page.keyboard.press('Escape'); await page.clock.runFor(1000); await noShortcutWrites();
+    assert.equal(await mode(), 'paused'); await queue('Replacement').click(); assert.equal(await mode(), 'armed');
+    // Settlement of the currently edited answer is another external invalidation.
+    await page.locator('.desk-answer').filter({ hasText: 'Question A?' }).getByRole('button', { name: '修改答复' }).click();
+    fakeTime += 15000; storage.desk.takeEligible(id, 'synthetic-worker');
+    await poll([settle('A', answers().find(a => a.questionId === 'Q.A'))]);
+    await page.clock.runFor(1000); await noShortcutWrites(); assert.equal(await mode(), 'paused');
+    assert.deepEqual(errors, []);
+    console.log('Continuous keyboard passed: 599/600 ms, repeated polls, queue order, focus, dialogs, Reopen, refocus and external changes.');
+  } finally { await context.close(); }
 }
+
 try {
   const created = prepareCreate({ id: mapId, title: '答题台 · 合成示例', destination: '验证关键选择，形成一份可以执行的计划', author });
   await storage.adapter.commit(created.value);
@@ -325,8 +437,8 @@ try {
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.screenshot({ path: join(output, '375px.png'), fullPage: true });
   await page.setViewportSize({ width: 1280, height: 960 }); await page.waitForTimeout(250);
-  await verifyDialogAndWriteInvalidation(context, `http://127.0.0.1:${port}`, key);
-  await verifySelectionLifecycle(context, `http://127.0.0.1:${port}`, key);
+  await verifyContinuousKeyboard(browser, `http://127.0.0.1:${port}`, key);
+  await verifyDialogRearming(context, `http://127.0.0.1:${port}`, key);
   await verifyFocusAcrossPolling(context, `http://127.0.0.1:${port}`, key);
   await verifyFocusAndChangedQuestions(context, `http://127.0.0.1:${port}`, key);
   // Viewing and cancelling do nothing; whitespace is disabled; drafts survive desk-only polling.
@@ -439,7 +551,7 @@ try {
     assert.equal(await page.locator('.desk').count(), 0);
   }
   assert.equal((await page.request.post(`http://127.0.0.1:${port}/api/desk`, { data: {} })).status(), 404);
-  console.log('Browser evidence passed: light/dark/375px; fragment/storage; Tab/Enter queue/text/options; six polling/focus interleavings; 27 dialog interleavings; root/window/revision/write/reopen selection invalidation; explicit selection and unchanged-poll positive controls; changed-question pause; keyboard/text/bulk/edit; live polling; stale reopen list; cancellation; Taken/Settled; requested-option marker and text context; restart; disabled UI and preserved fragments; no script/CSP errors across all pages.');
+  console.log('Browser evidence passed: light/dark/375px; fragment/storage; Tab/Space controls; 12 armed/unarmed polling/focus interleavings; 27 dialog interleavings; 599/600 ms continuous keyboard, root/revision/queue-order preservation and refocus/write/reopen delays; explicit selection and unchanged-poll positive controls; changed-question pause; keyboard/text/bulk/edit; live polling; stale reopen list; cancellation; Taken/Settled; requested-option marker and text context; restart; disabled UI and preserved fragments; no script/CSP errors across all pages.');
 } finally {
   await browser?.close(); await service?.stop(); storage.close(); rmSync(directory, { recursive: true, force: true });
 }

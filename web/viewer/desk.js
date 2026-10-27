@@ -1,12 +1,11 @@
 // Human responses only. The capability stays in this closure, never in persistent page storage.
+const SHORTCUT_ARM_DELAY_MS = 600;
+
 export function createDesk({ h, mapId, key, refresh }) {
   const element = h('section', { class: 'desk', 'aria-label': '答题台' });
   const content = h('div');
   const status = h('p', { class: 'desk-feedback', role: 'status', 'aria-live': 'polite' });
-  // This non-answering focus target survives every repaint. Shortcut authority is
-  // an explicit question selection in this UI version, never the default card.
-  const shortcutPause = h('p', { class: 'desk-warning', role: 'status', tabindex: '-1', hidden: true },
-    '快捷键已暂停。请点击当前题目或在待答列表中选择题目后继续；也可直接选择选项、打开文字答复。');
+  const shortcutPause = h('p', { class: 'desk-warning', role: 'status', tabindex: '-1', hidden: true });
   const dialog = h('dialog', { class: 'desk-dialog', 'aria-label': '确认答复' });
   element.append(status, shortcutPause, content, dialog);
   const names = { pending: '待答', answered: '已答 · 等待取走', taken: '已取走 · 等待结算', settled: '已结算', withdrawn: '已撤回', superseded_by_reopen: '已重开 · 旧题留档' };
@@ -14,7 +13,8 @@ export function createDesk({ h, mapId, key, refresh }) {
   const identity = q => `${q.questionId}/${q.questionVersion}`;
   const choiceText = choice => !choice ? '尚未回答' : 'text' in choice ? choice.text : `${choice.option}. ${choice.label}`;
   let data = null, fingerprint = '', active = null, changedQuestion = null, busy = false, editor = null;
-  let uiVersion = 0, explicitSelection = null;
+  let armedQuestion = null, armingQuestion = null, armTimer = null, externalPause = false, displayed = false;
+  let inactive = false, focusCheck = 0, destroyed = false;
   const interactive = 'button,input,textarea,select,a,summary,[contenteditable],[role="button"],[role="link"]';
   const selected = new Set();
   const button = (label, fn, props = {}) => {
@@ -24,24 +24,45 @@ export function createDesk({ h, mapId, key, refresh }) {
   const notice = message => { status.textContent = message; };
   const title = q => h('span', null, h('code', null, q.ticketId), ` · 第 ${q.questionVersion} 版`);
   const answer = (q, choice) => ({ questionId: q.questionId, questionVersion: q.questionVersion, choice });
-  function pauseShortcuts() {
-    uiVersion++; explicitSelection = null; shortcutPause.hidden = !key;
+  function updateShortcutUI() {
+    const mode = armedQuestion === active && active ? 'armed' : armingQuestion === active && active ? 'waiting' : 'paused';
+    element.dataset.shortcuts = mode;
+    shortcutPause.hidden = !key || mode === 'armed';
+    shortcutPause.textContent = mode === 'waiting'
+      ? '当前题目已高亮，约 0.6 秒后可用 Enter / 1–3 / t 继续。'
+      : '快捷键已暂停。请点击当前题目或在待答列表中选择题目后继续（Tab 定位，空格选题）。';
+    const card = content.querySelector('.desk-question');
+    card?.classList.toggle('desk-shortcuts-waiting', mode === 'waiting');
+    card?.classList.toggle('desk-shortcuts-armed', mode === 'armed');
   }
-  const hasSelection = () => explicitSelection?.question === active && explicitSelection?.version === uiVersion;
-  const hasQuestionFocus = () => !!document.activeElement?.closest('.desk-question') && content.contains(document.activeElement);
+  function pauseShortcuts() {
+    clearTimeout(armTimer); armTimer = null; armedQuestion = null; armingQuestion = null; updateShortcutUI();
+  }
+  function armShortcuts(delayed = false) {
+    pauseShortcuts();
+    if (!key || !active || externalPause || changedQuestion || busy || dialog.open || inactive || destroyed) return;
+    if (!delayed) armedQuestion = active;
+    else {
+      const target = active;
+      armingQuestion = target;
+      armTimer = setTimeout(() => {
+        if (armingQuestion === target && active === target) armShortcuts();
+      }, SHORTCUT_ARM_DELAY_MS);
+    }
+    updateShortcutUI();
+  }
   function chooseQuestion(q) {
-    changedQuestion = null; active = q ? identity(q) : null; render();
+    pauseShortcuts(); changedQuestion = null; externalPause = false; active = q ? identity(q) : null; render(true);
     const card = content.querySelector('.desk-question');
     card.focus(); card.scrollIntoView({ block: 'nearest' });
-    if (q && live(q)) { explicitSelection = { question: identity(q), version: uiVersion }; shortcutPause.hidden = true; }
+    if (q && live(q)) armShortcuts();
   }
-  function closeEditor() {
+  function closeEditor(resume = true) {
     editor = null;
     if (dialog.open) {
       pauseShortcuts(); dialog.close();
-      // The opener may have been replaced while the modal held focus. Even a
-      // successful answer authorizes no shortcut on the newly displayed card.
       if (!element.hidden && key) shortcutPause.focus({ preventScroll: true });
+      if (resume) armShortcuts(true);
     }
     dialog.replaceChildren();
   }
@@ -49,7 +70,8 @@ export function createDesk({ h, mapId, key, refresh }) {
 
   async function write(payload) {
     if (!canWrite()) return false;
-    busy = true; render(); updateEditor();
+    const currentAtStart = active;
+    busy = true; pauseShortcuts(); render(); updateEditor();
     let ok = false;
     try {
       const response = await fetch('/api/desk', { method: 'POST', cache: 'no-store', signal: AbortSignal.timeout(10000),
@@ -63,20 +85,24 @@ export function createDesk({ h, mapId, key, refresh }) {
       }
     } catch { notice('连接中断，提交结果未知。请查看最新状态后再决定是否重试。'); }
     finally {
-      busy = false;
-      if (ok) closeEditor();
+      if (ok) closeEditor(false);
       // No automatic retry: an unknown receipt may already have committed.
-      try { await refresh(); } catch { notice('连不上服务，显示的是上次看到的答复；提交结果请恢复连接后核对。'); }
-      render(); updateEditor();
+      let refreshed = false;
+      try { await refresh(); refreshed = true; } catch { notice('连不上服务，显示的是上次看到的答复；提交结果请恢复连接后核对。'); }
+      busy = false;
+      const ownTransition = ok && refreshed && !externalPause && active === currentAtStart;
+      if (ownTransition && payload.action === 'answer') active = null;
+      render(ownTransition); updateEditor();
+      if (ownTransition) armShortcuts(true);
     }
     return ok;
   }
   async function submit(q, choice) {
-    if (await write({ action: 'answer', submissions: [answer(q, choice)] })) { active = null; render(); }
+    await write({ action: 'answer', submissions: [answer(q, choice)] });
   }
   function openText(q) {
     if (!canWrite()) return;
-    closeEditor();
+    closeEditor(false); pauseShortcuts();
     const input = h('textarea', { rows: 5, 'aria-label': '文字答复', placeholder: '写下你的答案，或说明还需要哪些材料' });
     const save = button('提交文字答复', () => { if (input.value.trim()) submit(q, { text: input.value }); }, { disabled: true });
     const warning = h('p', { class: 'desk-warning', role: 'status' });
@@ -89,7 +115,7 @@ export function createDesk({ h, mapId, key, refresh }) {
   function openBulk() {
     const questions = data.deskQuestions.filter(q => selected.has(identity(q)) && q.state === 'pending' && q.triage === 'followRecommendation');
     if (!canWrite() || !questions.length) return;
-    closeEditor();
+    closeEditor(false); pauseShortcuts();
     const save = button(`确认这 ${questions.length} 题的完整推荐答案`, async () => {
       if (await write({ action: 'answer', submissions: questions.map(q => answer(q, { option: q.recommendedOption })) })) selected.clear();
     });
@@ -102,7 +128,7 @@ export function createDesk({ h, mapId, key, refresh }) {
   }
   function openReopen(target) {
     if (!canWrite()) return;
-    closeEditor();
+    closeEditor(false); pauseShortcuts();
     const warning = h('p', { class: 'desk-warning', role: 'status' });
     const body = h('div');
     editor = { kind: 'reopen', target, warning, body, controls: [] };
@@ -157,7 +183,8 @@ export function createDesk({ h, mapId, key, refresh }) {
       button('已了解，查看当前题目', () => chooseQuestion(null)));
     if (!q) return h('article', { class: 'desk-question card-box', tabindex: '-1' }, h('h2', null, '当前没有待答题'), h('p', { class: 'desk-muted' }, 'agent 发布新题后会出现在这里。已答题的处理进度在下方。'));
     const context = data.reopenContexts.find(c => c.ticketId === q.ticketId);
-    const card = h('article', { class: 'desk-question card-box', tabindex: '-1' }, title(q), h('h2', null, q.question),
+    const card = h('article', { class: 'desk-question card-box', tabindex: '-1',
+      'data-question-id': q.questionId, 'data-question-version': q.questionVersion }, title(q), h('h2', null, q.question),
       h('p', { class: 'desk-impact' }, `解锁 ${q.immediateUnlocks} 题 · 下游未定 ${q.downstreamUnsettled} 题${q.gatesResearch ? ' · 决定是否开展长调研' : ''}`),
       h('p', null, h('strong', null, '为什么需要你：'), q.whyKun),
       h('p', { class: 'desk-muted' }, `${q.triage === 'needsKun' ? '需要你看' : '照推荐即可'} · ${q.triageReason}`),
@@ -170,19 +197,21 @@ export function createDesk({ h, mapId, key, refresh }) {
         i + 1 === q.recommendedOption && h('small', null, '推荐'), i + 1 === q.requestedOption && h('small', null, 'Kun 要求'),
       ], () => submit(q, { option: i + 1 }), { class: 'desk-option', disabled: !canWrite() }))),
       button('写文字答复 · t', () => openText(q), { disabled: !canWrite() }),
-      h('p', { class: 'desk-muted' }, '选项选中即提交 · 明确选题后：Enter 推荐 · 1–3 选择 · t 文字。打开、查看和取消都不会作答。'));
+      h('p', { class: 'desk-muted' }, '点击选项即提交 · 快捷键只回答当前题：Enter 推荐 · 1–3 选择 · t 文字。Tab 定位按钮，空格操作。'));
     card.onclick = event => { if (!event.target.closest(interactive)) chooseQuestion(q); };
     return card;
   }
-  function render() {
+  function render(ownTransition = false) {
     if (!data) return;
     const losesFocus = content.contains(document.activeElement);
-    // Every repaint invalidates intent, regardless of where focus currently is
-    // (including a dialog or BODY). Unchanged polls never call render.
-    pauseShortcuts();
     const pending = data.deskQuestions.filter(q => q.state === 'pending');
     const current = changedQuestion ? null : data.deskQuestions.find(q => identity(q) === active && live(q)) ?? pending[0];
-    active = current ? identity(current) : null;
+    const nextActive = current ? identity(current) : null;
+    if (active !== nextActive) {
+      pauseShortcuts();
+      if (displayed && !ownTransition) externalPause = true;
+    }
+    active = nextActive; displayed = true;
     for (const id of selected) if (!pending.some(q => identity(q) === id && q.triage === 'followRecommendation')) selected.delete(id);
     const queue = h('nav', { class: 'desk-queue card-box', 'aria-label': '待答题' }, h('h2', null, `待答 · ${pending.length}`));
     let group;
@@ -225,41 +254,57 @@ export function createDesk({ h, mapId, key, refresh }) {
       h('div', { class: 'desk-summary' }, h('span', null, `待答 ${pending.length} · 已答 ${count('answered')} · 已取走 ${count('taken')} · 已结算 ${count('settled')}`),
         h('span', { class: 'desk-muted' }, data.quietUntil && Date.parse(data.quietUntil) > Date.now() ? `本轮最早可取走：${new Date(data.quietUntil).toLocaleTimeString()}` : '答复取走后仍需 agent 结算')),
       h('div', { class: 'desk-layout' }, queue, questionCard(current)), bulk, requests, history, settled);
-    if (losesFocus && !dialog.open && !element.hidden && key) shortcutPause.focus({ preventScroll: true });
+    updateShortcutUI();
+    // Polls can remove the focused button. Focus has no shortcut authority and
+    // must not turn a queued Enter into an action on that vanished control.
+    if (losesFocus && !dialog.open && !element.hidden && key) {
+      (shortcutPause.hidden ? content.querySelector('.desk-question') : shortcutPause).focus({ preventScroll: true });
+    }
   }
   const keydown = event => {
-    if (element.hidden || dialog.open || event.target.closest(interactive)) return;
-    // Also check focus synchronously: browser focusout delivery after node removal
-    // is not reliable, and a page/root Enter must never inherit the last selection.
-    if (!hasQuestionFocus()) pauseShortcuts();
-    if (!hasSelection() || !canWrite() || event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (element.hidden || dialog.open || event.target.closest('input,textarea,select,[contenteditable]')
+      || event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.key !== 'Enter' && !/^[1-3t]$/i.test(event.key)) return;
+    // Reserve shortcut keys even while paused: native Enter on a focused queue,
+    // option or history control must never select/answer a different question.
+    event.preventDefault();
+    if (!active || armedQuestion !== active || !canWrite() || inactive || event.repeat) return;
     const q = data?.deskQuestions.find(q => identity(q) === active && live(q)); if (!q) return;
     const option = event.key === 'Enter' ? q.recommendedOption : /^[1-3]$/.test(event.key) ? Number(event.key) : null;
     if (option && q.options[option - 1]) { event.preventDefault(); submit(q, { option }); }
     else if (event.key.toLowerCase() === 't') { event.preventDefault(); openText(q); }
   };
-  const focusout = event => {
-    // Native focus transfer temporarily exposes BODY before the destination gains
-    // focus. Respect that destination so the notice cannot move a clicked control.
-    if (event.relatedTarget?.closest(`.desk-question,dialog,${interactive}`)) return;
-    queueMicrotask(() => { if (!dialog.open && !hasQuestionFocus()) pauseShortcuts(); });
+  const windowBlur = () => {
+    inactive = true; focusCheck++; pauseShortcuts();
   };
-  const windowFocus = () => pauseShortcuts();
+  const windowFocus = async () => {
+    if (!inactive || document.hidden || destroyed) return;
+    const check = ++focusCheck;
+    // Hidden pages do not poll. Read first so an unseen replacement cannot be
+    // armed for 600 ms using an obsolete local snapshot.
+    try { await refresh(); } catch {
+      if (check === focusCheck && !destroyed) { inactive = false; externalPause = true; pauseShortcuts(); }
+      return;
+    }
+    if (check !== focusCheck || destroyed || document.hidden) return;
+    inactive = false; armShortcuts(true);
+  };
+  const visibility = () => { if (document.hidden) windowBlur(); else windowFocus(); };
   document.addEventListener('keydown', keydown);
-  document.addEventListener('focusout', focusout);
-  document.addEventListener('visibilitychange', windowFocus);
+  document.addEventListener('visibilitychange', visibility);
   window.addEventListener('focus', windowFocus);
-  window.addEventListener('blur', windowFocus);
+  window.addEventListener('blur', windowBlur);
   return { element, destroy() {
-    closeEditor(); element.remove(); document.removeEventListener('keydown', keydown);
-    document.removeEventListener('focusout', focusout); document.removeEventListener('visibilitychange', windowFocus);
-    window.removeEventListener('focus', windowFocus); window.removeEventListener('blur', windowFocus);
+    destroyed = true; focusCheck++; closeEditor(false); pauseShortcuts(); element.remove(); document.removeEventListener('keydown', keydown);
+    document.removeEventListener('visibilitychange', visibility);
+    window.removeEventListener('focus', windowFocus); window.removeEventListener('blur', windowBlur);
   }, update(next, revision) {
     if (!next) return;
     // Polling must never silently move a pending keystroke onto a different publication.
     // Keep the interruption across subsequent polls, including when no pending question remains.
     if (active && !next.deskQuestions.some(q => identity(q) === active && live(q))) {
       changedQuestion = data.deskQuestions.find(q => identity(q) === active); active = null;
+      externalPause = true; pauseShortcuts();
     }
     data = next; const nextFingerprint = JSON.stringify([revision, next]);
     if (fingerprint !== nextFingerprint) { fingerprint = nextFingerprint; render(); updateEditor(); }

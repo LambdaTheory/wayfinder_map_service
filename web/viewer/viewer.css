@@ -179,6 +179,8 @@ body.down #main, body.down .drawer { opacity: .45; filter: grayscale(.6); }
 .desk-queue-item span { font-size: 11px; color: var(--muted); }
 .desk .desk-queue-item[aria-current="true"] { background: var(--open-bg); border-color: var(--open); }
 .desk-question { padding: 26px; }
+.desk-question.desk-shortcuts-waiting { outline: 3px solid var(--new); background: var(--new-bg); }
+.desk-question.desk-shortcuts-armed { outline: 2px solid var(--open); }
 .desk-question h2 { font-size: 24px; line-height: 1.5; margin-top: 10px; }
 .desk-impact { color: var(--open); font-size: 13px; }
 .desk-muted { color: var(--muted); font-size: 13px; }
