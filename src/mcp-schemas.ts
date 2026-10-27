@@ -132,9 +132,10 @@ function definitions(version: Schema, answerDeskEnabled = false): Tool[] {
       outputSchema: root({ oneOf: [object({ kind: literal('listed'), maps: array(object({ mapId: id, title: text, destination: text, currentRevision: revision })),
         nextAfterMapId: { anyOf: [id, literal(null)] } }), ...errors] }) },
     { name: 'map_read', description: workflowContract.toolDescriptions.map_read,
-      inputSchema: root({ ...object({ mapId: id, revision, ...(answerDeskEnabled ? { claimantId: id, version } : {}) }, ['mapId']),
-        ...(answerDeskEnabled ? { oneOf: [{ not: { anyOf: [{ required: ['claimantId'] }, { required: ['version'] }] } },
-          { required: ['claimantId', 'version'], not: { required: ['revision'] } }] } : {}) }),
+      inputSchema: root(object({ mapId: id, revision, ...(answerDeskEnabled ? {
+        claimantId: { ...id, description: 'Supply together with version and omit revision to take eligible Answer Desk responses for this Claimant. Delivered items are durably marked Taken. Omit both for inspection without taking.' },
+        version: { ...version, description: `${version.description} Required together with claimantId for a taking current read; omit revision. Omit both fields for inspection without taking.` },
+      } : {}) }, ['mapId'])),
       outputSchema: root({ oneOf: [
         ...(answerDeskEnabled ? [object({ kind: literal('found'), revision: fullRevision, frontier: array(id), viewerUrl, deskQuestions: array(publication) }, ['kind', 'revision', 'frontier', 'deskQuestions']),
         object({ kind: literal('found'), revision: fullRevision, frontier: array(id), viewerUrl, deskQuestions: array(currentQuestion), reopenRequests: array(reopenRequest), reopenContexts: array(reopenContext),

@@ -15,6 +15,7 @@ import { createMapMcpServer, answerDeskMapTools, workflowContract } from '../src
 import { serveLocalMcp } from '../src/mcp-http-internal.js';
 import { createHttpTestClient } from './helpers/mcp-http-client.mjs';
 import { chatgptDiscovery } from './helpers/chatgpt-discovery.js';
+import { completedTaskContent as result } from './helpers/mcp-task-result.mjs';
 
 const cleanups: (() => unknown | Promise<unknown>)[] = [];
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn(); vi.useRealTimers(); });
@@ -59,7 +60,6 @@ async function fixture(publish = true, faults: Parameters<typeof sqliteLifecycle
   return { storage, path, lifecycle, apply, admission, delivery, answer, start, inspect, quiet };
 }
 function clock() { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-10-27T00:00:00.000Z')); }
-function result(task: Record<string, unknown>) { return (task.result as { structuredContent: Record<string, unknown> }).structuredContent; }
 
 test('task creation and quiet expiry take nothing; first collection takes latest answers once and preserves Revision/history', async () => {
   clock(); const f = await fixture(); const old = f.answer(); const wait = f.start();
@@ -212,8 +212,8 @@ async function http(f: Awaited<ReturnType<typeof fixture>>, toolsOnly = false) {
   const service = await serveLocalMcp(f.storage, { databasePath: f.path, port, token, actorId: 'actor', clientId: 'client', answerDeskEnabled: true, toolsOnly });
   cleanups.push(() => service.stop()); return { port, service };
 }
-async function rpc(port: number, method: string, params: Record<string, unknown>, tasks: boolean | Record<string, unknown> = true) {
-  const response = await fetch(`http://127.0.0.1:${port}/mcp`, { method: 'POST', headers: {
+async function rpcResponse(port: number, method: string, params: Record<string, unknown>, tasks: boolean | Record<string, unknown> = true) {
+  return fetch(`http://127.0.0.1:${port}/mcp`, { method: 'POST', headers: {
     Authorization: `Bearer ${token}`, Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json',
     'MCP-Protocol-Version': '2026-07-28', 'Mcp-Method': method,
     ...(['tools/call', 'tasks/get', 'tasks/cancel', 'tasks/update'].includes(method) ? { 'Mcp-Name': String(params.name ?? params.taskId) } : {}),
@@ -221,7 +221,9 @@ async function rpc(port: number, method: string, params: Record<string, unknown>
     'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientInfo': { name: 'synthetic', version: '1' },
     'io.modelcontextprotocol/clientCapabilities': typeof tasks === 'object' ? tasks : tasks ? { extensions: { [TASKS_EXTENSION]: {} } } : {},
   } } }) });
-  return response.json() as Promise<{ result: Record<string, unknown>; error?: object }>;
+}
+async function rpc(port: number, method: string, params: Record<string, unknown>, tasks: boolean | Record<string, unknown> = true) {
+  return (await rpcResponse(port, method, params, tasks)).json() as Promise<{ result: Record<string, unknown>; error?: object }>;
 }
 
 test('modern Tasks extension discovery, per-request collection, range/TTL, cancel/update errors and no subscriptions', async () => {
@@ -298,12 +300,53 @@ test.each(['2025-11-25', '2026-07-28'] as const)('%s shutdown interrupts a conne
   expect((await waiting).structuredContent).toMatchObject({ outcome: 'interrupted', items: [] }); await stopped;
 });
 
-test('a modern task completes across fresh HTTP server instances and retains the collected result', async () => {
+test('a lost modern task response is recoverable through codec-valid retry and current read', async () => {
   let now = Date.now(); const f = await fixture(true, { now: () => new Date(now).toISOString() }); const h = await http(f);
   const task = (await rpc(h.port, 'tools/call', { name: 'map_wait', arguments: { mapId, claimantId, version } })).result;
   now = Date.now() - 15_000; const a = f.answer(); now = Date.now();
   expect(f.inspect().desk.deskQuestions[0]!.state).toBe('answered');
+  // Drop the first response without decoding it: receipt is unknown after commit.
+  const lost = await rpcResponse(h.port, 'tasks/get', { taskId: task.taskId });
+  expect(lost.ok).toBe(true); await lost.body!.cancel();
+  expect(f.inspect().desk.deskQuestions[0]!).toMatchObject({ state: 'taken', currentAnswer: a });
   const completed = (await rpc(h.port, 'tasks/get', { taskId: task.taskId })).result;
   expect(result(completed)).toMatchObject({ outcome: 'delivered', items: [a] });
   expect((await rpc(h.port, 'tasks/get', { taskId: task.taskId })).result).toEqual(completed);
+  const read = await rpc(h.port, 'tools/call', { name: 'map_read', arguments: { mapId } }, false);
+  expect(read.result.structuredContent).toMatchObject({ deskQuestions: [{ state: 'taken', currentAnswer: a }] });
+});
+
+test.each((['2025-11-25', '2026-07-28'] as const).flatMap(protocol => [false, true].map(progress => ({ protocol, progress }))))(
+  '$protocol HTTP disconnect cancels a blocking wait before a later answer (progress=$progress)', async ({ protocol, progress }) => {
+  let now = Date.now(); const f = await fixture(true, { now: () => new Date(now).toISOString() }); const h = await http(f);
+  const { client, transport } = await createHttpTestClient(h.port, token, protocol); cleanups.push(() => client.close());
+  const started = deferred(); const block = DeskDelivery.prototype.block;
+  const spy = vi.spyOn(DeskDelivery.prototype, 'block').mockImplementation(function (this: DeskDelivery, ...args) {
+    const waiting = block.apply(this, args); started.resolve(); return waiting;
+  });
+  cleanups.push(() => spy.mockRestore());
+  const abort = new AbortController();
+  const waiting = fetch(`http://127.0.0.1:${h.port}/mcp`, { method: 'POST', signal: abort.signal, headers: {
+    Authorization: `Bearer ${token}`, Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json',
+    'MCP-Protocol-Version': protocol, 'Mcp-Method': 'tools/call', 'Mcp-Name': 'map_wait',
+    ...(transport.sessionId ? { 'Mcp-Session-Id': transport.sessionId } : {}),
+  }, body: JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/call', params: {
+    name: 'map_wait', arguments: { mapId, claimantId, version, maxWaitSeconds: 600 }, _meta: {
+      ...(progress ? { progressToken: 'disconnect-probe' } : {}),
+      ...(protocol === '2026-07-28' ? { 'io.modelcontextprotocol/protocolVersion': protocol,
+        'io.modelcontextprotocol/clientInfo': { name: 'synthetic', version: '1' }, 'io.modelcontextprotocol/clientCapabilities': {} } : {}),
+    },
+  } }) }).then(response => response.text());
+  const rejected = expect(waiting).rejects.toThrow(); await started.promise;
+  // Raw fetch abort: no MCP notifications/cancelled is sent.
+  abort.abort(); await rejected;
+  await vi.waitFor(() => {
+    const records = readFileSync(`${f.path}.calls.jsonl`, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    expect(records.filter(record => record.tool === 'map_wait')).toMatchObject([{ result: 'transport-failure' }]);
+  });
+  // Submit only after the abandoned call has ended, with an expired Quiet Window.
+  now = Date.now() - 15_000; const a = f.answer(); now = Date.now();
+  expect(f.inspect().desk.deskQuestions[0]!).toMatchObject({ state: 'answered', currentAnswer: a });
+  const next = await client.callTool({ name: 'map_wait', arguments: { mapId, claimantId, version, maxWaitSeconds: 1 } });
+  expect(next.structuredContent).toMatchObject({ outcome: 'delivered', items: [a] });
 });

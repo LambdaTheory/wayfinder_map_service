@@ -140,12 +140,19 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
   const responseContext = new AsyncLocalStorage<ServerResponse>();
   const control: ToolCallControl = call => {
     const response = responseContext.getStore();
-    const work = metadata.observeTool(() => admission.admit(call), classifyCallResult).catch(error => {
+    // Both eras must cancel a suspended blocking wait on HTTP disconnect,
+    // including legacy SSE peers that send no notifications/cancelled.
+    // Only blocking waits consume this signal; writes keep their publication boundary.
+    const disconnected = new AbortController();
+    const close = () => disconnected.abort();
+    response?.once('close', close);
+    if (response?.destroyed) close();
+    const work = metadata.observeTool(() => admission.admit(suspend => call(suspend, disconnected.signal)), classifyCallResult).catch(error => {
       // MCP cancellation suppresses the protocol response. End its HTTP stream
       // too, otherwise the legacy SDK leaves an empty SSE exchange suspended.
       if (error instanceof WaitCancelled && response && !response.destroyed && !response.writableEnded) response.end();
       throw error;
-    });
+    }).finally(() => response?.removeListener('close', close));
     calls.add(work); void work.then(() => calls.delete(work), () => calls.delete(work));
     return work;
   };

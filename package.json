@@ -18,6 +18,7 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.4.0",
+    "@modelcontextprotocol/ext-tasks": "0.2.2",
     "@types/node": "26.6.1",
     "ajv": "8.20.0",
     "typescript": "7.0.2",

@@ -18,7 +18,7 @@ export { workflowContract } from './workflow.generated.js';
 // model no server instructions; its write tools state the release instead.
 export interface ToolAuthorConfiguration { readonly actorId: string; readonly clientId: string; readonly viewerOrigin?: string; readonly toolsOnly?: boolean; readonly answerDeskEnabled?: boolean }
 // The HTTP host owns admission/draining, including work whose response is lost.
-export type ToolCallControl = (call: (suspend: () => void) => Promise<CallToolResult>) => Promise<CallToolResult>;
+export type ToolCallControl = (call: (suspend: () => void, disconnected?: AbortSignal) => Promise<CallToolResult>) => Promise<CallToolResult>;
 
 // This advanced SDK seam deliberately retains M1's structured validation paths
 // instead of the high-level SDK's generic text errors/duplicate-text convenience.
@@ -88,7 +88,8 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
       requireTasks(ctx); throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'The wait has no input phase');
     });
   }
-  const callTool = async (request: CallToolRequest, ctx: ServerContext, suspend: () => void): Promise<CallToolResult> => {
+  const callTool = async (request: CallToolRequest, ctx: ServerContext, suspend: () => void, disconnected?: AbortSignal): Promise<CallToolResult> => {
+    const waitSignal = disconnected ? AbortSignal.any([ctx.mcpReq.signal, disconnected]) : ctx.mcpReq.signal;
     const tool = tools.find(tool => tool.name === request.params.name);
     if (!tool) throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Unknown Map tool');
     // Legacy task marker only: modern SDK requests strip this deprecated field before dispatch.
@@ -161,7 +162,7 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
         if ('content' in wait) return wait;
         if (task) return delivery.handle(wait);
         suspend();
-        return await delivery.block(wait, ctx.mcpReq.signal, async elapsed => {
+        return await delivery.block(wait, waitSignal, async elapsed => {
           const progressToken = ctx.mcpReq._meta?.progressToken;
           if (progressToken !== undefined) await ctx.mcpReq.notify({ method: 'notifications/progress',
             params: { progressToken, progress: elapsed, total: wait.args.maxWaitSeconds, message: 'Waiting for Answer Desk responses' } });
@@ -198,14 +199,14 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
       if (raw.includeSnapshot === true) return envelope({ ...commit, ...link });
       return envelope({ kind: 'committed', mapId: commit.revision.mapId, revision: commit.revision.revision, changes: commit.revision.changes, ...link });
     } catch (error) {
-      if (ctx.mcpReq.signal.aborted) throw error;
+      if (ctx.mcpReq.signal.aborted || (tool.name === 'map_wait' && waitSignal.aborted)) throw error;
       // Never expose exception text/cause/stack, SQL, paths or submitted bodies.
       // An unclassified failure cannot establish publication or connection health.
       return envelope({ kind: 'infrastructure_error', code: error instanceof SQLiteFailure ? error.code : 'storage_failure',
         outcome: error instanceof SQLiteFailure ? error.outcome : 'unknown', requiresRestart: error instanceof SQLiteFailure ? error.requiresRestart : true });
     }
   };
-  server.setRequestHandler('tools/call', (request, ctx) => control ? control(suspend => callTool(request, ctx, suspend)) : callTool(request, ctx, () => {}));
+  server.setRequestHandler('tools/call', (request, ctx) => control ? control((suspend, disconnected) => callTool(request, ctx, suspend, disconnected)) : callTool(request, ctx, () => {}));
   return server;
 }
 

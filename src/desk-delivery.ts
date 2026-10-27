@@ -147,7 +147,13 @@ export class DeskDelivery {
     return current.kind === 'found' ? toolResult({ ...delivery, currentRevision: current.revision.revision }) : toolResult(current);
   }
   private empty(wait: Wait, outcome: 'superseded' | 'interrupted') { return this.withRevision(wait, { outcome, items: [] }); }
-  private complete(wait: Wait, result: CallToolResult) { wait.result = result; wait.status = 'completed'; wait.updatedAt = Date.now(); this.detach(wait); }
+  private complete(wait: Wait, result: CallToolResult) {
+    // The SDK encodes only the outer RPC result. A task's retained nested result
+    // must be a modern complete tool result too, including errors/empty outcomes.
+    // Keep it for retries when the first tasks/get response is lost after Taken.
+    wait.result = wait.taskId ? { ...result, resultType: 'complete' } : result;
+    wait.status = 'completed'; wait.updatedAt = Date.now(); this.detach(wait);
+  }
   private describe(wait: Wait): Record<string, unknown> {
     return { taskId: wait.taskId, status: wait.status, createdAt: new Date(wait.createdAt).toISOString(),
       lastUpdatedAt: new Date(wait.updatedAt).toISOString(), ttlMs: wait.args.maxWaitSeconds * 1000 + 600_000, pollIntervalMs: 1000,
