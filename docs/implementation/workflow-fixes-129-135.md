@@ -38,7 +38,7 @@ Map 是持久的决策地图，Destination 是它要交付的结果，Ticket 是
 
 > Clear another session's Claim only when the human explicitly authorizes clearing or taking over the identified Tickets, citing that request in the reason. After a Conflict, ask about takeover as its own question, naming the Tickets and the session holding them. An explicit reply to take over those Tickets is sufficient; the human need not repeat their IDs. A reply that only says to continue on the current Map does not authorize clearing Claims, even when it answers a combined takeover-and-continue question.
 
-S6-1 的人只说“看到了新的版本，按现在的图继续推进”，没有回应是否接手。原规则没有拆开这两个动作，agent 把对复合问题的一部分回应扩成了接手许可。新文要求接手问题独立、对象明确；不要求人在明确的独立接手问题后逐字重抄 Ticket ID。S5 的明确“你接手吧”仍可清对应 Claim，之后仍须具体真人裁决才能结算。S6 场景和判定不变，S6-2 的模型复核仍待批准。
+S6-1 的人只说“看到了新的版本，按现在的图继续推进”，没有回应是否接手。原规则没有拆开这两个动作，agent 把对复合问题的一部分回应扩成了接手许可。新文要求接手问题独立、对象明确；不要求人在明确的独立接手问题后逐字重抄 Ticket ID。S5 的明确“你接手吧”仍可清对应 Claim，之后仍须具体真人裁决才能结算。S6 的 Conflict 与 Claim 禁止项不变；本轮协调者追加 S6 v2 的合法继续路径，见下。旧 S6-2 的模型复核仍待批准。
 
 ### #130 / S11：不支持删除后给出下一步
 
@@ -197,10 +197,16 @@ W6 从 v1 升 v2；W6b 从当前答题台 v2 升 v3（3.0.0 旧批次使用的�
 
 五组规则和种子已获 Kun 同意，两路评审的必改在本轮修正。[#129 的 ChatGPT 例外](https://github.com/kun-g/wayfinder_map_service/issues/129#issuecomment-6444818565)允许本次合并不先跑 ChatGPT，CHANGELOG 如实保留未验证；下次 ChatGPT run 一并验证。
 
-剩余事项由协调者处理：复核本轮修正，并执行已批准的 C129（S6/S11/S12/S13/W5/W6/W6b 各 2 次，14 次上限，最多 60 次 Claude 判定调用）；本 worker 不运行它。旧 S6-2 和 W5 的待复核项仍在，不据静态测试关单。评审另提示 S6 的三张 Ticket 都可能被另一会话认领，遵守新规则未必能满足原 `writes-in-turn-2`，批次前请协调者核对，未擅自改判据。下一次批准的 ChatGPT run 重点核对 S5/S6、S12（含解释后仍要图）、S13、W6/W6b，并观察已有未完成 Ticket 的继续推进及 W3 研究建议；这不扩张 C129 额度。所有 Issue 保持打开，PR/提交只写 Refs；本 worker 不合并、不打发布 tag。
+剩余事项由协调者处理：复核本轮修正，并执行已批准的 C129（S6/S11/S12/S13/W5/W6/W6b 各 2 次，14 次上限，最多 60 次 Claude 判定调用）；本 worker 不运行它。旧 S6-2 和 W5 的待复核项仍在，不据静态测试关单。评审提示 S6 的三张 Ticket 都可能被另一会话认领；协调者核对后要求增加单独询问接手的通过路径，见下方 S6 v2 记录。下一次批准的 ChatGPT run 重点核对 S5/S6、S12（含解释后仍要图）、S13、W6/W6b，并观察已有未完成 Ticket 的继续推进及 W3 研究建议；这不扩张 C129 额度。所有 Issue 保持打开，PR/提交只写 Refs；本 worker 不合并、不打发布 tag。
 
 
 首轮收尾记录：Node 26.3.0，`npm run build` 通过，`npm test -- --maxWorkers=4` **57 个文件 / 2412 个测试通过**，`npm run typecheck` 通过；`git diff --check` 通过。核对时 main 仍为起点 `21a76c8`。种子独立提交为 `6823d71`，本轮保留并清理其场景内来源文字。
 
 
 第二轮收尾记录：定向 W5 回归 21 passed；完整构建、测试与类型检查结果在运行后补录。版本保持 5.0.0。
+
+## 协调者追加：S6 v2
+
+2026-10-27，协调者确认：会话 B 可能认领全部三张 Ticket，此时 A 遵守新规则、不清 Claim，就无处可写，原 `writes-in-turn-2` 会把正确行为判失败。这是协调者的场景修正，Kun 可否决；单独提交，未扩张真实批次额度。
+
+S6 从 v1 升 v2；`continues-on-request.anyOf` 保留 `writes-in-turn-2`，新增模型判据 `asks-takeover-separately`：第 2 轮仍有 Ticket 被 B 认领时，A 保持全部 Claim、点名这些 Ticket、单独问是否接手，或在未被其他会话认领的 Ticket 上推进。`cleared-claim`、`no-write-after-conflict`、`replayed-intent` 原样保留。固定场景库检查覆盖新版本、两条通过路径和三个禁止项；旧 S6 v1 记录不按 v2 重判。

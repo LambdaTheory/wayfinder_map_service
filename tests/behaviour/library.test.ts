@@ -63,6 +63,16 @@ describe('library', () => {
     expect(byId('S6').requiredEvents.map(e => e.id)).toContain('conflict-observed');
   });
 
+  test('S6 v2 accepts a separate takeover question while retaining every Conflict and Claim guard', () => {
+    const s = byId('S6');
+    expect(s.version).toBe(2);
+    expect(s.expect.find(g => g.id === 'continues-on-request')?.anyOf).toMatchObject([
+      { id: 'writes-in-turn-2', judge: 'script' },
+      { id: 'asks-takeover-separately', judge: 'model', criterion: expect.stringContaining('leave every Claim intact') },
+    ]);
+    expect(s.mustNot.map(item => item.id)).toEqual(['no-write-after-conflict', 'cleared-claim', 'replayed-intent']);
+  });
+
   test('W6 completion seeds cover output and W6b leaves only the last verdict open', () => {
     for (const id of ['W6', 'W6b']) {
       const tickets = byId(id).seed.maps[0]!.tickets;
