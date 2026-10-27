@@ -4,6 +4,12 @@ All notable project changes are recorded here. Historical implementation evidenc
 
 Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Release Version, covers the service and the workflow it carries; `docs/spec/mcp-sqlite.md` §14.3 says which part to raise, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion` (`1.0.0` to `3.0.0` below), and the server reported a fixed `0.1.0`.
 
+## 3.3.1 (2026-10-27)
+
+- Keep shipped ChatGPT attach probes, relay forwarding and dedicated-launcher MCP requests on explicit direct loopback transports, ignoring ambient Node/Python proxy configuration without changing the client's proxy environment. Authenticated probes do not follow redirects; the ChatGPT attach probe now fails after a three-second request deadline and releases its connection.
+- Retain attach session IDs when response headers arrive, so a partial initialization failure still attempts DELETE within a separate three-second deadline. Preserve 3.2.0's unhandled relay server-error behavior.
+- This transport fix changes no mandatory workflow rule or MCP tool usage; live ChatGPT evidence is deferred to the next approved run.
+
 ## 3.3.0 (2026-10-27)
 
 - Add Answer Desk `map_wait` with task and blocking execution, once-only delivery after the Map Quiet Window, and taking `map_read` for turn-start delivery. Answers and Reopen Requests retain Taken state through interruption and restart.

@@ -27,10 +27,12 @@ mock.module('node:child_process', { namedExports: {
   },
 } });
 const requests = [];
-globalThis.fetch = async (_url, init) => {
-  requests.push(init.method);
-  return new Response(null, { headers: { 'mcp-session-id': 'synthetic-attach-session' } });
-};
+mock.module('../../scripts/local-chatgpt-attach.mjs', { namedExports: {
+  async acceptsLocalChatGptToken(port, token) {
+    requests.push({ port, token });
+    return true;
+  },
+} });
 let scheduledBackup;
 globalThis.setInterval = (callback, delay) => {
   assert.equal(delay, 30 * 60 * 1000);
@@ -40,7 +42,7 @@ globalThis.setInterval = (callback, delay) => {
 globalThis.clearInterval = () => {};
 
 await import('../../scripts/local-chatgpt-test.mjs');
-assert.deepEqual(requests, ['POST', 'DELETE']);
+assert.deepEqual(requests, [{ port: 18766, token: process.env.WAYFINDER_ATTACH_TOKEN }]);
 assert.equal(typeof scheduledBackup, 'function');
 scheduledBackup();
 process.emit('SIGTERM');
