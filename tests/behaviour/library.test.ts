@@ -63,6 +63,18 @@ describe('library', () => {
     expect(byId('S6').requiredEvents.map(e => e.id)).toContain('conflict-observed');
   });
 
+  test('W6 completion seeds cover output and W6b leaves only the last verdict open', () => {
+    for (const id of ['W6', 'W6b']) {
+      const tickets = byId(id).seed.maps[0]!.tickets;
+      expect(tickets.find(t => t.id === 'output-format')?.settlement?.outcome).toMatchObject({
+        kind: 'decision', statement: expect.stringContaining('month,category,expense_yuan'),
+      });
+      expect(tickets.filter(t => !t.settlement).map(t => t.id)).toEqual(id === 'W6' ? [] : ['no-category']);
+    }
+    expect([byId('W6').version, byId('W6b').version]).toEqual([2, 3]);
+    expect(byId('S7').seed.maps[0]!.tickets.some(t => t.id === 'output-format')).toBe(false);
+  });
+
   test('F11 seed carries no private paths and records its conversion', () => {
     const text = readFileSync(new URL('./seeds/f11.json', import.meta.url), 'utf8');
     expect(text).not.toMatch(/\/Users\/|\/private\/|Library\/Application Support/);

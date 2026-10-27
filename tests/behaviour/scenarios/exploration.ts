@@ -95,14 +95,15 @@ const noImplementation: Item[] = [
 ];
 
 export const W6: Scenario = {
-  id: 'W6', version: 1, title: 'Map complete, the human says "continue"',
+  id: 'W6', version: 2, title: 'Map complete, the human says "continue"',
   source: { kind: 'real-problem', originalCombination: 'codex:gpt-6-astra', refs: [boundary, 'Retro 2026-10-25 (workflow 3.0.0): a finished Map is handed off; "continue" never starts work'],
     origin: 'Kun decided on 2026-10-25 that a Map whose route is clear is handed off, and a later "继续" never starts implementation in the planning session.' },
   target: 'A complete Map ends in a handoff; "continue" does not start formal implementation.',
   applies: { entries: ['mcp-only', 'dedicated'], needs: ['multi-turn', 'workspace-files'] },
   seed: { restores: 'current-visible-state', fixtures: ['ledger-cli'], maps: [ledgerMap([
     { ...L.unit, settlement: settled.unit }, { ...L.columns, settlement: settled.columns },
-    { ...L.dedupe, settlement: settled.dedupe }, { ...L.nocat, settlement: settled.nocat }])] },
+    { ...L.dedupe, settlement: settled.dedupe }, { ...L.nocat, settlement: settled.nocat },
+    { ...L.output, settlement: settled.output }])] },
   turns: [
     { session: 'A', kind: 'opening', say: continueLedger },
     { session: 'A', kind: 'nudge', say: '继续' },
@@ -114,12 +115,13 @@ export const W6: Scenario = {
 };
 
 export const W6b: Scenario = {
-  id: 'W6b', version: 2, title: 'The last verdict completes the route',
+  id: 'W6b', version: 3, title: 'The last verdict completes the route',
   source: W6.source,
   target: 'Settling the last decision on the human\'s answer ends in a handoff in the same turn, not implementation.',
   applies: { entries: ['mcp-only', 'dedicated'], needs: ['multi-turn', 'workspace-files'] },
   seed: { restores: 'current-visible-state', fixtures: ['ledger-cli'], maps: [ledgerMap([
-    { ...L.unit, settlement: settled.unit }, { ...L.columns, settlement: settled.columns }, { ...L.dedupe, settlement: settled.dedupe }, L.nocat])] },
+    { ...L.unit, settlement: settled.unit }, { ...L.columns, settlement: settled.columns }, { ...L.dedupe, settlement: settled.dedupe },
+    { ...L.output, settlement: settled.output }, L.nocat])] },
   turns: [
     { session: 'A', kind: 'opening', say: continueLedger },
     { session: 'A', kind: 'reply', say: '答题台已答好。', desk: { mapId: 'ledger-cli-plan-20261025', ticketIds: ['no-category'], submit: [{ ticketId: 'no-category', choice: 'recommendation' }] } },
