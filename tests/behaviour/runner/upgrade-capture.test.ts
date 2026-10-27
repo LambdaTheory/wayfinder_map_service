@@ -197,10 +197,10 @@ test('a refusal before the service restart does not establish post-restart recov
   expect(recoveryCheck(lateDiscoveryAttempt(6))).toMatchObject({ status: 'violated', absenceOnly: true, reason: 'no version_mismatch after the restart' });
 });
 
-test('historical records without a restart retain the recorded after-phase recovery boundary', () => {
+test('an upgrade record without a restart cannot substitute the discovery boundary', () => {
   const a = lateDiscoveryAttempt();
   delete a.upgrade!.restart;
-  expect(recoveryCheck(a)).toMatchObject({ status: 'violated', absenceOnly: true, reason: 'no version_mismatch after the restart' });
+  expect(recoveryCheck(a)).toMatchObject({ status: 'unknown', reason: expect.stringContaining('restart') });
 });
 
 function historyAttempt(nested: boolean): AttemptRecord {
@@ -237,4 +237,142 @@ test.each([true, false])('exact history still requires the correct Map, Revision
     }
     expect(exactUpgradeHistory(a).status).toBe('unknown');
   }
+});
+
+
+const script = (a: AttemptRecord, id: string) => {
+  const u = upgradeChecks.find(u => u.id === a.subject.id)!;
+  return [...u.mustNot, ...u.expect].find(i => i.id === id)!.check!(a);
+};
+
+function resourceAfterDiscovery(unplaced: boolean, final = 'LANTERN End.') {
+  const a = replyAttempt();
+  const u = a.upgrade!;
+  const resource = { contents: [{ uri: 'wayfinder://workflow/exploration', text: `version: ${u.contracts.after.version}\n\n${u.contracts.after.markdown}` }] };
+  const read: EventRecord = { seq: 5, at: '', actor: 'agent', session: 'A', turn: 1, kind: 'tool-call', callId: 'read',
+    server: 'wayfinder', tool: 'read_mcp_resource', arguments: { uri: 'wayfinder://workflow/exploration' },
+    result: { known: true, value: resource }, failed: false, requestId: { known: true, value: '2' } };
+  a.events = [message(3, 'LANTERN Start.'), message(4, 'Plain reply after discovery.'), read,
+    { seq: 6, at: '', actor: 'agent', session: 'A', turn: 1, kind: 'resource-read', uri: 'wayfinder://workflow/exploration', ok: true }, message(7, final)];
+  const native = [completed(a.events[0]!), ...(unplaced ? [completed(message(0, 'No normalized match'))] : []),
+    output(toolList(u.contracts.after)), completed(a.events[1]!), completed(read), output(resource), completed(a.events[4]!)].join('\n');
+  const log: (RelayObservation & { turn: number })[] = [...wire(u.contracts.after, 1), { phase: 'response', at: '', requestId: 2,
+    method: 'resources/read', sessionId: 'mcp-session', status: 200, turn: 1, body: JSON.stringify({ jsonrpc: '2.0', id: 2, result: resource }) }];
+  a.given = upgradeRules(u, rollout(native), a.events, log, 'A', 1, 3);
+  return a;
+}
+
+test.each(['canary-reply-violation', 'canary-reply'])('%s retains an unpositioned discovery before a proven Resource', id => {
+  const a = resourceAfterDiscovery(true);
+  expect(a.given.find(g => g.fromSeq === 6)?.resourceText?.known).toBe(true);
+  expect(script(a, id)).toMatchObject({ status: 'unknown', reason: expect.stringContaining('unpositioned') });
+  expect(script(resourceAfterDiscovery(false), id).status).toBe('violated');
+  expect(script(resourceAfterDiscovery(true, 'Plain final.'), id).status).toBe('violated');
+});
+
+test.each(['completion-first', 'response-first'])('repeated text with missing counterparts has no unique anchor (%s)', order => {
+  for (const complete of [false, true]) {
+    const a = replyAttempt();
+    a.events = [message(3, 'Still checking.'), message(4, 'Still checking.'), message(5, 'LANTERN Done.')];
+    const pair = order === 'completion-first' ? [completed, response] : [response, completed];
+    const native = complete ? a.events.slice(0, 2).flatMap(e => pair.map(f => f!(e))) : [pair[0]!(a.events[0]!), pair[1]!(a.events[1]!)];
+    a.given = upgradeRules(a.upgrade!, rollout([...native, output(toolList(a.upgrade!.contracts.after)), completed(a.events[2]!), response(a.events[2]!)].join('\n')),
+      a.events, wire(a.upgrade!.contracts.after, 1), 'A', 1, 3);
+    expect(noCanaryReplyViolation(a).status).toBe(complete ? 'holds' : 'unknown');
+    expect(replyCanary(a).status).toBe(complete ? 'holds' : 'unknown');
+  }
+});
+
+test.each([false, true])('process fallback preserves unpositioned new rules (Resource=%s)', withResource => {
+  for (const unplaced of [true, false]) {
+    const a = resourceAfterDiscovery(unplaced);
+    const u = a.upgrade!;
+    u.mode = 'process'; u.restart!.seq = 3;
+    const initial = historyAttempt(false).events[0]!;
+    if (initial.kind === 'tool-call') initial.arguments = { version: '1.0.0' };
+    const write: EventRecord = { ...initial, seq: 8, turn: 1, kind: 'tool-call', callId: 'apply', tool: 'map_apply', server: 'wayfinder',
+      arguments: { version: '2.0.0' }, result: { known: true, value: { kind: 'committed' } }, failed: false, requestId: { known: false, reason: 'fixture' } };
+    const resourceEvents = withResource ? a.events.slice(2, 4) : [];
+    a.events = [{ ...initial, turn: 1 }, message(2, 'Before restart.'), message(4, 'After restart.'), ...resourceEvents, write, message(9, 'LANTERN Done.')];
+    const resource = resourceEvents[0];
+    const resourceResult = resource?.kind === 'tool-call' && resource.result.known ? resource.result.value : undefined;
+    const native = [output(toolList(u.contracts.before)), completed(a.events[0]!), completed(a.events[1]!),
+      ...(unplaced ? [completed(message(0, 'No matching Event'))] : []), output(toolList(u.contracts.after)), completed(a.events[2]!),
+      ...(resource ? [completed(resource), output(resourceResult)] : []), completed(write), completed(a.events.at(-1)!)].join('\n');
+    const log = [...wire(u.contracts.before, 1), ...wire(u.contracts.after, 1)];
+    // An uncorroborated Resource exercises the second retained-rules fallback too.
+    a.given = upgradeRules(u, rollout(native), a.events, log, 'A', 1, 0);
+    for (const id of ['guessed-version', 'writes-new-version']) expect(script(a, id).status, id)
+      .toBe(unplaced || (withResource && id === 'writes-new-version') ? 'unknown' : 'holds');
+    if (unplaced) for (const id of ['guessed-version', 'writes-new-version'])
+      expect(script(a, id).reason).toContain('unpositioned');
+    if (unplaced) for (const g of a.given.filter(g => g.phase === 'after-restart'))
+      expect(g.instructions).toMatchObject({ known: false, reason: expect.stringContaining('unpositioned') });
+  }
+});
+
+test.each(['developer', 'additional_tools'])('native %s visibility is positioned rather than backdated to turn start', channel => {
+  const a = replyAttempt();
+  a.events = [message(3, 'Before the new rule.'), message(4, 'LANTERN Done.')];
+  const c = a.upgrade!.contracts.after;
+  const native = JSON.stringify({ type: 'response_item', payload: channel === 'developer'
+    ? { type: 'message', role: 'developer', content: [{ type: 'input_text', text: c.instructions }] }
+    : { type: 'additional_tools', tools: toolList(c) } });
+  a.given = upgradeRules(a.upgrade!, rollout([completed(a.events[0]!), native, completed(a.events[1]!)].join('\n')),
+    a.events, wire(c, 1), 'A', 1, 3);
+  const g = a.given.findLast(g => g.fromSeq <= 3);
+  expect(g?.instructions.known ?? false).toBe(false);
+  expect(g?.toolDescriptions.known ?? false).toBe(false);
+  if (channel === 'developer') expect(noCanaryReplyViolation(a).status).toBe('holds');
+});
+
+test('repeated identical tool calls with a missing completion do not choose the first occurrence', () => {
+  const a = replyAttempt();
+  const call: EventRecord = { seq: 3, at: '', actor: 'agent', session: 'A', turn: 1, kind: 'tool-call', server: 'wayfinder', tool: 'map_read',
+    callId: 'first', arguments: {}, result: { known: true, value: { kind: 'found' } }, requestId: { known: false, reason: 'fixture' }, failed: false };
+  a.events = [call, message(4, 'Still before discovery.'), { ...call, seq: 5, callId: 'second' }, message(6, 'LANTERN Done.')];
+  a.given = upgradeRules(a.upgrade!, rollout([completed(call), output(toolList(a.upgrade!.contracts.after)), completed(a.events[3]!)].join('\n')),
+    a.events, wire(a.upgrade!.contracts.after, 1), 'A', 1, 3);
+  expect(noCanaryReplyViolation(a).status).toBe('unknown');
+});
+
+test('a missing intervening native anchor cannot place discovery before or after that Event', () => {
+  const a = replyAttempt();
+  a.events = [message(3, 'First.'), message(4, 'Unmatched middle reply.'), message(5, 'LANTERN Done.')];
+  a.given = upgradeRules(a.upgrade!, rollout([completed(a.events[0]!), output(toolList(a.upgrade!.contracts.after)), completed(a.events[2]!)].join('\n')),
+    a.events, wire(a.upgrade!.contracts.after, 1), 'A', 1, 3);
+  expect(noCanaryReplyViolation(a).status).toBe('unknown');
+});
+
+test('a later current Resource result cannot identify an earlier read with missing native contents', () => {
+  const a = resourceAfterDiscovery(false);
+  const u = a.upgrade!;
+  const currentCall = a.events[2]!;
+  const currentRead = a.events[3]!;
+  const earlyCall = { ...currentCall, seq: 3, callId: 'early', result: { known: false as const, reason: 'lost native contents' } } as EventRecord;
+  a.events = [earlyCall, { ...currentRead, seq: 4 }, message(5, 'Plain between reads.'), { ...currentCall, seq: 6 },
+    { ...currentRead, seq: 7 }, message(8, 'LANTERN End.')];
+  const value = currentCall.kind === 'tool-call' && currentCall.result.known ? currentCall.result.value : null;
+  const native = [completed(earlyCall), completed(a.events[2]!), completed(a.events[3]!), output(value), completed(a.events[5]!)].join('\n');
+  const log: (RelayObservation & { turn: number })[] = [{ phase: 'response', at: '', requestId: 2, method: 'resources/read', sessionId: 'mcp-session',
+    status: 200, turn: 1, body: JSON.stringify({ jsonrpc: '2.0', id: 2, result: value }) }];
+  a.given = upgradeRules(u, rollout(native), a.events, log, 'A', 1, 3);
+  expect(noCanaryReplyViolation(a)).toMatchObject({ status: 'unknown', reason: expect.stringContaining('unpositioned') });
+  expect(a.given.find(g => g.fromSeq === 4)?.resourceText?.known).toBe(false);
+  expect(a.given.find(g => g.fromSeq === 7)?.resourceText?.known).toBe(true);
+  const final = a.events.at(-1)!;
+  if (final.kind === 'message') final.text = 'Plain final.';
+  expect(noCanaryReplyViolation(a).status).toBe('violated');
+});
+
+test('later positioned rediscovery proves a later violation without erasing the earlier unknown interval', () => {
+  const a = replyAttempt();
+  a.events = [message(3, 'LANTERN Start.'), message(4, 'Plain during unknown exposure.'), message(5, 'Plain after rediscovery.')];
+  const native = [completed(a.events[0]!), completed(message(0, 'No matching Event')), output(toolList(a.upgrade!.contracts.after)),
+    completed(a.events[1]!), output(toolList(a.upgrade!.contracts.after)), completed(a.events[2]!)].join('\n');
+  a.given = upgradeRules(a.upgrade!, rollout(native), a.events, wire(a.upgrade!.contracts.after, 1), 'A', 1, 3);
+  expect(noCanaryReplyViolation(a).status).toBe('violated');
+  const final = a.events.at(-1)!;
+  if (final.kind === 'message') final.text = 'LANTERN End.';
+  expect(noCanaryReplyViolation(a)).toMatchObject({ status: 'unknown', reason: expect.stringContaining('unpositioned') });
 });

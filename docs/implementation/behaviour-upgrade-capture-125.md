@@ -17,20 +17,23 @@ servers and malformed output do not establish tool visibility.
 
 Code-mode discovery is located using ordered `event_msg/item_completed`
 `AgentMessage` and `McpToolCall` records and `response_item/message/assistant`
-output text, matched to this turn's normalized Events. A message's response and
-completion share one anchor in either order. Its response still anchors the
-next Event boundary if the completion is missing. An unmatched discovery keeps
+output text, matched to this turn's normalized Events. Each native channel is matched in order to the normalized Events. A response
+and completion share an anchor only when each independently has a unique
+matching Event; identical text alone does not establish that pairing. A unique
+response still anchors discovery if the completion is missing. An unmatched discovery keeps
 the affected fields unknown with an `unpositioned Wayfinder discovery` reason;
 a later matched discovery cannot replace that unknown first boundary. Previously
-proven exposure remains valid. Native `developer` messages and `additional_tools`
-keep their original turn-start exposure. The shared Scenario normalizer is unchanged.
+proven exposure remains valid, and a later proven exposure can establish a later
+violation while the earlier gap remains recorded. Native `developer` messages
+and `additional_tools` use the same position checks as code-mode discoveries. The shared Scenario normalizer is unchanged.
 
 Instructions and the complete set of tool descriptions have independent exposure
 boundaries. Each change produces a phase: a first tool batch can expose the
 reply rule while the remaining tool descriptions are still unknown. Resource
 phases use only the knowledge available at their own read boundary, and the
-extractor returns phases in order. The reply check selects the earliest proven
-rule exposure even if an older record's phase array is unordered.
+extractor returns phases in order. The reply check uses proven rule exposure even if an older record's phase array
+is unordered, but never treats a later source as proof that an earlier unknown
+interval was compliant.
 
 `exactUpgradeHistory` now reads both compact `{mapId, revision: number}` commits
 and snapshot `{revision: {mapId, revision, ...}, frontier}` commits. Map identity,
@@ -63,7 +66,8 @@ first version refusal. The coordinator explicitly included exposure timing in
 this repair and approved correcting the restart boundary in
 `upgrade-checks.ts`'s `afterRestart` helper. It now selects writes from
 `a.upgrade?.restart?.seq ?? after.fromSeq`: the actual service restart is distinct
-from later rule discovery, and historical records retain their fallback. This
+from later rule discovery, and legacy non-runner records retain their explicit service-phase boundary. Runner
+records with an `upgrade` contract but no restart now remain unknown (third review). This
 corrects the evidence boundary without changing the recovery standard. A reverse
 control originally checked only a pre-restart refusal; the second-review
 control below also fails under the old, too-late filter.
@@ -100,7 +104,10 @@ These are exposure/correlation repairs under the existing v7 criteria. Phase
 placement also determines which rules `guessed-version`, `attestNextRetries`,
 `committedAtNewVersion` and `followsCanary` see for intervening writes; those
 checks are not limited to replies. In the historical B02c comparison below,
-none of their item results changes from the first-review report. No Scenario,
+none of their item results changes from the first-review report. Splitting an
+incomplete early phase from a later complete one can also change
+`completeUpgradeEvidence` from holds to unknown: its existing criterion requires
+every recorded phase, not only the last, to have complete evidence. No Scenario,
 check ID, criterion, shared normalizer, shipped path or Release Version changed.
 
 ## B02c-20261027 report comparison
@@ -187,3 +194,65 @@ The first full run passed 2426 tests and failed one existing
 descendant process. Both targeted `mcp-only bounds inherited-pipe drain` cases
 then passed, and the complete unchanged suite passed on rerun. No isolation
 assertion, timeout or test configuration was changed to obtain that result.
+
+
+## Third-review rule: uncertain position remains unknown
+
+The two re-reviews ([Codex](https://github.com/kun-g/wayfinder_map_service/pull/147#issuecomment-6445155020),
+[Claude](https://github.com/kun-g/wayfinder_map_service/pull/147#issuecomment-6445243271))
+identified the same evidence error in different paths. An exposure, discovery or
+restart without a unique position cannot support a definite verdict for an item
+that depends on that position. Retained-rule and Resource fallbacks preserve both
+`unknown` and its reason. No criterion, Scenario, check ID/version, shared
+`normalize.ts`, shipped path or Release Version changed.
+
+`upgrade-position.ts` calculates the earliest and latest order-preserving match
+for each response/completion anchor. Only agreement establishes a position.
+Repeated message text or identical tool arguments with missing occurrences stay
+unknown. Rollout IDs and stdout item IDs are different namespaces and are not
+assumed equal. Missing Events between otherwise unique anchors also leave the
+exposure unknown. The same placement rule covers native instructions, native
+tool definitions and code-mode lists; unrelated metadata does not create a rule
+exposure. The fake driver now records its actual message/tool completions in its
+rollout, so positive lifecycle controls supply the same evidence they claim.
+
+Unknown intervals remain in `given` alongside later proven discoveries or reads.
+The shared `exposureGap` accessor preserves their recorded reasons in reply and
+version checks. A proven violation after a later source still wins; compliant
+later replies cannot certify the earlier interval. Process mode cannot replace
+an unpositioned new discovery with retained old rules, either for its normal
+phase or when constructing a Resource phase.
+
+| Regression | Before | After |
+| --- | --- | --- |
+| Unpositioned discovery, plain reply, current Resource, compliant final reply; both reply items | holds | unknown with the unpositioned reason |
+| Repeated text, one response and a different message's completion; both record orders | violated | unknown; complete-record controls still hold |
+| Process-mode unpositioned new discovery; retained-rule and Resource fallback paths | guessed-version / writes-new-version violated | unknown; reasons retained |
+| Native developer / additional_tools arrive after an earlier reply | known at turn start | known only at their proven position |
+| Identical tool calls with a missing completion | chooses first matching call | unknown |
+| Missing normalized Event between two rollout anchors | chooses earlier boundary | unknown |
+| Runner upgrade has no restart, but has a later discovery phase | uses discovery as restart, definite failure | unknown; legacy explicit non-runner service phases unchanged |
+| Two Resource reads, first native contents missing, second current | backdates the second read's contents to the first, violated | unknown interval plus proven second read; later violation still violated |
+| Unpositioned discovery, later positioned rediscovery, then violation | unknown | violated after the proven source; compliant control preserves earlier unknown |
+
+The first red run had **11 failures / 23 passing controls** (34 tests), including
+the changed missing-restart evidence control. The two additional Resource and
+rediscovery cases each failed before their repair. The final capture suite has
+**36 passing tests**. The original six-case review script and the additional
+six-case re-review script both pass unchanged. No model or real client ran.
+
+The third replay uses a fresh private B02c copy, changes only `given` and its
+matching missing-field paths, and runs the report engine without model reviews.
+Its complete report equals the second-review report. Both cells remain
+`insufficient-evidence`, all item statuses in the comparison above remain the
+same, and resume-1 still lacks native rediscovery evidence. The original **37/37**
+file hashes equal both prior manifests and this replay's before/after manifests;
+manifest SHA-256 remains
+`d1d0981952d7759a7d1a91a2681f55e245ea2b69c7a93ade0de4aaf6ec4d1e14`.
+
+
+Third-review final validation used Node **26.3.0**: `npm run build`,
+`npm test -- --maxWorkers=4` (**58 files, 2439 tests passed**, no skipped tests or
+timeout override), `npm run typecheck` and `git diff --check` passed. The earlier
+three-file focused run passed 240 tests; the final full run includes the later
+rediscovery regression and all earlier capture/lifecycle/verdict controls.

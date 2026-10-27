@@ -63,7 +63,11 @@ const oldInstructions = readFileSync(log, 'utf8').trim().split('\n').map(JSON.pa
 const oldVersion = /^version: (\S+)$/m.exec(oldInstructions)[1];
 if (!codeMode && definitions && model !== 'fake-upgrade-no-native-tools') record({ type: 'response_item', payload: { type: 'additional_tools', tools: definitions.tools } });
 emit({ type: 'thread.started', thread_id: thread }); emit({ type: 'turn.started' });
-const say = text => emit({ type: 'item.completed', item: { id: `item_${item++}`, type: 'agent_message', text } });
+const say = text => {
+  const id = `item_${item++}`;
+  record({ type: 'event_msg', payload: { type: 'item_completed', item: { id, type: 'AgentMessage', content: [{ type: 'text', text }] } } });
+  emit({ type: 'item.completed', item: { id, type: 'agent_message', text } });
+};
 const done = () => emit({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } });
 // Tests expire the parent deadline only after the intended evidence has actually been emitted.
 const pauseForTimeout = () => {
@@ -83,6 +87,7 @@ async function call(name, arguments_, resource = false, nativeComplete = true) {
     : { content: [], structured_content: content };
   // A negative fixture: the native helper fails to deliver the Resource, yet the fake still retries.
   const resourceFailed = resource && model === 'fake-upgrade-failed-resource';
+  if (nativeComplete) record({ type: 'event_msg', payload: { type: 'item_completed', item: { ...base, type: 'McpToolCall' } } });
   if (nativeComplete) emit({ type: 'item.completed', item: { ...base, result: resourceFailed ? null : nativeResult,
     error: resourceFailed ? { message: 'Synthetic Resource delivery failure' } : null, status: resourceFailed ? 'failed' : 'completed' } });
   if (resource) record({ type: 'response_item', payload: { type: 'function_call_output', call_id: base.id,

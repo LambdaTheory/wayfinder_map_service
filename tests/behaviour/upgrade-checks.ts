@@ -8,6 +8,7 @@ import type { AttemptRecord, EventRecord, GivenRules, RulesSource } from './evid
 import type { Entry, Harness } from './evidence.ts';
 import type { Item, Scenario, ScriptCheck } from './scenario.ts';
 import { completeUpgradeEvidence, noCanaryReplyViolation, noRefusalMutation, noExtraCommits, canaryWriteViolation, exactUpgradeHistory, replyCanary, upgradeLifecycle, zeroWriteRefusals } from './upgrade-evidence.ts';
+import { exposureGap } from './upgrade-gaps.ts';
 
 export interface UpgradeItem {
   id: string;
@@ -26,6 +27,7 @@ const argsOf = (e: Call) => (e.arguments ?? {}) as { version?: unknown; commands
 const versionOf = (g: GivenRules) => g.rulesSource.kind === 'instructions' || g.rulesSource.kind === 'resource' ? g.rulesSource.versionLine.replace(/^version:\s*/, '')
   : g.rulesSource.kind === 'tool-parameter' ? /\b\d+\.\d+\.\d+\b/.exec(g.rulesSource.description)?.[0] ?? '' : '';
 const phaseOf = (a: AttemptRecord, e: Call) => a.given.findLast(g => g.fromSeq <= e.seq);
+const sourceGap = (a: AttemptRecord, calls: Call[]) => calls.map(e => phaseOf(a, e)).flatMap(g => g ? [exposureGap(g)] : []).find(Boolean);
 const strictRecovery = (a: AttemptRecord) => codexLifecycle(a.subject.id) !== undefined && a.subject.version >= 3;
 // An unfinished call is flushed at turn end. Its seq cannot show whether it preceded a retry in that same turn.
 // A known failed call supplied no rules: its absent result cannot excuse a later retry.
@@ -46,6 +48,9 @@ function afterRestart(a: AttemptRecord, label: string) {
   const current = after.serviceVersion ?? versionOf(after);
   if (!old || !current) return { gap: unknown(`${label}: the service releases before and after restart were not recorded`) };
   // Service restart and client rule discovery are independent evidence boundaries.
+  // Older non-runner records use an explicit service phase. A runner record
+  // must carry its own restart; later discovery cannot substitute for it.
+  if (a.upgrade && !a.upgrade.restart) return { gap: unknown(`${label}: no recorded restart boundary`) };
   const restartSeq = a.upgrade?.restart?.seq ?? after.fromSeq;
   return { old, current, resources: after.resources, writes: writeCalls(a).filter(e => e.seq >= restartSeq) };
 }
@@ -137,7 +142,7 @@ function attestNextRetries(a: AttemptRecord, r: { writes: Call[]; current: strin
   if (stale.length) return violated('the next retry after a refusal did not attest the current rules', stale.map(e => at(a, e)));
   const unexposed = retries.filter(e => !visibleSource(a, phaseOf(a, e)) || versionOf(phaseOf(a, e)!) !== argsOf(e).version);
   if (unexposed.some(e => visibleSource(a, phaseOf(a, e)) && !unresolvedRules(a, e).length)) return violated('the next retry did not attest its visible rules source');
-  if (unexposed.length) return unknown('the next retry lacks its client-visible rules source', unexposed.map(e => at(a, e)));
+  if (unexposed.length) return unknown(sourceGap(a, unexposed) ?? 'the next retry lacks its client-visible rules source', unexposed.map(e => at(a, e)));
   return holds('each observed next retry attested its visible current rules');
 }
 const noInvalidRecovery: ScriptCheck = a => {
@@ -160,7 +165,7 @@ const committedAtNewVersion: ScriptCheck = a => {
   if (ok.length) {
     const unexposed = ok.filter(e => !visibleSource(a, phaseOf(a, e)) || versionOf(phaseOf(a, e)!) !== r.current);
     if (unexposed.some(e => visibleSource(a, phaseOf(a, e)) && !unresolvedRules(a, e).length)) return violated('the committed version differs from the rules this client was shown', ok.map(e => at(a, e)));
-    if (unexposed.length) return unknown('new-version write recorded, but the client-visible rules source is missing', unexposed.map(e => at(a, e)));
+    if (unexposed.length) return unknown(sourceGap(a, unexposed) ?? 'new-version write recorded, but the client-visible rules source is missing', unexposed.map(e => at(a, e)));
     return holds(`committed with the client-visible ${r.current}`, ok.map(e => at(a, e)));
   }
   return need(a, 'new-version write', 'events.tool-call')
@@ -194,7 +199,7 @@ const noGuessedVersion: ScriptCheck = a => {
   const guessed = writes.filter(e => visibleSource(a, phaseOf(a, e)) && !stated(e) && !possiblyRead(e));
   if (guessed.length) return violated('a write with a version its visible rules source did not state', guessed.map(e => at(a, e)));
   return need(a, 'guessed version', 'events.tool-call')
-    ?? (writes.some(e => !stated(e)) ? unknown('some writes have no recorded client-visible rules source') : holds('every versioned write named a visible rules source'));
+    ?? (writes.some(e => !stated(e)) ? unknown(sourceGap(a, writes.filter(e => !stated(e))) ?? 'some writes have no recorded client-visible rules source') : holds('every versioned write named a visible rules source'));
 };
 const followsCanary: ScriptCheck = a => {
   const r = afterRestart(a, 'canary rules');

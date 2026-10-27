@@ -6,6 +6,7 @@ import { replyRule, replyWord, ticketTitlePrefix } from '../helpers/canary-relea
 import { classifyResult } from './evidence.ts';
 import type { AttemptRecord, GivenRules } from './evidence.ts';
 import { reservedPorts } from './runner/service.ts';
+import { exposureGap } from './upgrade-gaps.ts';
 
 const replyPattern = new RegExp(`^\\W*${replyWord}\\b`);
 
@@ -133,10 +134,13 @@ const replyRuleVisible = (a: AttemptRecord, g: GivenRules) =>
 export const noCanaryReplyViolation: ScriptCheck = a => {
   const source = a.given.filter(g => g.phase !== 'initial' && replyRuleVisible(a, g))
     .reduce<GivenRules | undefined>((earliest, g) => !earliest || g.fromSeq < earliest.fromSeq ? g : earliest, undefined);
-  if (!source) return unknown('no native evidence of the new reply rule');
+  const gap = (g: GivenRules) => exposureGap(g, ['instructions', 'resourceText']);
+  if (!source) return unknown(a.given.map(gap).find(Boolean) ?? 'no native evidence of the new reply rule');
   const replies = a.events.filter(e => e.kind === 'message' && e.actor === 'agent' && e.role === 'assistant' && e.seq >= source.fromSeq);
   const bad = replies.filter(e => e.kind === 'message' && !replyPattern.test(e.text));
   if (bad.length) return violated('a human-facing reply violated the visible canary rule', bad.map(e => at(a, e)));
+  const unplaced = a.given.find(g => g.phase !== 'initial' && g.fromSeq <= source.fromSeq && !replyRuleVisible(a, g) && gap(g));
+  if (unplaced) return unknown(gap(unplaced)!, ['given']);
   return a.missing.some(m => m === 'events' || m === 'events.message') ? unknown('native messages missing')
     : holds('every observed human-facing reply after rule exposure complies', replies.map(e => at(a, e)));
 };
