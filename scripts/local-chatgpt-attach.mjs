@@ -7,16 +7,18 @@ export async function acceptsLocalChatGptToken(servicePort, token) {
   const headers = {
     authorization: 'Bearer ' + token, accept: 'application/json, text/event-stream', 'content-type': 'application/json',
   };
+  let initializedSession;
   const send = (method, body, session) => new Promise((resolve, reject) => {
     const req = request({
       hostname: '127.0.0.1', port: servicePort, path: '/mcp', method, agent,
       headers: { ...headers, ...(session ? { 'mcp-session-id': session } : {}) },
       signal: AbortSignal.timeout(3000),
     }, response => {
+      // The service already owns this session, even if its response body later fails.
+      if (method === 'POST') initializedSession = response.headers['mcp-session-id'];
       response.once('error', reject);
       response.once('end', () => resolve({
         ok: response.statusCode >= 200 && response.statusCode < 300,
-        session: response.headers['mcp-session-id'],
       }));
       // The probe only needs status and session headers; consume the body to release the socket.
       response.resume();
@@ -24,14 +26,21 @@ export async function acceptsLocalChatGptToken(servicePort, token) {
     req.once('error', reject);
     req.end(body);
   });
+  let accepted = false;
   try {
     const reply = await send('POST', JSON.stringify({
       jsonrpc: '2.0', id: 1, method: 'initialize',
       params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'chatgpt-test-runner', version: '1' } },
     }));
-    // node:http never follows redirects, so the credential stays on this endpoint.
-    if (reply.session) await send('DELETE', undefined, reply.session);
-    return reply.ok;
-  } catch { return false; }
-  finally { agent.destroy(); }
+    accepted = reply.ok;
+  } catch { /* A failed initialization remains a failed probe after cleanup. */ }
+  finally {
+    try {
+      // Cleanup gets its own bounded request, including after a partial-body failure.
+      // node:http never follows redirects, so the credential stays on this endpoint.
+      if (initializedSession) await send('DELETE', undefined, initializedSession);
+    } catch { accepted = false; }
+    finally { agent.destroy(); }
+  }
+  return accepted;
 }

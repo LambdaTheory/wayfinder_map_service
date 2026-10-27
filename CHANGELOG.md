@@ -7,6 +7,7 @@ Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Rel
 ## 3.2.1 (2026-10-27)
 
 - Keep shipped ChatGPT attach probes, relay forwarding and dedicated-launcher MCP requests on explicit direct loopback transports, ignoring ambient Node/Python proxy configuration without changing the client's proxy environment. Authenticated probes do not follow redirects; the ChatGPT attach probe now fails after a three-second request deadline and releases its connection.
+- Retain attach session IDs when response headers arrive, so a partial initialization failure still attempts DELETE within a separate three-second deadline. Preserve 3.2.0's unhandled relay server-error behavior.
 - This transport fix changes no mandatory workflow rule or MCP tool usage; live ChatGPT evidence is deferred to the next approved run.
 
 ## 3.2.0 (2026-10-27)

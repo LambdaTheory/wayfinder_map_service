@@ -4,8 +4,8 @@ Implemented on 2026-10-27, based on main at 8657350. Release Version 3.2.1 is a 
 
 ## Transport and ownership
 
-- The ChatGPT runner calls the extracted attachment probe in scripts/local-chatgpt-attach.mjs. A private Node HTTP agent with an empty proxy environment handles initialization and temporary-session DELETE, consumes responses, applies a three-second deadline per request and is destroyed in finally.
-- The everyday relay owns the same kind of direct agent, passes it on every authenticated upstream request, and destroys it when the relay closes or fails to listen.
+- The ChatGPT runner calls the extracted attachment probe in scripts/local-chatgpt-attach.mjs. A private Node HTTP agent with an empty proxy environment handles initialization and temporary-session DELETE, consumes responses, applies a three-second deadline per request and is destroyed in finally. The session ID is retained as soon as initialization headers arrive, so a partial-body timeout or disconnection still triggers best-effort DELETE with its own three-second deadline. Failed initialization or a cleanup transport failure returns false; cleanup never turns a failed initialization into a successful probe.
+- The everyday relay owns the same kind of direct agent, passes it on every authenticated upstream request, and destroys it when the relay closes. It adds no server error listener: startup failure still exits the runner, and an unhandled mid-session server error still throws, as in 3.2.0.
 - The Python launcher uses its own opener with ProxyHandler({}), bypassing environment/platform proxy discovery and any installed global opener. It refuses redirects before a local-service credential can leave that endpoint.
 - Node HTTP does not follow redirects. No global agent, fetch dispatcher, urllib opener or proxy environment is changed. Native clients retain their existing proxy settings.
 
@@ -38,4 +38,13 @@ Before the transport fix, all 12 enabled Node cases exposed three authenticated 
 
 The extracted attachment function is the one imported by the runner. Its backup test mocks that boundary to avoid opening the fixed everyday port; the proxy tests exercise the actual extracted transport.
 
-Final checks on Node 26.3.0: npm run build, npm test (54 files, 2,351 tests), npm run typecheck and git diff --check all passed. The focused existing-protocol/backup/launcher run passed 52 tests before the eight additional redirect/failure checks joined the full suite. Two independent reviews and merge/version ordering remain with the coordinator; no live ChatGPT run was started.
+## Second-round failure-path regressions
+
+Both independent review findings were reproduced with five new tests against the first PR head d60264e: the relay error was swallowed, and all four partial-initialization cases omitted DELETE. The same tests pass after the fixes; the focused relay and shipped-transport suites pass 32 tests.
+
+- Relay: an owned fake upstream holds a POST while the relay emits a server error. The test catches the otherwise unhandled error and then completes the upstream response, asserting the exact error is propagated and the pending request still returns HTTP 200 with its body. A separate comparison against the actual v3.2.0 relay produced the same error and response as the fixed code.
+- Attachment: a fake service flushes HTTP 200, a session ID and an incomplete body, then stalls or disconnects. Both cases return false, deliver an authenticated DELETE for the known session and close their sockets. Additional cases stall or disconnect DELETE itself; cleanup still finishes within the test's eight-second bound (at most two three-second request deadlines), returning false and releasing both connections. No retry, redirect or global proxy change is introduced.
+
+Second-round checks on Node 26.3.0: npm run build, npm run typecheck, git diff --check and the full suite with `npm test -- --maxWorkers=1 --testTimeout=15000` passed (54 files, 2,356 tests; 699.91 seconds). No tests were skipped or assertions changed for this rerun.
+
+The first default `npm test` run completed with 2,347 passes and nine failures in three unchanged suites: two five-second timeouts in dedicated-privacy, six five-second timeouts in sessions, and the dedicated inherited-pipe descendant-count assertion in runtime-privacy. All nine passed in the serial full rerun; the default-run failure remains part of the evidence, rather than an unconditional default-suite pass. First-round checks at d60264e had passed 54 files / 2,351 tests. Review of these fixes and merge/version ordering remain with the coordinator; no live ChatGPT run was started.

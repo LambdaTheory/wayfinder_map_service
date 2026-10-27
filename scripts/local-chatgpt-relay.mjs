@@ -50,6 +50,5 @@ export function createLocalChatGptRelay(servicePort, token) {
   });
   relay.requestTimeout = 30_000;
   relay.once('close', () => agent.destroy());
-  relay.once('error', () => agent.destroy());
   return relay;
 }

@@ -127,6 +127,42 @@ test.each(['unauthorized', 'disconnect', 'timeout'])('attach probe reports %s wi
   await closed;
 }, 5000);
 
+test.each([
+  ['timeout', 'success'], ['disconnect', 'success'], ['timeout', 'timeout'], ['disconnect', 'disconnect'],
+])('attach cleans up a session after initialization body %s, even with DELETE %s', async (failure, cleanup) => {
+  const f = await fixture();
+  f.service.removeAllListeners('request');
+  const closed: Promise<void>[] = [];
+  f.service.on('connection', socket => {
+    closed.push(new Promise<void>(resolve => socket.once('close', () => resolve())));
+  });
+  let activeSession = false;
+  f.service.on('request', async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    f.received.push({ method: req.method!, session: req.headers['mcp-session-id'] as string | undefined,
+      body: Buffer.concat(chunks).toString() });
+    if (req.headers.authorization !== 'Bearer ' + token) { res.writeHead(401).end(); return; }
+    if (req.method === 'DELETE') {
+      if (req.headers['mcp-session-id'] !== 'synthetic-session') { res.writeHead(404).end(); return; }
+      activeSession = false;
+      if (cleanup === 'success') res.writeHead(204).end();
+      if (cleanup === 'disconnect') req.socket.destroy();
+      // A stalled DELETE must have its own deadline, even after initialization timed out.
+      return;
+    }
+    activeSession = true;
+    res.writeHead(200, { 'mcp-session-id': 'synthetic-session', 'content-type': 'application/json' });
+    // Flush the session header with an incomplete body before timing out or losing the connection.
+    res.write('{"jsonrpc":', () => { if (failure === 'disconnect') res.destroy(); });
+  });
+  expect(await acceptsLocalChatGptToken(f.servicePort, token)).toBe(false);
+  expect(f.received.map(r => r.method)).toEqual(['POST', 'DELETE']);
+  expect(f.received[1]!.session).toBe('synthetic-session');
+  expect(activeSession).toBe(false);
+  expect(f.authenticated()).toBe(0);
+  await Promise.all(closed);
+}, 8000);
+
 test.each(['HTTP_PROXY', 'http_proxy', 'system-settings', 'installed-opener'])('launcher credentials ignore Python proxy source %s', async mode => {
   const f = await fixture();
   const proxy = 'http://127.0.0.1:' + f.proxyPort;
