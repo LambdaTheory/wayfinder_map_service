@@ -2,6 +2,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { canaryContract } from '../../helpers/canary-release.mjs';
 import type { CanaryContract } from '../../helpers/canary-release.mjs';
 import type { AttemptRecord, EventRecord, GivenRules } from '../evidence.ts';
@@ -40,25 +41,68 @@ export function upgradeRules(upgrade: NonNullable<AttemptRecord['upgrade']>, rol
   // Resource text contains the instructions and tool blocks too. Search their native channels separately,
   // otherwise a Resource read would falsely prove the client refreshed its cached initialization/tools.
   const channels = { instructions: '', tools: '', outputs: '' };
+  const discoveries: { fromSeq: number; text: string }[] = [];
+  const nativeEvents = events.filter(e => e.actor === 'agent' && e.session === session && e.turn === turn);
+  let nextSeq = fromSeq;
+  let positioned = true;
   for (const line of rollout?.text.split('\n') ?? []) {
     try {
       const e = JSON.parse(line);
       const p = e.payload;
+      // Code-mode exec outputs have no normalized Event of their own. Place discovery
+      // between the surrounding native completions, never at the beginning of the turn.
+      if (e.type === 'event_msg' && p?.type === 'item_completed') {
+        const item = p.item;
+        if (item?.type === 'AgentMessage' || item?.type === 'McpToolCall') {
+          const message = Array.isArray(item.content) ? item.content.map((c: { text?: string } | null) => c?.text ?? '').join('') : null;
+          const match = nativeEvents.find(event => event.seq >= nextSeq && (item.type === 'AgentMessage'
+            ? event.kind === 'message' && event.role === 'assistant' && event.text === message
+            : event.kind === 'tool-call' && event.server === item.server && event.tool === item.tool && isDeepStrictEqual(event.arguments, item.arguments)));
+          positioned = !!match;
+          if (match) {
+            nextSeq = match.seq + 1;
+            // Resource reads have a derived event immediately after the native tool call.
+            if (nativeEvents.some(event => event.seq === nextSeq && event.kind === 'resource-read')) nextSeq++;
+          }
+        }
+      }
       if (e.type !== 'response_item' || !p) continue;
       if (p.type === 'message' && p.role === 'developer') channels.instructions += line + '\n';
       if (p.type === 'additional_tools') channels.tools += line + '\n';
+      if (p.type === 'custom_tool_call_output') {
+        // Code mode discovers MCP metadata through exec. Its output is JSON text, either
+        // directly or in input_text blocks; a Resource's contents object is not a tool list.
+        const texts = typeof p.output === 'string' ? [p.output] : Array.isArray(p.output)
+          ? p.output.filter((b: { type?: string; text?: unknown } | null) => b?.type === 'input_text' && typeof b.text === 'string').map((b: { text: string }) => b.text) : [];
+        for (const text of texts) {
+          try {
+            const list = JSON.parse(text);
+            if (!Array.isArray(list)) continue;
+            const descriptions = list.filter(t => typeof t?.name === 'string' && t.name.startsWith('mcp__wayfinder__') && typeof t.description === 'string')
+              .map(t => t.description);
+            if (descriptions.length && positioned) discoveries.push({ fromSeq: nextSeq,
+              text: (discoveries.at(-1)?.text ?? '') + JSON.stringify(descriptions) + '\n' });
+          } catch { /* Non-JSON exec output does not expose tool definitions. */ }
+        }
+      }
       if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output' || (p.type === 'message' && p.role === 'tool')) channels.outputs += line + '\n';
     } catch { /* Missing native channel remains unknown. */ }
   }
   const phase = (contract: typeof before, seq: number, initial: boolean): GivenRules => {
-    const rules = initialRules(contract.version, contract.instructions, contract.toolDescriptions, rollout && { ...rollout, text: channels.instructions });
-    rules.toolDescriptions = rollout && Object.values(contract.toolDescriptions).every(d => shown(channels.tools, d))
-      ? { known: true, value: contract.toolDescriptions } : { known: false, reason: 'tool descriptions not found in native additional_tools' };
+    const instructionDiscovery = discoveries.find(d => shown(channels.instructions + d.text, contract.instructions));
+    const toolDiscovery = discoveries.find(d => Object.values(contract.toolDescriptions).every(text => shown(channels.tools + d.text, text)));
+    const nativeInstructions = shown(channels.instructions, contract.instructions);
+    const nativeTools = Object.values(contract.toolDescriptions).every(d => shown(channels.tools, d));
+    const rules = initialRules(contract.version, contract.instructions, contract.toolDescriptions,
+      rollout && { ...rollout, text: channels.instructions + (instructionDiscovery?.text ?? '') });
+    rules.toolDescriptions = rollout && (nativeTools || toolDiscovery)
+      ? { known: true, value: contract.toolDescriptions } : { known: false, reason: 'tool descriptions not found in native additional_tools or code-mode discovery' };
+    const exposedAt = Math.max(seq, nativeInstructions ? seq : instructionDiscovery?.fromSeq ?? seq, nativeTools ? seq : toolDiscovery?.fromSeq ?? seq);
     const tools = log.flatMap(e => {
       if (e.turn !== turn || e.phase !== 'response' || e.method !== 'tools/list' || e.status !== 200) return [];
       try { const list = JSON.parse(e.body).result?.tools; return Array.isArray(list) ? [list] : []; } catch { return []; }
     }).find(list => list.every((t: { name: string; description?: string }) => t.description === contract.toolDescriptions[t.name]));
-    return { ...rules, session, turn, fromSeq: seq, phase: initial ? 'initial' : 'after-restart', serviceVersion: contract.version,
+    return { ...rules, session, turn, fromSeq: exposedAt, phase: initial ? 'initial' : 'after-restart', serviceVersion: contract.version,
       resources: 'available', toolDefinitions: tools ? { known: true, value: tools } : { known: false, reason: 'No matching tools/list response in this native turn' } };
   };
   const result: GivenRules[] = [];

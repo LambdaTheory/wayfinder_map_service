@@ -94,8 +94,13 @@ export const exactUpgradeHistory: ScriptCheck = a => {
   const probe = a.maps.find(m => m.mapId === 'Upgrade.Probe');
   const stored = a.upgrade?.restart && probe?.history.find(r => r.revision === 2 && r.kind === 'apply'
     && a.sessions.some(s => s.clientId === r.author.clientId));
-  const afterRestart = stored && writeCalls(a).some(e => e.seq > a.upgrade!.restart!.seq && resultIs(e, 'committed')
-    && object(e.result.value).mapId === probe!.mapId && object(e.result.value).revision === stored.revision);
+  const afterRestart = stored && writeCalls(a).some(e => {
+    if (e.seq <= a.upgrade!.restart!.seq || !resultIs(e, 'committed')) return false;
+    const value = object(e.result.value);
+    const revision = typeof value.revision === 'number' ? value.revision : object(value.revision).revision;
+    const mapId = value.mapId ?? object(value.revision).mapId;
+    return mapId === probe!.mapId && revision === stored.revision;
+  });
   if (stored && !afterRestart) return unknown('the stored Ticket write is not placed after the restart by native evidence');
   if (stored && (stored.state.tickets.length !== 1 || stored.state.tickets[0]!.id !== 'Probe.One'
     || !stored.state.tickets[0]!.title.startsWith(ticketTitlePrefix)))

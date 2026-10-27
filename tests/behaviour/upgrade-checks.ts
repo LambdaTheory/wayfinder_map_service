@@ -45,7 +45,9 @@ function afterRestart(a: AttemptRecord, label: string) {
   const old = before.serviceVersion ?? versionOf(before);
   const current = after.serviceVersion ?? versionOf(after);
   if (!old || !current) return { gap: unknown(`${label}: the service releases before and after restart were not recorded`) };
-  return { old, current, resources: after.resources, writes: writeCalls(a).filter(e => e.seq >= after.fromSeq) };
+  // Service restart and client rule discovery are independent evidence boundaries.
+  const restartSeq = a.upgrade?.restart?.seq ?? after.fromSeq;
+  return { old, current, resources: after.resources, writes: writeCalls(a).filter(e => e.seq >= restartSeq) };
 }
 /** The first refusal after the restart, or why there is none. */
 function firstRefusal(a: AttemptRecord, label: string) {

@@ -8,6 +8,7 @@ const args = process.argv.slice(2);
 if (args[0] === '--version') { console.log('codex-cli 0.0.0-fake'); process.exit(0); }
 const requestedModel = args[args.indexOf('-m') + 1];
 const model = requestedModel.replace('fake-upgrade-text-', 'fake-upgrade-');
+const codeMode = model === 'fake-upgrade-code-mode';
 const conflictReplay = model.startsWith('fake-upgrade-conflict-');
 const resume = args[1] === 'resume' ? args.at(-2) : null;
 const thread = resume ?? randomUUID();
@@ -42,12 +43,20 @@ const log = join(dir, `rollout-2026-10-26-${thread}.jsonl`);
 const record = e => appendFileSync(log, JSON.stringify(e) + '\n');
 if (!resume) record({ type: 'session_meta', payload: { id: thread, cli_version: '0.0.0-fake' } });
 record({ type: 'event_msg', payload: { type: 'thread_settings_applied', thread_settings: { model: requestedModel, reasoning_effort: 'low' } } });
-record({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: init.instructions }] } });
+if (codeMode) {
+  // Codex 0.164 exposes MCP metadata through exec output, not native tool definitions.
+  record({ type: 'response_item', payload: { type: 'additional_tools', tools: [{ name: 'functions' }, { name: 'clock' }, { name: 'collaboration' }] } });
+  record({ type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'discover-tools', output: [
+    { type: 'input_text', text: 'Script completed' },
+    { type: 'input_text', text: JSON.stringify(definitions.tools.map(t => ({ name: `mcp__wayfinder__${t.name}`,
+      description: `${init.instructions}\n\nversion: ${version}\n\n${t.description}` }))) },
+  ] } });
+} else record({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: init.instructions }] } });
 // Only this fake's owned rollout: force a refused old request after resume for Resource-recovery probes.
 const oldInstructions = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse)
-  .find(e => e.type === 'response_item' && e.payload?.role === 'developer').payload.content[0].text;
+  .find(e => e.type === 'response_item' && e.payload?.role === 'developer')?.payload.content[0].text ?? init.instructions;
 const oldVersion = /^version: (\S+)$/m.exec(oldInstructions)[1];
-if (definitions && model !== 'fake-upgrade-no-native-tools') record({ type: 'response_item', payload: { type: 'additional_tools', tools: definitions.tools } });
+if (!codeMode && definitions && model !== 'fake-upgrade-no-native-tools') record({ type: 'response_item', payload: { type: 'additional_tools', tools: definitions.tools } });
 emit({ type: 'thread.started', thread_id: thread }); emit({ type: 'turn.started' });
 const say = text => emit({ type: 'item.completed', item: { id: `item_${item++}`, type: 'agent_message', text } });
 const done = () => emit({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } });
@@ -57,6 +66,7 @@ const pauseForTimeout = () => {
   return new Promise(() => { setInterval(() => {}, 60_000); }); // Stay alive until the owned parent terminates us.
 };
 async function call(name, arguments_, resource = false, nativeComplete = true) {
+  if (codeMode && ['map_create', 'map_apply'].includes(name)) arguments_ = { ...arguments_, includeSnapshot: true };
   const base = { id: `item_${item++}`, type: 'mcp_tool_call', server: 'wayfinder', tool: name, arguments: arguments_ };
   emit({ type: 'item.started', item: base });
   const result = await rpc(resource ? 'resources/read' : 'tools/call', resource ? arguments_ : { name, arguments: arguments_ });
