@@ -61,9 +61,9 @@ Fog only gathers toward the Destination. Work beyond the Destination is a Scope 
 
 ## Out of scope
 
-When a Ticket turns out to lie beyond the Destination, do not settle it as a decision and do not rewrite it into one. Release any Claim, add a Scope Exclusion that names the Ticket and says why it is out of scope, and tell the human the Ticket stays open until the service supports removal. It is not a step on the route.
+A Ticket found beyond the Destination is never settled as a decision: release its Claim and propose a Scope Exclusion. The proposed Scope Exclusion names the Ticket and says why it is out of scope; tell the human the Ticket stays open until the service supports removal. It is not a step on the route. A question from the human is not an instruction or a verdict, even when you agree: answer it and ask before acting on it. Changing what a Map covers is the human's call: add or remove Scope Exclusions, change the Destination or Notes, or narrow a question or remove a Dependency to move work out, only on the human's explicit instruction or agreement to that proposal.
 
-When the cut reaches a decision the human already settled, do not settle new wording on your own. Record the Scope Exclusion, and if the decision itself must change, reopen it only with the human's agreement and settle it again only on their verdict.
+When the cut reaches a decision the human already settled, do not settle new wording on your own. Change Scope Exclusions, the Destination or Notes, or narrow a question or remove a Dependency to move work out, only on the human's explicit instruction or agreement; a question from the human is neither. If the decision itself must change, reopen it only with the human's agreement and settle it again only on their verdict.
 
 The same holds whenever new work would change a settled decision, on this Map or another: name the decision in the message that asks for the human's verdict. That verdict is the agreement to reopen it; do not reopen first and tell them afterwards.
 

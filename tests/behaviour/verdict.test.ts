@@ -113,6 +113,15 @@ describe('S15 witnessed ordering versus trace gaps', () => {
 });
 
 describe('Attempt verdicts on fixed evidence', () => {
+  test('F11 v1 evidence is not re-judged under its revised scope check', () => {
+    const s = byId('F11');
+    expect(s.version).toBeGreaterThan(1);
+    const old = sample('F11', [], { subject: { kind: 'scenario', id: 'F11', version: 1 } });
+    const verdict = judgeAttempt(s, old);
+    expect(verdict.outcome).toBe('insufficient-evidence');
+    expect(verdict.reasons.join()).toContain('so it is not re-judged');
+  });
+
   test('one unresolved Conflict read cannot hide an independently skipped reread in another turn', () => {
     const a = sample('S6', [], { events: [call(1, 'map_apply', { kind: 'conflict' }), call(2, 'map_read', undefined),
       call(3, 'map_apply', { kind: 'conflict' }, { turn: 1 })] });

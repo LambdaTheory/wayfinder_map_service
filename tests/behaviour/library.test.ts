@@ -177,6 +177,34 @@ const call = (seq: number, result: unknown, turn = 0, session = 'A', tool = 'map
      result: result === undefined ? { known: false, reason: 'no result' } : { known: true, value: result }, failed: result === undefined, requestId: { known: false, reason: 't' } });
 
 describe('check semantics', () => {
+  test.each(['fog', 'scopeExclusions'] as const)('F11 distinguishes %s add/update/remove from other content', section => {
+    const item = byId('F11').mustNot.find(i => i.id === 'scope-changed-on-question')!;
+    if (item.judge !== 'script') throw new Error('F11 scope check must be scripted');
+    for (const operation of ['add', 'update', 'remove']) {
+      const a = attempt();
+      const [before, after] = a.maps[0]!.history;
+      const content = { id: 'changed', text: 'Before', references: [] };
+      // An unrelated exclusion must not turn a Fog change into a scope change.
+      const exclusions = [{ id: 'unrelated', text: 'Unchanged scope', references: [] }];
+      before!.state = { ...before!.state, scopeExclusions: exclusions, [section]: operation === 'add' ? [] : [content] };
+      after!.state = { ...before!.state, currentRevision: 2,
+        [section]: operation === 'remove' ? [] : [{ ...content, text: 'After' }] };
+      after!.changes = [{ commandIndex: 0, command: `content.${operation}`, subjectId: content.id }];
+      expect(item.check(a).status, operation).toBe(section === 'scopeExclusions' ? 'violated' : 'holds');
+    }
+  });
+
+  test('F11 forbids removing a Dependency but allows adding one', () => {
+    const item = byId('F11').mustNot.find(i => i.id === 'scope-changed-on-question')!;
+    if (item.judge !== 'script') throw new Error('F11 scope check must be scripted');
+    for (const operation of ['add', 'remove']) {
+      const a = attempt();
+      a.maps[0]!.history[1]!.changes = [{ commandIndex: 0, command: `dependency.${operation}`, subjectId: 'q' }];
+      expect(item.check(a).status).toBe(operation === 'remove' ? 'violated' : 'holds');
+    }
+    expect(item.check(attempt({ maps: [], missing: ['maps'] })).status).toBe('unknown');
+  });
+
   test('Controller Revisions are never the agent\'s; receipts place agent Revisions', () => {
     const revs = agentRevisions(attempt());
     expect(revs.map(r => [r.rev.revision, r.session, r.turn])).toEqual([[2, 'A', 0]]);
