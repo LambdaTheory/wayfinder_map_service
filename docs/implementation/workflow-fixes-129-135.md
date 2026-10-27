@@ -203,7 +203,9 @@ W6 从 v1 升 v2；W6b 从当前答题台 v2 升 v3（3.0.0 旧批次使用的�
 首轮收尾记录：Node 26.3.0，`npm run build` 通过，`npm test -- --maxWorkers=4` **57 个文件 / 2412 个测试通过**，`npm run typecheck` 通过；`git diff --check` 通过。核对时 main 仍为起点 `21a76c8`。种子独立提交为 `6823d71`，本轮保留并清理其场景内来源文字。
 
 
-第二轮收尾记录：定向 W5 回归 21 passed；完整构建、测试与类型检查结果在运行后补录。版本保持 5.0.0。
+第二轮收尾记录：Node 26.3.0，定向 W5 回归 **21 passed**；S6 v2 追加完成后重新执行 `npm run build`、`npm test -- --maxWorkers=4`（**57 个文件 / 2427 个测试通过**）、`npm run typecheck`，全部通过；`git diff --check` 通过。源码和 dist 的整个生成 contract 均与权威 Markdown 的解析结果相等。规则及评审修正提交 `f5509c7`，S6 v2 独立提交 `d63dac8`；版本保持 **5.0.0**，核对远端 main 仍为 `21a76c8`。
+
+首轮全量检查运行期间收到 S6 追加要求，测试进程已缓存 v1，新增 v2 断言因此得到 1 failed / 2426 passed；本轮没有沿用该结果，而是在最终代码上重新完整运行并取得上述 2427 passed。
 
 ## 协调者追加：S6 v2
 
