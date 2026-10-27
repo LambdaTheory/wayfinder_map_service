@@ -17,6 +17,8 @@ Wayfinder Map Service 是一套与客户端无关的决策地图系统，供 Cha
 
 本地 MCP 服务同时提供只读的地图查看页，只能从本机打开：`http://127.0.0.1:<port>/` 列出所有地图，`/maps/<mapId>` 画出一张地图，新 Revision 提交后几秒内自动更新。`map_create` 和 `map_read` 的结果带着这个链接（`viewerUrl`）。查看页不写地图，ChatGPT 测试隧道也不转发它。见[查看页规格](docs/spec/map-viewer.md)和[实现记录](docs/implementation/map-viewer.md)。
 
+答题台已实现但默认关闭，沿用 `answerDeskEnabled` 服务设置。启用后，`wayfinder desk <地图 ID>` 打开只写答复的带钥匙入口；查看、地图编辑和 agent 结算的边界见[实现记录](docs/implementation/answer-desk-viewer.md)。
+
 删除仍在规划，规格尚未接受；回滚 2026-10-25 起不做了。实现跟踪见 [GitHub Issues](https://github.com/kun-g/wayfinder_map_service/issues)，规划入口见 [GitHub 规划地图](docs/planning/README.md)。v1 契约中网页渲染的缩放和过滤、MCP Apps UI、OAuth 和 PostgreSQL 尚未进入这个本地切片。
 
 ## 启动
@@ -52,7 +54,7 @@ npm run --silent backup -- <absolute-source> <fresh-absolute-destination>
 - [已接受的 M1 实现规格](docs/spec/m1.md)
 - [已接受的本地 MCP/SQLite 实现规格](docs/spec/mcp-sqlite.md)
 - [Local Map viewer specification and Answer Desk amendment](docs/spec/map-viewer.md)
-- [Answer Desk specification — accepted 2026-10-26; implementation pending](docs/spec/answer-desk.md)
+- [Answer Desk specification — accepted 2026-10-26; staged implementation, default off](docs/spec/answer-desk.md)
 - [已接受的行为测试与验收需求](docs/spec/behaviour-testing.md)（场景库和 Codex 运行器已实现，其余按工单推进）
 - [行为测试运行结果](docs/implementation/behaviour-runs.md)
 - [专用 Wayfinder Agent 启动器](scripts/wayfinder-agent/README.md)（`wayfinder` 命令）

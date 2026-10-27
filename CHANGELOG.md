@@ -4,6 +4,12 @@ All notable project changes are recorded here. Historical implementation evidenc
 
 Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Release Version, covers the service and the workflow it carries; `docs/spec/mcp-sqlite.md` §14.3 says which part to raise, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion` (`1.0.0` to `3.0.0` below), and the server reported a fixed `0.1.0`.
 
+## 3.3.0 (2026-10-27)
+
+- Add the Answer Desk viewer behind the existing **default-off** `answerDeskEnabled` setting: service-ordered questions, options and full recommendations, keyboard/text answers, selected recommendation confirmation, answer changes, delivery/Settlement states and publication history. Two-second polling also follows desk-only writes without advancing a Map Revision.
+- Add one answer-only `POST /api/desk` route for submitting/changing answers, filing/replacing Reopen Requests and cancelling untaken requests. Exact loopback Host, same-origin checks, a separate process-scoped browser key and bounded JSON protect it; all other viewer routes remain GET/HEAD. When disabled the route returns 404 and the viewer has no desk UI.
+- Add `wayfinder desk <mapId>`: open the viewer with a private service-generated key in the fragment, strip it immediately and retain it only in page closure memory. A service restart rotates the key; no MCP credential can substitute for it. Reopen entry displays the exact affected Settlement bindings and requires re-review when they change. MCP tools and workflow text remain unchanged; coordinated real-client acceptance stays with #114.
+
 ## 3.2.0 (2026-10-27)
 
 - Add format-2 Desk Question, Desk Answer and Reopen Request storage; service startup alone explicitly opts into migration, first retains a consistent private backup, then migrates format 1 atomically. Every backup uses a read-only source connection, preserving format 1 or 2 in both source and output, including the ChatGPT runner's initial, scheduled and final backups when attached to an older running service.

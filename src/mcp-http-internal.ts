@@ -10,6 +10,7 @@ import { createMapMcpServer } from './mcp-tools.js';
 import type { SQLiteStorage } from './sqlite-storage.js';
 import { isPlainObject, validateAuthor, validateId, validateObject } from './values.js';
 import { handleViewer, requestTarget } from './viewer-http.js';
+import { createViewerKey } from './viewer-key.js';
 import { CallMetadata, classifyCallResult } from './call-metadata.js';
 import type { CallObservation } from './call-metadata.js';
 
@@ -27,6 +28,8 @@ export interface LocalServiceConfiguration {
   readonly toolsOnly?: boolean;
   // Staged Answer Desk capability; #114 enables it by default.
   readonly answerDeskEnabled?: boolean;
+  // Private operator handoff to the launcher; never served over HTTP.
+  readonly answerDeskKeyPath?: string;
 }
 export interface LocalMcpService {
   stop(): Promise<void>;
@@ -42,8 +45,9 @@ export class LocalServiceFailure extends Error {
 }
 
 export function captureConfiguration(input: LocalServiceConfiguration): LocalServiceConfiguration {
-  if (validateObject(input, [], ['databasePath', 'port', 'token', 'actorId', 'clientId', 'allowedOrigins', 'credentialsPath', 'toolsOnly', 'answerDeskEnabled'])
+  if (validateObject(input, [], ['databasePath', 'port', 'token', 'actorId', 'clientId', 'allowedOrigins', 'credentialsPath', 'toolsOnly', 'answerDeskEnabled', 'answerDeskKeyPath'])
     || (input.answerDeskEnabled !== undefined && typeof input.answerDeskEnabled !== 'boolean')
+    || (input.answerDeskKeyPath !== undefined && (typeof input.answerDeskKeyPath !== 'string' || !isAbsolute(input.answerDeskKeyPath)))
     || (input.toolsOnly !== undefined && typeof input.toolsOnly !== 'boolean')
     || typeof input.databasePath !== 'string' || !input.databasePath
     || !Number.isInteger(input.port) || input.port < 1 || input.port > 65535
@@ -118,6 +122,7 @@ interface Session {
 export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceConfiguration): Promise<LocalMcpService> {
   const config = captureConfiguration(input);
   if (config.answerDeskEnabled !== true && storage.hasDeskHistory()) throw new LocalServiceFailure('answer_desk_required');
+  const viewerKey = config.answerDeskEnabled === true ? createViewerKey(config.answerDeskKeyPath) : undefined;
   const metadata = new CallMetadata(config.databasePath, config.token);
   const tokenHash = digest(`Bearer ${config.token}`);
   function authenticate(authorization: string | undefined): Credential | undefined {
@@ -165,8 +170,8 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
   async function handle(request: IncomingMessage, response: ServerResponse, observation: CallObservation | undefined) {
     if (stopping) { httpFailure(response, 503, 'Service stopping'); return; }
     if (request.headers.host !== host) { httpFailure(response, 403, 'Host forbidden'); return; }
-    // The read-only viewer needs no token; routing by pathname keeps /mcp?query on the 404 below.
-    if (requestTarget(request.url, host)?.pathname !== '/mcp') { await handleViewer(request, response, storage, host); return; }
+    // Viewer reads need no token; its optional response route has its own capability.
+    if (requestTarget(request.url, host)?.pathname !== '/mcp') { await handleViewer(request, response, storage, host, viewerKey); return; }
     const credential = authenticate(request.headers.authorization);
     if (!credential) { httpFailure(response, 401, 'Local token required'); return; }
     const presentedSession = typeof request.headers['mcp-session-id'] === 'string' ? sessions.get(request.headers['mcp-session-id']) : undefined;
@@ -283,10 +288,17 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
       http.listen(config.port, '127.0.0.1', () => { http.removeListener('error', reject); resolve(); });
     });
   } catch { throw new LocalServiceFailure('port_unavailable'); }
+  try { viewerKey?.publish(); }
+  catch {
+    await new Promise<void>(resolve => http.close(() => resolve()));
+    metadata.stop();
+    throw new LocalServiceFailure('invalid_configuration');
+  }
   let stopped: Promise<void> | undefined;
   return { metadataStatus: () => metadata.status(), stop() {
     if (!stopped) {
       stopping = true;
+      viewerKey?.remove();
       stopped = (async () => {
         await Promise.all([...requests]);
         if (activeCalls) await new Promise<void>(resolve => drains.add(resolve));
