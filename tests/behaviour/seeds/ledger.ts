@@ -7,6 +7,7 @@ export const L = {
   columns: { id: 'csv-columns', type: 'research', title: '导出文件的列', question: '银行导出的 CSV 有哪些列，编码是什么？' },
   dedupe: { id: 'dedupe', type: 'grilling', title: '重复账目', question: '同一笔账在两个导出文件里都出现时，怎么认定重复？' },
   nocat: { id: 'no-category', type: 'grilling', title: '无类别账目', question: '没有类别的账记到哪一类？' },
+  output: { id: 'output-format', type: 'grilling', title: '汇总输出', question: '按什么维度汇总账单，输出哪些列和格式？' },
 } satisfies Record<string, SeedTicket>;
 
 const settledDecision = (statement: string, rationale: string) => decision(statement, rationale, '2026-10-24 与 Kun 的 grilling 会话');
@@ -16,6 +17,9 @@ export const settled = {
   columns: finding('列为 日期,摘要,金额,类别；支出为负数；UTF-8 带 BOM。', '2026-10-24 读取银行导出样例'),
   dedupe: settledDecision('日期、金额、摘要三项都相同算重复，只计一次。', 'Kun 认为银行流水里这三项相同即为同一笔。'),
   nocat: settledDecision('没有类别的账记到「未分类」。', 'Kun 想先看到全部支出，再补类别。'),
+  // Synthetic completion decision for #134/#135; not a historical human verdict.
+  output: decision('按月份和类别汇总支出，输出带表头的 UTF-8 CSV 到标准输出，列为 month,category,expense_yuan；month 为 YYYY-MM，expense_yuan 为支出正数，按已定金额规则换成元并保留两位。',
+    'Kun 要按月看各类支出，CSV 便于再处理。', '与 Kun 确认账单汇总输出的 grilling 会话'),
 };
 
 export function ledgerMap(tickets: SeedTicket[]): SeedMap {

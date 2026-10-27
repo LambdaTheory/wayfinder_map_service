@@ -144,12 +144,13 @@ test('W01/W02: F11 guidance requires a human instruction or agreement before mov
   expect(instructions).toContain('A Ticket found beyond the Destination is never settled as a decision: release its Claim and propose a Scope Exclusion.');
   expect(instructions).toContain("A question from the human is not an instruction or a verdict, even when you agree: answer it and ask before acting on it. Changing what a Map covers is the human's call: add or remove Scope Exclusions, change the Destination or Notes, or narrow a question or remove a Dependency to move work out, only on the human's explicit instruction or agreement to that proposal.");
   expect(description).toContain("never move answers, recommendations or conversation into questions or Notes. Change Scope Exclusions, the Destination or Notes, or narrow a question or remove a Dependency to move work out, only on the human's explicit instruction or agreement; a question from the human is neither.");
-  expect(instructions).toContain('that verdict is the agreement to reopen it. Keep a Claim across turns only while waiting for that reply;');
-  expect(instructions).toContain("citing the request in the reason. A question from the human is not an instruction or a verdict,");
+  expect(instructions).toContain('that verdict is the agreement to reopen it.');
+  expect(instructions).toContain('Keep a Claim across turns only while waiting for that reply;');
+  expect(instructions).toContain('citing that request in the reason.');
   expect(instructions.split('\n\n').find(paragraph => paragraph.startsWith('Verdicts and Claims:')))
     .toMatch(/agreement to that proposal\.$/);
   expect(workflowContract.markdown).not.toContain('add a Scope Exclusion and tell the human');
-  expect(workflowContract.markdown).toContain("Put newly precise Tickets, Dependencies, Fog changes and Scope Exclusions in the same ordered atomic batch when they are part of that resolution. Change Scope Exclusions, the Destination or Notes, or narrow a question or remove a Dependency to move work out, only on the human's explicit instruction or agreement; a question from the human is neither.");
+  expect(workflowContract.markdown).toContain("Put newly precise Tickets still needed for the route, Dependencies, Fog changes and Scope Exclusions in the same ordered atomic batch when they are part of that resolution. Change Scope Exclusions, the Destination or Notes, or narrow a question or remove a Dependency to move work out, only on the human's explicit instruction or agreement; a question from the human is neither.");
 });
 
 test('U00: writes name the release whose rules they follow; a missing or other version is refused before anything is read or written', async () => {
