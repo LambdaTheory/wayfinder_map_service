@@ -886,6 +886,8 @@ def cmd_status(_args):
 def cmd_desk(args):
     if len(args) != 1 or not ID_PATTERN.fullmatch(args[0]):
         die("用法：wayfinder desk <地图 ID>")
+    if sys.platform != "darwin":
+        die("答题入口目前只支持 macOS；其他平台尚无可安全传递钥匙的浏览器入口。")
     ensure_service(quiet=True)
     # Read only after the service is ready: every restart replaces this capability.
     # Do not print the URL or pass it through the harness/launch metadata.
@@ -911,8 +913,6 @@ def cmd_desk(args):
         # Generic webbrowser controllers (including BROWSER) put the URL in argv.
         # macOS opens the default browser through an Apple event instead. Only the
         # pipe contains the URL; never use -e, shell interpolation or an env var.
-        if sys.platform != "darwin":
-            raise OSError("secure browser handoff unavailable")
         opened = subprocess.run(["/usr/bin/osascript", "-"],
                                 input='open location "{}"\n'.format(url), text=True,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

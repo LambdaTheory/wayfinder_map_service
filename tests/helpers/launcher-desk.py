@@ -90,6 +90,8 @@ for failure in ['exit', 'exception', 'unsupported']:
         launcher['subprocess'].run = lambda *args, **kwargs: (_ for _ in ()).throw(OSError(key))
     if failure == 'unsupported':
         launcher['sys'].platform = 'linux'
+        launcher['ensure_service'] = lambda **kwargs: (_ for _ in ()).throw(AssertionError('unsupported platform started service'))
+        path.unlink()  # Platform guidance must precede even looking for a key.
         launcher['subprocess'].run = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('unsafe fallback'))
     with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
         try:
@@ -99,4 +101,5 @@ for failure in ['exit', 'exception', 'unsupported']:
             pass
 assert browser_log.read_text() == probe
 assert key not in output.getvalue()
+assert '答题入口目前只支持 macOS' in output.getvalue()
 print('launcher desk verified')

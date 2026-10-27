@@ -3,11 +3,11 @@
 (() => {
   'use strict';
   const POLL_MS = 2000;
-  // Never retain a capability in the URL, DOM, storage, history state or a global.
-  const browserKey = new URLSearchParams(location.hash.slice(1)).get('key');
-  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+  // Read and strip the capability only when the service confirms the desk is enabled.
+  // The disabled viewer leaves URL fragments alone; enabled keys stay in closures only.
+  let browserKey;
   let deskController = null;
-  let deskMode = !!browserKey;
+  let deskMode = false;
   const $ = id => document.getElementById(id);
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const px = value => `${Math.round(value)}px`;
@@ -91,6 +91,11 @@
     const deskChanged = !!view?.desk !== !!next.desk;
     if (!next.desk && deskController) { deskController.destroy(); deskController = null; deskMode = false; }
     if (next.desk && !deskController) {
+      if (browserKey === undefined) {
+        browserKey = new URLSearchParams(location.hash.slice(1)).get('key');
+        if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+        deskMode = !!browserKey;
+      }
       const { createDesk } = await import('/viewer/desk.js');
       deskController = createDesk({ h, mapId, key: browserKey, refresh: pollMap });
     }

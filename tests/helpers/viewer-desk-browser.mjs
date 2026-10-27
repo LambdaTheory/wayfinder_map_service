@@ -129,6 +129,58 @@ async function verifyFocusAndChangedQuestions(context, origin, key) {
     assert.equal(count(), before + 2); assert.equal(writes, beforeWrites + 2);
   } finally { await page.close(); }
 }
+async function verifyFocusAcrossPolling(context, origin, key) {
+  for (const change of ['publication', 'taken']) for (const focus of ['text', 'queue', 'option']) {
+    const id = `Synthetic.Poll.${change}.${focus}`;
+    const created = prepareCreate({ id, title: 'Polling focus regression', destination: 'No unintended answers', author });
+    assert.equal(created.kind, 'ok'); await storage.adapter.commit(created.value);
+    const mutate = commands => apply(commands, undefined, id);
+    await mutate(['A', 'B', 'Source'].flatMap(name => [create(name, name, `Question ${name}?`), claim(name), post(name, 'One')]));
+    assert.equal(storage.desk.submitAnswers(id, [{ questionId: 'Q.Source', questionVersion: 1, choice: { option: 1 } }]).kind, 'updated');
+    const count = () => storage.desk.read(id).answers.length;
+    const page = await context.newPage(); page.setDefaultTimeout(10000);
+    let writes = 0;
+    page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/desk')) writes++; });
+    const queue = name => page.locator('.desk-queue-item').filter({ hasText: `Question ${name}?` });
+    const nextPoll = () => page.waitForResponse(response => response.url().includes(`/api/maps/${id}/view?`));
+    try {
+      await page.goto(`${origin}/maps/${id}#key=${key}`);
+      await page.locator('.desk-question h2').getByText('Question A?', { exact: true }).waitFor();
+      const control = focus === 'text' ? page.getByRole('button', { name: '写文字答复 · t' })
+        : focus === 'queue' ? queue('B') : page.locator('.desk-question .desk-option').nth(1);
+      await tabTo(page, control);
+      const before = count();
+      if (change === 'publication') {
+        await mutate([create('C', 'C', 'Question C?'), claim('C'), post('C', 'One')]);
+        await queue('C').waitFor();
+      } else {
+        const revision = (await storage.adapter.readCurrent(id)).value.currentRevision;
+        fakeTime += 15000; storage.desk.takeEligible(id, 'synthetic-worker');
+        await page.locator('.desk-answer.taken').filter({ hasText: 'Source' }).waitFor();
+        assert.equal((await storage.adapter.readCurrent(id)).value.currentRevision, revision);
+      }
+      await page.keyboard.press('Enter');
+      await nextPoll();
+      assert.equal(count(), before, `${change}/${focus}: Enter stored an answer after polling`);
+      assert.equal(writes, 0, `${change}/${focus}: Enter sent a write after polling`);
+      // A later poll or clicking empty space must not silently re-enable shortcuts.
+      await page.locator('body').click({ position: { x: 2, y: 2 } });
+      for (const shortcut of ['Enter', '1', '2', '3', 't']) await page.keyboard.press(shortcut);
+      await nextPoll();
+      assert.equal(count(), before); assert.equal(writes, 0);
+      assert.equal(await page.locator('dialog[open]').count(), 0);
+      // Explicitly choosing B resumes shortcuts without submitting on the selection Enter.
+      await tabTo(page, queue('B')); await page.keyboard.press('Enter');
+      await page.locator('.desk-question h2').getByText('Question B?', { exact: true }).waitFor();
+      assert.equal(count(), before); assert.equal(writes, 0);
+      await page.keyboard.press('2');
+      await page.locator('.desk-answer').filter({ hasText: 'Question B?' }).waitFor();
+      assert.equal(storage.desk.inspect(id).desk.deskQuestions.find(q => q.ticketId === 'B').currentAnswer.choice.option, 2);
+      assert.equal(count(), before + 1); assert.equal(writes, 1);
+      console.log(`Polling focus passed: ${change}/${focus}`);
+    } finally { await page.close(); }
+  }
+}
 try {
   const created = prepareCreate({ id: mapId, title: '答题台 · 合成示例', destination: '验证关键选择，形成一份可以执行的计划', author });
   await storage.adapter.commit(created.value);
@@ -157,6 +209,7 @@ try {
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.screenshot({ path: join(output, '375px.png'), fullPage: true });
   await page.setViewportSize({ width: 1280, height: 960 }); await page.waitForTimeout(250);
+  await verifyFocusAcrossPolling(context, `http://127.0.0.1:${port}`, key);
   await verifyFocusAndChangedQuestions(context, `http://127.0.0.1:${port}`, key);
   // Viewing and cancelling do nothing; whitespace is disabled; drafts survive desk-only polling.
   await page.locator('.desk-queue-item').filter({ hasText: '第一轮先验证多大范围？' }).click(); await page.keyboard.press('t');
@@ -262,8 +315,13 @@ try {
   await service.stop(); storage = openSQLite(disabledPath); service = await serveLocalMcp(storage, { ...config, databasePath: disabledPath, answerDeskEnabled: false });
   await page.getByRole('button', { name: '答题台', exact: true }).waitFor({ state: 'detached' });
   assert.equal(await page.locator('.desk').count(), 0);
+  for (const fragment of ['#section', `#key=${key}`]) {
+    await page.goto(`${url}${fragment}`); await page.locator('.map-drawing').waitFor();
+    assert.equal(new URL(page.url()).hash, fragment);
+    assert.equal(await page.locator('.desk').count(), 0);
+  }
   assert.equal((await page.request.post(`http://127.0.0.1:${port}/api/desk`, { data: {} })).status(), 404);
-  console.log('Browser evidence passed: light/dark/375px; fragment/storage; Tab/Enter queue/text/options; changed-question pause and deliberate selection; keyboard/text/bulk/edit; live polling; stale reopen list; cancellation; Taken/Settled; requested-option marker and text context; restart; disabled UI.');
+  console.log('Browser evidence passed: light/dark/375px; fragment/storage; Tab/Enter queue/text/options; six polling/focus interleavings; changed-question pause and deliberate selection; keyboard/text/bulk/edit; live polling; stale reopen list; cancellation; Taken/Settled; requested-option marker and text context; restart; disabled UI and preserved fragments.');
 } finally {
   await browser?.close(); await service?.stop(); storage.close(); rmSync(directory, { recursive: true, force: true });
 }

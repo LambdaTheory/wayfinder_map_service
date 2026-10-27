@@ -3,8 +3,12 @@ export function createDesk({ h, mapId, key, refresh }) {
   const element = h('section', { class: 'desk', 'aria-label': '答题台' });
   const content = h('div');
   const status = h('p', { class: 'desk-feedback', role: 'status', 'aria-live': 'polite' });
+  // This non-answering focus target survives every repaint. Only deliberate question
+  // selection (or a successful explicit answer) resumes global shortcuts after focus loss.
+  const shortcutPause = h('p', { class: 'desk-warning', role: 'status', tabindex: '-1', hidden: true },
+    '答题台已更新，快捷键已暂停。请重新选择题目后继续，或直接选择选项、打开文字答复。');
   const dialog = h('dialog', { class: 'desk-dialog', 'aria-label': '确认答复' });
-  element.append(status, content, dialog);
+  element.append(status, shortcutPause, content, dialog);
   const names = { pending: '待答', answered: '已答 · 等待取走', taken: '已取走 · 等待结算', settled: '已结算', withdrawn: '已撤回', superseded_by_reopen: '已重开 · 旧题留档' };
   const live = q => ['pending', 'answered', 'taken'].includes(q.state);
   const identity = q => `${q.questionId}/${q.questionVersion}`;
@@ -19,6 +23,7 @@ export function createDesk({ h, mapId, key, refresh }) {
   const title = q => h('span', null, h('code', null, q.ticketId), ` · 第 ${q.questionVersion} 版`);
   const answer = (q, choice) => ({ questionId: q.questionId, questionVersion: q.questionVersion, choice });
   function chooseQuestion(q) {
+    shortcutPause.hidden = true;
     changedQuestion = null; active = q ? identity(q) : null; render();
     const card = content.querySelector('.desk-question');
     card.focus(); card.scrollIntoView({ block: 'nearest' });
@@ -51,7 +56,7 @@ export function createDesk({ h, mapId, key, refresh }) {
     return ok;
   }
   async function submit(q, choice) {
-    if (await write({ action: 'answer', submissions: [answer(q, choice)] })) { active = null; render(); }
+    if (await write({ action: 'answer', submissions: [answer(q, choice)] })) { shortcutPause.hidden = true; active = null; render(); }
   }
   function openText(q) {
     if (!canWrite()) return;
@@ -151,8 +156,10 @@ export function createDesk({ h, mapId, key, refresh }) {
       button('写文字答复 · t', () => openText(q), { disabled: !canWrite() }),
       h('p', { class: 'desk-muted' }, '选中即提交 · Enter 推荐 · 1–3 选择 · t 文字。打开、查看和取消都不会作答。'));
   }
-  function render() {
+  function render(polling = false) {
     if (!data) return;
+    const losesFocus = polling && content.contains(document.activeElement);
+    if (losesFocus) shortcutPause.hidden = false;
     const pending = data.deskQuestions.filter(q => q.state === 'pending');
     const current = changedQuestion ? null : data.deskQuestions.find(q => identity(q) === active && live(q)) ?? pending[0];
     active = current ? identity(current) : null;
@@ -198,9 +205,10 @@ export function createDesk({ h, mapId, key, refresh }) {
       h('div', { class: 'desk-summary' }, h('span', null, `待答 ${pending.length} · 已答 ${count('answered')} · 已取走 ${count('taken')} · 已结算 ${count('settled')}`),
         h('span', { class: 'desk-muted' }, data.quietUntil && Date.parse(data.quietUntil) > Date.now() ? `本轮最早可取走：${new Date(data.quietUntil).toLocaleTimeString()}` : '答复取走后仍需 agent 结算')),
       h('div', { class: 'desk-layout' }, queue, questionCard(current)), bulk, requests, history, settled);
+    if (losesFocus) shortcutPause.focus({ preventScroll: true });
   }
   const keydown = event => {
-    if (element.hidden || dialog.open || !canWrite() || event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey
+    if (element.hidden || dialog.open || !shortcutPause.hidden || !canWrite() || event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey
       || event.target.closest('button,input,textarea,select,a,summary,[contenteditable],[role="button"],[role="link"]')) return;
     const q = data?.deskQuestions.find(q => identity(q) === active && live(q)); if (!q) return;
     const option = event.key === 'Enter' ? q.recommendedOption : /^[1-3]$/.test(event.key) ? Number(event.key) : null;
@@ -216,6 +224,6 @@ export function createDesk({ h, mapId, key, refresh }) {
       changedQuestion = data.deskQuestions.find(q => identity(q) === active); active = null;
     }
     data = next; const nextFingerprint = JSON.stringify(next);
-    if (fingerprint !== nextFingerprint) { fingerprint = nextFingerprint; render(); updateEditor(); }
+    if (fingerprint !== nextFingerprint) { fingerprint = nextFingerprint; render(true); updateEditor(); }
   } };
 }
