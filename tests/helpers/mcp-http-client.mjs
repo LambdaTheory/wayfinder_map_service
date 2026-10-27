@@ -1,11 +1,14 @@
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client } from '@modelcontextprotocol/client';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 
-// Exercise the pinned actual SDK client at runtime. Its accessor declarations
-// conflict with its own Transport interface under exactOptionalPropertyTypes;
-// this JS test harness does not weaken strict checking of product code.
-export async function createHttpTestClient(port, token) {
-  const client = new Client({ name: 'wayfinder-http-test', version: '0.1.0' });
+// Exercise the pinned SDK client with explicit protocol selection; the default
+// remains the legacy era for existing fixtures and independent service probes.
+export async function createHttpTestClient(port, token, protocol = '2025-11-25') {
+  const client = new Client({ name: 'wayfinder-http-test', version: '0.1.0' }, {
+    supportedProtocolVersions: [protocol],
+    versionNegotiation: { mode: protocol === '2025-11-25' ? 'legacy' : { pin: protocol } },
+  });
+  const requests = [];
   let negotiatedProtocol;
   let initializeResult;
   let streamResponse;
@@ -14,6 +17,8 @@ export async function createHttpTestClient(port, token) {
     requestInit: { headers: { Authorization: `Bearer ${token}`, Connection: 'close' } },
     reconnectionOptions: { maxRetries: 0, maxReconnectionDelay: 1000, initialReconnectionDelay: 100, reconnectionDelayGrowFactor: 1 },
     fetch: async (url, options) => {
+      requests.push({ method: options?.method, headers: Object.fromEntries(new Headers(options?.headers)),
+        body: options?.body ? JSON.parse(options.body) : null });
       const response = await fetch(url, options);
       if (options?.method === 'GET') streamResponse({ status: response.status });
       if (options?.body && JSON.parse(options.body).method === 'initialize' && response.ok) {
@@ -24,5 +29,6 @@ export async function createHttpTestClient(port, token) {
     },
   });
   await client.connect(transport);
-  return { client, transport, negotiatedProtocol, initializeResult, streamProbe };
+  negotiatedProtocol = client.getNegotiatedProtocolVersion();
+  return { client, transport, negotiatedProtocol, initializeResult, streamProbe, requests };
 }

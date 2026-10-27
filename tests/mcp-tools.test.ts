@@ -2,11 +2,12 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { CallToolResultSchema, ErrorCode, LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { Ajv } from 'ajv';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { ProtocolErrorCode, LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/server';
+import type { CallToolResult as SdkCallToolResult } from '@modelcontextprotocol/server';
+type CallToolResult = SdkCallToolResult & { structuredContent?: Record<string, unknown> };
+import { Ajv, type AnySchema } from 'ajv';
 import { afterEach, expect, test } from 'vitest';
 import { createMapMcpServer, mapTools, toolsOnlyMapTools, workflowContract } from '../src/mcp-tools.js';
 import { sqliteLifecycleForTests } from '../src/sqlite-internal.js';
@@ -28,7 +29,7 @@ function id(value: string) {
 const configuration = { actorId: 'operator', clientId: 'codex-test' };
 const ajv = new Ajv({ strict: false });
 const schemas = new Map(mapTools.map(tool => [tool.name, {
-  input: ajv.compile(tool.inputSchema), output: ajv.compile(tool.outputSchema!),
+  input: ajv.compile(tool.inputSchema), output: ajv.compile(tool.outputSchema! as AnySchema),
 }]));
 async function fixture(faults: Parameters<typeof sqliteLifecycleForTests>[0] = {}, answerDeskEnabled?: boolean) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'wayfinder-mcp-tools-acceptance-')));
@@ -157,7 +158,7 @@ test('U00: writes name the release whose rules they follow; a missing or other v
     .structuredContent).toEqual(refused(null));
   expect((await f.read()).structuredContent).toMatchObject({ revision: { revision: 1 } });
   for (const name of ['map_create', 'map_apply']) {
-    const schema = mapTools.find(tool => tool.name === name)!.inputSchema as { required: string[]; properties: Record<string, { description: string }> };
+    const schema = mapTools.find(tool => tool.name === name)!.inputSchema as unknown as { required: string[]; properties: Record<string, { description: string }> };
     expect(schema.required).toContain('version');
     expect(schema.properties.version!.description).not.toContain(workflowContract.version);
     // Compatibility mode differs only in the version help, which states the release.
@@ -426,21 +427,22 @@ test('P02/P03/D09: current reads pin observed N and writes return exact committe
   expect((await originalCurrent(id('Acceptance.Alpha')))).toMatchObject({ value: { currentRevision: 6 } });
 });
 
-test('P05: unknown tool and malformed tools/call are protocol errors, never fabricated domain errors', async () => {
+test('P05: legacy unknown tools, malformed calls and task markers are protocol errors without publication', async () => {
   const f = await fixture();
-  await expect(f.client.callTool({ name: 'unknown', arguments: {} })).rejects.toMatchObject({ code: ErrorCode.InvalidParams });
+  await expect(f.client.callTool({ name: 'unknown', arguments: {} })).rejects.toMatchObject({ code: ProtocolErrorCode.InvalidParams });
   expect((await f.call('map_list')).structuredContent).toMatchObject({ maps: [] });
   const responses: unknown[] = [];
   f.clientTransport.onmessage = message => { responses.push(message); };
   await f.clientTransport.send({ jsonrpc: '2.0', id: 900, method: 'tools/call', params: { name: 42 } });
   await f.clientTransport.send({ jsonrpc: '2.0', id: 901, method: 'tools/call', params: { name: 'map_read', arguments: 'bad' } });
   await f.clientTransport.send({ jsonrpc: '2.0', id: 902, method: 'tools/call', params: { name: 'map_create', task: {},
-    arguments: { mapId: 'TaskUnsupported', title: 'T', destination: 'D' } } });
+    arguments: { version, mapId: 'TaskUnsupported', title: 'T', destination: 'D' } } });
   await new Promise<void>(resolve => setImmediate(resolve));
   expect(responses).toHaveLength(3);
-  // The pinned SDK's request-schema parse reports InternalError; it is still
+  // The legacy SDK transport retains params.task; modern HTTP strips that deprecated field.
+  // Legacy malformed or unsupported task requests return InvalidParams; this is
   // a JSON-RPC error, not a successful tools/call or a business rejection.
-  for (const response of responses) expect(response).toMatchObject({ error: { code: ErrorCode.InternalError } });
+  for (const response of responses) expect(response).toMatchObject({ error: { code: ProtocolErrorCode.InvalidParams } });
   expect(f.storage.listMaps()).toMatchObject({ maps: [] });
 });
 
@@ -520,8 +522,8 @@ test('P01: author configuration rejected before serving, captured against later 
   await server.connect(st); await client.connect(ct);
   try {
     await client.callTool({ name: 'map_create', arguments: versioned('map_create', { mapId: 'Captured', title: 'T', destination: 'D' }) });
-    const read = await client.request({ method: 'tools/call', params: { name: 'map_read', arguments: { mapId: 'Captured' } } }, CallToolResultSchema);
-    expect(snapshot(read).author).toMatchObject(configuration);
+    const read = await client.request({ method: 'tools/call', params: { name: 'map_read', arguments: { mapId: 'Captured' } } });
+    expect(snapshot(read as CallToolResult).author).toMatchObject(configuration);
   } finally { await client.close(); await server.close(); }
 });
 

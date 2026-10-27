@@ -1,9 +1,7 @@
 import { projectDesk } from './desk-domain.js';
 import { emptyDesk } from './desk-types.js';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { CallToolRequestSchema, ErrorCode, GetPromptRequestSchema, ListPromptsRequestSchema, ListResourcesRequestSchema,
-  ListToolsRequestSchema, McpError, ReadResourceRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import type { CallToolRequest, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { Server, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
+import type { CallToolRequest, CallToolResult } from '@modelcontextprotocol/server';
 import { calculateFrontier, decodeApplyRequest, prepareApply, prepareCreate } from './index.js';
 import type { CreateMapInput, InvalidInput, MapId, MutationAuthor } from './types.js';
 import type { SQLiteStorage } from './sqlite-storage.js';
@@ -40,17 +38,17 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
   const server = new Server({ name: 'wayfinder-map', version: workflowContract.version }, {
     capabilities: { tools: {}, resources: {}, prompts: {} }, instructions: workflowContract.instructions,
   });
-  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: structuredClone(tools) }));
+  server.setRequestHandler('tools/list', () => ({ tools: structuredClone([...tools]) }));
   const stableResourceUri = 'wayfinder://workflow/exploration';
   const versionedResourceUri = `${stableResourceUri}/${workflowContract.version}`;
   const resources = [stableResourceUri, versionedResourceUri].map(uri => ({
     uri, name: 'Wayfinder exploration workflow', description: `Complete Wayfinder exploration workflow ${workflowContract.version}`,
     mimeType: 'text/markdown', _meta: { 'wayfinder/version': workflowContract.version },
   }));
-  server.setRequestHandler(ListResourcesRequestSchema, () => ({ resources: structuredClone(resources) }));
-  server.setRequestHandler(ReadResourceRequestSchema, request => {
+  server.setRequestHandler('resources/list', () => ({ resources: structuredClone(resources) }));
+  server.setRequestHandler('resources/read', request => {
     if (request.params.uri !== stableResourceUri && request.params.uri !== versionedResourceUri) {
-      throw new McpError(ErrorCode.InvalidParams, 'Unknown workflow Resource');
+      throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Unknown workflow Resource');
     }
     return { contents: [{ uri: request.params.uri, mimeType: 'text/markdown', text: `version: ${workflowContract.version}\n\n${workflowContract.markdown}`,
       _meta: { 'wayfinder/version': workflowContract.version } }] };
@@ -59,22 +57,23 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
     arguments: [{ name: 'mode', description: 'create or resume', required: true },
       { name: 'mapId', description: 'Optional stable Map ID', required: false }],
     _meta: { 'wayfinder/version': workflowContract.version } };
-  server.setRequestHandler(ListPromptsRequestSchema, () => ({ prompts: [structuredClone(prompt)] }));
-  server.setRequestHandler(GetPromptRequestSchema, request => {
-    if (request.params.name !== prompt.name) throw new McpError(ErrorCode.InvalidParams, 'Unknown workflow Prompt');
+  server.setRequestHandler('prompts/list', () => ({ prompts: [structuredClone(prompt)] }));
+  server.setRequestHandler('prompts/get', request => {
+    if (request.params.name !== prompt.name) throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Unknown workflow Prompt');
     const args = request.params.arguments ?? {};
     if (Object.keys(args).some(key => !['mode', 'mapId'].includes(key)) || !['create', 'resume'].includes(args.mode ?? '')) {
-      throw new McpError(ErrorCode.InvalidParams, 'Prompt mode must be create or resume');
+      throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Prompt mode must be create or resume');
     }
-    if (args.mapId !== undefined && validateId(args.mapId, ['mapId'])) throw new McpError(ErrorCode.InvalidParams, 'Invalid stable Map ID');
+    if (args.mapId !== undefined && validateId(args.mapId, ['mapId'])) throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Invalid stable Map ID');
     const selection = args.mapId === undefined ? '' : ` Stable Map ID: ${args.mapId}.`;
     return { description: prompt.description, messages: [{ role: 'user' as const, content: { type: 'text' as const,
       text: `${workflowContract.prompt}\n\nversion: ${workflowContract.version}. Mode: ${args.mode}.${selection}` } }] };
   });
   const callTool = async (request: CallToolRequest): Promise<CallToolResult> => {
     const tool = tools.find(tool => tool.name === request.params.name);
-    if (!tool) throw new McpError(ErrorCode.InvalidParams, 'Unknown Map tool');
-    if (request.params.task !== undefined) throw new McpError(ErrorCode.InvalidParams, 'Task execution is not supported');
+    if (!tool) throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Unknown Map tool');
+    // Legacy task marker only: modern SDK requests strip this deprecated field before dispatch.
+    if ('task' in request.params && request.params.task !== undefined) throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Task execution is not supported');
     const raw = request.params.arguments ?? {};
     // A write names the release whose rules the caller follows. After an upgrade, a caller still holding the old
     // rules (a client that reconnected without refreshing, or one resending its last call) is stopped before
@@ -164,7 +163,7 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
         outcome: error instanceof SQLiteFailure ? error.outcome : 'unknown', requiresRestart: error instanceof SQLiteFailure ? error.requiresRestart : true });
     }
   };
-  server.setRequestHandler(CallToolRequestSchema, request => control ? control(() => callTool(request)) : callTool(request));
+  server.setRequestHandler('tools/call', request => control ? control(() => callTool(request)) : callTool(request));
   return server;
 }
 

@@ -4,12 +4,18 @@ All notable project changes are recorded here. Historical implementation evidenc
 
 Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Release Version, covers the service and the workflow it carries; `docs/spec/mcp-sqlite.md` §14.3 says which part to raise, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion` (`1.0.0` to `3.0.0` below), and the server reported a fixed `0.1.0`.
 
-## 3.1.0 (2026-10-27)
-
+## 3.2.0 (2026-10-27)
 - Add format-2 Desk Question, Desk Answer and Reopen Request storage; opening format 1 first retains a consistent private backup, then migrates atomically.
 - Add versioned question publication/withdrawal, typed Taken-answer Settlement citations and guarded Reopen Request handling/closure. Commit rechecks desk state to prevent stale answers or superseded requests winning a race.
 - Expose current/history desk inspection, affected settled dependents and handled-request context through `map_read`; preserve requested options until the target settles again.
 - Stage Answer Desk writes behind the default-off `answerDeskEnabled` service setting (`WAYFINDER_ANSWER_DESK_ENABLED=true` for isolated runs). Four tools and the existing workflow remain; #112–#114 supply delivery, browser UI and the coordinated workflow release.
+
+## 3.1.0 (2026-10-27)
+
+- Migrate to MCP SDK v2: server/client 2.4.0 and Node adapter 2.1.2. `/mcp` retains sessionful `2025-11-25` initialization and restart-404 recovery, and explicitly enables sessionless `2026-07-28` discovery and per-request metadata. Both eras share the unchanged four tools, schemas, workflow, Resource, Prompt, credential identity and admission limits.
+- ChatGPT connectivity on this release is unverified; live check at #114. Missing-header discovery now returns HTTP 400 / `-32020` instead of the previously observed `-32000`; fallback on the new error is unverified.
+- The everyday ChatGPT relay and behaviour-test relay share the MCP request-header allowlist, including `Mcp-Method` and `Mcp-Name`, so conforming modern discovery and named calls reach the service. The behaviour relay captures terminal JSON/SSE responses and only the non-secret `MCP-Protocol-Version` header; sessionless tool-snapshot attribution remains insufficient evidence until bound to a native chat.
+- SDK v2 classifies malformed tool-call parameters as JSON-RPC `InvalidParams` (`-32602`), replacing SDK v1's `InternalError` (`-32603`). Neither path publishes a Map mutation.
 
 ## 3.0.0 (2026-10-27)
 

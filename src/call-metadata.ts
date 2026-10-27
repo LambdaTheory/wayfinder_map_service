@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, openSync, writeFileSync, writeSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
 import { isPlainObject, validateId } from './values.js';
 import { mapTools } from './mcp-schemas.js';
 import { workflowContract } from './workflow.generated.js';
@@ -70,7 +70,8 @@ export function appendPrivateMetadata(path: string, record: unknown): void {
 
 export function classifyCallResult(result: CallToolResult): CallResult {
   const value = result.structuredContent;
-  switch (value?.kind) {
+  if (!isPlainObject(value)) return 'transport-failure';
+  switch (value.kind) {
     case 'committed': return 'committed';
     case 'found': case 'listed': return 'read';
     case 'conflict': return 'conflict';

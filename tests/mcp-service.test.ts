@@ -10,15 +10,16 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHttpTestClient } from './helpers/mcp-http-client.mjs';
 import { versioned } from './helpers/write-version.js';
 import { canaryVersion, replyRule, ticketRule, writeCanaryCheckout } from './helpers/canary-release.mjs';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { Ajv } from 'ajv';
+import type { CallToolResult as SdkCallToolResult } from '@modelcontextprotocol/server';
+type CallToolResult = SdkCallToolResult & { structuredContent?: Record<string, unknown> };
+import { Ajv, type AnySchema } from 'ajv';
 import { afterEach, beforeAll, expect, test } from 'vitest';
 import { MAX_REQUEST_BYTES, captureConfiguration, serveLocalMcp } from '../src/mcp-http-internal.js';
 import type { LocalServiceConfiguration } from '../src/mcp-service.js';
 import { startLocalMcpService } from '../src/mcp-service.js';
 import { sqliteLifecycleForTests } from '../src/sqlite-internal.js';
 import type { SQLiteStorage } from '../src/sqlite-storage.js';
-import { mapTools, workflowContract } from '../src/mcp-tools.js';
+import { mapTools, toolsOnlyMapTools, workflowContract } from '../src/mcp-tools.js';
 import type { Revision } from '../src/index.js';
 import { rejectionSeed, rejectionCases } from './helpers/mcp-rejection-cases.js';
 
@@ -27,9 +28,11 @@ beforeAll(() => { execFileSync('npm', ['run', 'build'], { stdio: 'pipe' }); });
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const token = 'isolated-test-token-not-a-live-credential';
 const version: string = JSON.parse(readFileSync('package.json', 'utf8')).version;
+const protocols = ['2025-11-25', '2026-07-28'] as const;
+type ProtocolVersion = typeof protocols[number];
 const author = { actorId: 'operator', clientId: 'http-acceptance' };
 const ajv = new Ajv({ strict: false });
-const outputs = new Map(mapTools.map(tool => [tool.name, ajv.compile(tool.outputSchema!)]));
+const outputs = new Map(mapTools.map(tool => [tool.name, ajv.compile(tool.outputSchema! as AnySchema)]));
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   const promise = new Promise<T>(done => { resolve = done; });
@@ -63,8 +66,8 @@ async function fixture(override?: { storage: SQLiteStorage; path: string }) {
   const service = await serveLocalMcp(f.storage, config); cleanups.push(() => service.stop());
   return { ...f, port, config, service };
 }
-async function connect(port: number, bearer = token) {
-  const { client, transport, negotiatedProtocol } = await createHttpTestClient(port, bearer);
+async function connect(port: number, bearer = token, protocol: ProtocolVersion = '2025-11-25') {
+  const { client, transport, negotiatedProtocol } = await createHttpTestClient(port, bearer, protocol);
   cleanups.push(() => client.close());
   async function call(name: string, args: Record<string, unknown> = {}): Promise<CallToolResult> {
     const result = await client.callTool({ name, arguments: versioned(name, args) }) as CallToolResult;
@@ -82,7 +85,8 @@ async function connect(port: number, bearer = token) {
 function raw(port: number, body: string | Buffer = '', headers: Record<string, string> = {}, method = 'POST', path = '/mcp') {
   return new Promise<{ status: number; body: string; headers: import('node:http').IncomingHttpHeaders }>((resolve, reject) => {
     const req = httpRequest({ hostname: '127.0.0.1', port, path, method, agent: false, headers: {
-      Authorization: `Bearer ${token}`, Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json', ...headers,
+      Authorization: `Bearer ${token}`, Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json',
+      ...(String(body).includes('io.modelcontextprotocol/protocolVersion') ? { 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'tools/call', 'mcp-name': JSON.parse(String(body)).params.name } : {}), ...headers,
     } }, response => {
       let text = ''; response.setEncoding('utf8'); response.on('data', data => text += data);
       response.on('end', () => resolve({ status: response.statusCode!, body: text, headers: response.headers }));
@@ -94,8 +98,116 @@ function raw(port: number, body: string | Buffer = '', headers: Record<string, s
 const message = (name = 'map_list', args: Record<string, unknown> = {}) =>
   JSON.stringify({ jsonrpc: '2.0', id: 900, method: 'tools/call', params: { name, arguments: versioned(name, args) } });
 const sessionHeaders = (sessionId: string) => ({ 'mcp-session-id': sessionId, 'mcp-protocol-version': '2025-11-25' });
+const modernMessage = (name = 'map_list', args: Record<string, unknown> = {}) => {
+  const rpc = JSON.parse(message(name, args));
+  rpc.params._meta = { 'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+    'io.modelcontextprotocol/clientInfo': { name: 'forged-author', version: '0.1.0' }, 'io.modelcontextprotocol/clientCapabilities': {} };
+  return JSON.stringify(rpc);
+};
 const update = [{ kind: 'map.update', patch: { notes: 'HTTP advanced' } }];
 type Connection = Awaited<ReturnType<typeof connect>>;
+
+test('modern discovery delivers the same instructions, four schemas, Resources and Prompt without a session', async () => {
+  const f = await fixture();
+  const modern = await createHttpTestClient(f.port, token, '2026-07-28'); cleanups.push(() => modern.client.close());
+  const legacy = await createHttpTestClient(f.port, token); cleanups.push(() => legacy.client.close());
+  expect(modern.negotiatedProtocol).toBe('2026-07-28'); expect(modern.client.getProtocolEra()).toBe('modern');
+  expect(modern.transport.sessionId).toBeUndefined(); expect(legacy.transport.sessionId).toEqual(expect.any(String));
+  expect(modern.client.getInstructions()).toBe(workflowContract.instructions);
+  expect(modern.client.getServerVersion()).toEqual(legacy.client.getServerVersion());
+  expect((await modern.client.listTools()).tools).toEqual(mapTools);
+  expect((await modern.client.listResources()).resources).toEqual((await legacy.client.listResources()).resources);
+  expect((await modern.client.listPrompts()).prompts).toEqual((await legacy.client.listPrompts()).prompts);
+  for (const uri of ['wayfinder://workflow/exploration', `wayfinder://workflow/exploration/${version}`]) {
+    expect((await modern.client.readResource({ uri })).contents).toEqual((await legacy.client.readResource({ uri })).contents);
+  }
+  const args = { name: 'start_wayfinder_exploration', arguments: { mode: 'resume', mapId: 'Stable.Map' } };
+  expect((await modern.client.getPrompt(args)).messages).toEqual((await legacy.client.getPrompt(args)).messages);
+  expect(modern.requests[0]!.body!.method).toBe('server/discover');
+  expect(modern.requests.every(r => !r.headers['mcp-session-id'] && r.method === 'POST' && r.body?.method !== 'initialize')).toBe(true);
+  expect(f.storage.listMaps()).toMatchObject({ maps: [] });
+});
+
+test.each(protocols)('%s uses the primary toolsOnly service setting in the shared server factory', async protocol => {
+  for (const toolsOnly of [false, true]) {
+    const f = storageFixture(); const port = await freePort();
+    const service = await serveLocalMcp(f.storage, { ...configuration(f.path, port), toolsOnly });
+    cleanups.push(() => service.stop());
+    const connection = await connect(port, token, protocol);
+    expect((await connection.client.listTools()).tools).toEqual(toolsOnly ? toolsOnlyMapTools : mapTools);
+  }
+});
+
+test.each(protocols)('%s documents the deprecated task marker without claiming modern Tasks support', async protocol => {
+  const f = await fixture(); const connection = await connect(f.port, token, protocol);
+  const rpc = JSON.parse(protocol === '2025-11-25'
+    ? message('map_create', { mapId: 'TaskMarker', title: 'T', destination: 'D' })
+    : modernMessage('map_create', { mapId: 'TaskMarker', title: 'T', destination: 'D' }));
+  rpc.params.task = { ttl: 60_000 };
+  const response = await raw(f.port, JSON.stringify(rpc), protocol === '2025-11-25'
+    ? sessionHeaders(connection.transport.sessionId!) : {});
+  expect(response.status).toBe(200);
+  const payload = JSON.parse(response.body);
+  if (protocol === '2025-11-25') {
+    expect(payload.error).toEqual({ code: -32602, message: 'Protocol request failed' });
+    expect(f.storage.listMaps()).toMatchObject({ maps: [] });
+  } else {
+    // SDK v2 strips the deprecated marker; an otherwise valid call completes synchronously.
+    expect(payload.result.structuredContent).toMatchObject({ kind: 'committed', revision: 1 });
+    expect(payload.result.task).toBeUndefined();
+    expect((await connection.read(undefined, 'TaskMarker')).structuredContent).toMatchObject({ kind: 'found', revision: { revision: 1 } });
+  }
+});
+
+test('modern requests keep per-request auth, exact Host/Origin, body limits, redacted errors and credential identity', async () => {
+  const f = await fixture();
+  for (const [headers, status] of [[{ Authorization: '' }, 401], [{ Host: 'evil.example' }, 403],
+    [{ Origin: 'https://evil.example' }, 403], [{ 'mcp-session-id': 'unknown' }, 400], [{ 'Content-Type': 'text/plain' }, 415]] as const) {
+    expect((await raw(f.port, modernMessage(), headers)).status).toBe(status);
+  }
+  expect((await raw(f.port, modernMessage(), { Origin: 'http://localhost:4321' })).status).toBe(200);
+  const body = modernMessage('map_create', { mapId: 'Modern', title: 'T', destination: 'D' });
+  for (const chunked of [false, true]) {
+    const oversized = body + ' '.repeat(MAX_REQUEST_BYTES + 1 - Buffer.byteLength(body));
+    expect((await raw(f.port, oversized, chunked ? { 'Transfer-Encoding': 'chunked' } : { 'Content-Length': String(Buffer.byteLength(oversized)) })).status).toBe(413);
+  }
+  expect(f.storage.listMaps()).toMatchObject({ maps: [] });
+  const padded = body + ' '.repeat(MAX_REQUEST_BYTES - Buffer.byteLength(body));
+  const accepted = await raw(f.port, padded, { 'Transfer-Encoding': 'chunked' });
+  expect(accepted.status).toBe(200); expect(accepted.headers['mcp-session-id']).toBeUndefined();
+  const current = JSON.parse((await raw(f.port, modernMessage('map_read', { mapId: 'Modern' }))).body);
+  expect(current.result.structuredContent.revision.author).toMatchObject(author);
+  for (const bad of [modernMessage('private-unknown-tool'), modernMessage('map_list').replace('map_list', token)]) {
+    const reply = await raw(f.port, bad);
+    expect(JSON.parse(reply.body)).toHaveProperty('error'); expect(reply.body).not.toContain(token); expect(reply.body).not.toContain('private-unknown-tool');
+  }
+  const wrongVersion = JSON.parse((await raw(f.port, modernMessage('map_apply', { version: '1.0.0', mapId: 'Modern', expectedRevision: 1, commands: update }))).body);
+  expect(wrongVersion.result.structuredContent).toMatchObject({ kind: 'rejected', code: 'version_mismatch' });
+  const noCapabilities = JSON.parse(modernMessage()); delete noCapabilities.params._meta['io.modelcontextprotocol/clientCapabilities'];
+  const invalidEnvelope = await raw(f.port, JSON.stringify(noCapabilities));
+  expect(invalidEnvelope.status).toBe(400); expect(JSON.parse(invalidEnvelope.body).error.code).toBe(-32602);
+  const mismatch = await raw(f.port, modernMessage(), { 'mcp-protocol-version': '2025-11-25' });
+  expect(mismatch.status).toBe(400); expect(JSON.parse(mismatch.body).error.code).toBe(-32020);
+  // The modern entry must not silently add long-lived subscriptions to this headless service.
+  const subscription = JSON.parse(modernMessage()); subscription.method = 'subscriptions/listen'; subscription.params.notifications = {};
+  const refusedSubscription = await raw(f.port, JSON.stringify(subscription), { 'mcp-method': 'subscriptions/listen' });
+  expect(refusedSubscription.headers['content-type']).toContain('application/json');
+  expect(JSON.parse(refusedSubscription.body)).toHaveProperty('error');
+  const rows = readFileSync(`${f.path}.calls.jsonl`, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  expect(rows.filter(row => row.result === 'committed')).toMatchObject([{ clientId: author.clientId, mcpSessionId: null }]);
+});
+
+test('modern calls continue across a restart without initialize or a session-404; old legacy sessions still fail', async () => {
+  const f = await fixture(); const modern = await connect(f.port, token, '2026-07-28'); const legacy = await connect(f.port);
+  await seed(modern); const before = await observe(modern); const oldSession = legacy.transport.sessionId!;
+  await f.service.stop();
+  const storage = sqliteLifecycleForTests().open(f.path); cleanups.push(() => storage.close());
+  const service = await serveLocalMcp(storage, f.config); cleanups.push(() => service.stop());
+  expect((await raw(f.port, message(), sessionHeaders(oldSession))).status).toBe(404);
+  expect(await observe(modern)).toEqual(before);
+  expect((await modern.apply(update, 3)).structuredContent).toMatchObject({ kind: 'committed', revision: { revision: 4 } });
+  expect(modern.transport.sessionId).toBeUndefined();
+});
 async function seed(c: Connection) {
   await c.create(); await c.create('Acceptance.Other');
   await c.apply([
@@ -120,8 +232,8 @@ async function observe(c: Connection) {
   }))) };
 }
 
-test.each(['grilling', 'prototype', 'research', 'task'] as const)('A01/D03–D05/P01–P05: complete HTTP %s workflow, independent catalog continuation, conflict and history', async type => {
-  const f = await fixture(); const a = await connect(f.port);
+test.each(protocols.flatMap(protocol => (['grilling', 'prototype', 'research', 'task'] as const).map(type => ({ protocol, type }))))('A01/D03–D05/P01–P05: $protocol HTTP $type workflow, independent catalog continuation, conflict and history', async ({ protocol, type }) => {
+  const f = await fixture(); const a = await connect(f.port, token, protocol);
   const revision = (result: CallToolResult) => result.structuredContent!.revision as unknown as Revision;
   expect((await a.create()).structuredContent).toMatchObject({ kind: 'committed', revision: 1 });
   await a.create('Acceptance.Other');
@@ -159,7 +271,7 @@ test.each(['grilling', 'prototype', 'research', 'task'] as const)('A01/D03–D05
   expect(revision(reopened).state.tickets).toMatchObject([{ status: 'open', claim: null }, { status: 'open', claim: null, prerequisites: ['A'] }]);
   for (const ticket of revision(reopened).state.tickets) expect(ticket).not.toHaveProperty('settlement');
   await a.apply([{ kind: 'claim.acquire', ticketId: 'A', claimantId: 'session:A' }], 7);
-  const b = await connect(f.port);
+  const b = await connect(f.port, token, protocol);
   expect((await b.call('map_list')).structuredContent).toMatchObject({ maps: [{ mapId: 'Acceptance.Alpha', currentRevision: 8 }, { mapId: 'Acceptance.Other', currentRevision: 1 }] });
   expect(revision(await b.read()).revision).toBe(8);
   await b.apply([{ kind: 'ticket.create', ticket: { id: 'C', title: 'Independent continuation', question: 'Done?', type: 'task' } },
@@ -174,7 +286,7 @@ test.each(['grilling', 'prototype', 'research', 'task'] as const)('A01/D03–D05
   expect((await b.read(10)).structuredContent).toMatchObject({ code: 'revision_not_found' });
   expect(revision(await a.read()).revision).toBe(9);
   await a.client.close(); await b.client.close();
-  const reconnected = await connect(f.port);
+  const reconnected = await connect(f.port, token, protocol);
   expect(revision(await reconnected.read()).state.tickets).toMatchObject([{ claim: 'session:A' }, { claim: null }, { claim: 'session:B' }]);
   expect(revision(await reconnected.read(3))).toEqual(revision(claimed));
   expect(revision(await reconnected.read(4))).toEqual(revision(accepted));
@@ -183,8 +295,8 @@ test.each(['grilling', 'prototype', 'research', 'task'] as const)('A01/D03–D05
   expect(historical).toEqual({ ...settled, structuredContent: settledHistory });
 });
 
-test('D05/P05: complete command-error and reachable final-invariant matrix over real HTTP preserves known fixture history', async () => {
-  const f = await fixture(); const c = await connect(f.port);
+test.each(protocols)('D05/P05: %s command-error and reachable final-invariant matrix over real HTTP preserves known fixture history', async protocol => {
+  const f = await fixture(); const c = await connect(f.port, token, protocol);
   await c.create(); await c.create('Acceptance.Other');
   expect((await c.apply(rejectionSeed, 1)).structuredContent!.kind).toBe('committed');
   const before = await observe(c);
@@ -258,7 +370,7 @@ test('P07: an operator credentials file admits further tokens, each authoring as
   expect(() => captureConfiguration({ ...configuration(f.path, port), credentialsPath: 'relative.json' })).toThrow();
 });
 
-test('U02: a credential marked toolsOnly gets write tools that state the release; others keep taking it from their instructions', async () => {
+test.each(protocols)('U02: %s toolsOnly credentials state the release; others take it from their instructions', async protocol => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'wayfinder-tools-only-')));
   cleanups.push(() => rmSync(directory, { recursive: true }));
   const credentialsPath = join(directory, 'credentials.json');
@@ -270,9 +382,9 @@ test('U02: a credential marked toolsOnly gets write tools that state the release
   const versionHelp = async (c: Awaited<ReturnType<typeof connect>>) => Object.fromEntries((await c.client.listTools()).tools
     .filter(tool => tool.name === 'map_create' || tool.name === 'map_apply')
     .map(tool => [tool.name, (tool.inputSchema.properties!.version as { description: string }).description]));
-  const chatgpt = await connect(port, chatgptToken);
+  const chatgpt = await connect(port, chatgptToken, protocol);
   for (const help of Object.values(await versionHelp(chatgpt))) expect(help).toContain(`set it to "${version}"`);
-  const operator = await connect(port);
+  const operator = await connect(port, token, protocol);
   for (const help of Object.values(await versionHelp(operator))) expect(help).not.toContain(version);
   // The gate is the same for both: a stated release is still checked against the running one.
   expect((await chatgpt.client.callTool({ name: 'map_create', arguments: { version: '1', mapId: 'Compat', title: 'T', destination: 'D' } }))
@@ -322,8 +434,8 @@ test('W03: real Streamable HTTP initialization carries immutable workflow instru
   expect((await c.call('map_list')).structuredContent).toEqual({ kind: 'listed', maps: [], nextAfterMapId: null });
 });
 
-test('P06: HTTP apply 100 inclusive/excess 101, no split/no replay; pure M1 remains covered unrestricted', async () => {
-  const f = await fixture(); const c = await connect(f.port); await seed(c); const before = await observe(c);
+test.each(protocols)('%s P06: HTTP apply 100 inclusive/excess 101, no split/no replay; pure M1 remains covered unrestricted', async protocol => {
+  const f = await fixture(); const c = await connect(f.port, token, protocol); await seed(c); const before = await observe(c);
   const commands = Array.from({ length: 101 }, (_, i) => ({ kind: 'ticket.create', ticket: { id: `Boundary.${i}`, title: 'Ticket', question: 'Done?', type: 'task' } }));
   expect((await c.apply(commands, 3)).structuredContent).toMatchObject({ kind: 'rejected', rejection: { stage: 'input', error: { path: ['commands'] } } });
   expect(await observe(c)).toEqual(before);
@@ -333,12 +445,12 @@ test('P06: HTTP apply 100 inclusive/excess 101, no split/no replay; pure M1 rema
   expect((await c.read(5)).structuredContent).toMatchObject({ code: 'revision_not_found' });
 });
 
-test('P06/P08: four global active calls, fifth explicitly refused; graceful stop drains real work without releasing disconnected work', async () => {
+test.each(protocols)('%s P06/P08: four global active calls, fifth explicitly refused; graceful stop drains real work without releasing disconnected work', async protocol => {
   const f = storageFixture(); const entered = deferred(); const release = deferred(); let held = 0; let closed = false;
   const storage: SQLiteStorage = { ...f.storage, adapter: { ...f.storage.adapter,
     async commit(change) { if (++held === 4) entered.resolve(); await release.promise; return f.storage.adapter.commit(change); },
   }, close() { closed = true; f.storage.close(); } };
-  const host = await fixture({ storage, path: f.path }); const a = await connect(host.port); const b = await connect(host.port);
+  const host = await fixture({ storage, path: f.path }); const a = await connect(host.port, token, protocol); const b = await connect(host.port);
   const calls = [a, b, a, b].map((connection, i) => connection.create(`Concurrent.${i}`));
   const outcomes = Promise.allSettled(calls); // Attach before intentionally closing a client.
   await entered.promise;
@@ -587,7 +699,7 @@ test('D10/P08: child SIGTERM stops HTTP admission, completes controlled active c
   expect((await next.read()).structuredContent!.revision).toEqual(receipt.structuredContent!.revision);
 });
 
-test('U01: a restart onto a new release ends old sessions; a reconnected caller gets the new definitions; a stale or resent write is refused unwritten', async () => {
+test.each(protocols)('U01: %s restart onto a new release keeps stale writes refused and refreshed definitions available', async protocol => {
   const f = storageFixture(); f.storage.close(); const port = await freePort();
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'wayfinder-upgrade-'))); cleanups.push(() => rmSync(root, { recursive: true }));
   const canaryRoot = join(root, 'canary');
@@ -596,7 +708,7 @@ test('U01: a restart onto a new release ends old sessions; a reconnected caller 
   cpSync(fileURLToPath(new URL('./helpers/mcp-http-host.mjs', import.meta.url)), join(canaryRoot, 'tests/helpers/mcp-http-host.mjs'));
 
   const current = childHost(f.path, port, 'idle'); expect(await current.next()).toEqual({ kind: 'ready' });
-  const c = await connect(port);
+  const c = await connect(port, token, protocol);
   expect(c.client.getServerVersion()).toEqual({ name: 'wayfinder-map', version: before.version });
   expect((await c.create()).structuredContent).toMatchObject({ kind: 'committed', revision: 1 });
   current.child.kill('SIGTERM'); expect(await current.exit).toEqual({ code: 0, signal: null });
@@ -605,8 +717,15 @@ test('U01: a restart onto a new release ends old sessions; a reconnected caller 
 
   // The old session serves neither old nor new definitions; MCP clients answer this 404 with a new initialize.
   const write = (version: string, expectedRevision: number) => ({ name: 'map_apply', arguments: { version, mapId: 'Acceptance.Alpha', expectedRevision, commands: update } });
-  expect((await raw(port, message('map_apply', write(before.version, 1).arguments), sessionHeaders(c.transport.sessionId!))).status).toBe(404);
-  const d = await connect(port);
+  if (protocol === '2025-11-25') {
+    expect((await raw(port, message('map_apply', write(before.version, 1).arguments), sessionHeaders(c.transport.sessionId!))).status).toBe(404);
+  } else {
+    // The same modern client can call immediately; transport success never bypasses the rule guard.
+    expect(c.transport.sessionId).toBeUndefined();
+    expect((await c.client.callTool(write(before.version, 1))).structuredContent).toMatchObject({ kind: 'rejected', code: 'version_mismatch' });
+    expect((await c.read()).structuredContent).toMatchObject({ revision: { revision: 1 } });
+  }
+  const d = await connect(port, token, protocol);
   expect(d.client.getServerVersion()).toEqual({ name: 'wayfinder-map', version: canaryVersion });
   expect(d.client.getInstructions()).toBe(after.instructions); expect(d.client.getInstructions()).toContain(replyRule);
   expect((await d.client.listTools()).tools.find(tool => tool.name === 'map_apply')!.description).toContain(ticketRule);
