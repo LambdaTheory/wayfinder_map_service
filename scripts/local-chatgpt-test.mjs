@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createLocalChatGptRelay } from './local-chatgpt-relay.mjs';
+import { acceptsLocalChatGptToken } from './local-chatgpt-attach.mjs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { startLocalMcpService } from '../dist/mcp-service.js';
@@ -38,22 +39,7 @@ function backup() {
   console.log('Consistent SQLite backup completed.');
 }
 
-async function attached() {
-  const headers = {
-    authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json',
-  };
-  try {
-    const reply = await fetch(`http://127.0.0.1:${servicePort}/mcp`, { method: 'POST', headers, body: JSON.stringify({
-      jsonrpc: '2.0', id: 1, method: 'initialize',
-      params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'chatgpt-test-runner', version: '1' } },
-    }) });
-    const session = reply.headers.get('mcp-session-id');
-    if (session) await fetch(`http://127.0.0.1:${servicePort}/mcp`, { method: 'DELETE', headers: { ...headers, 'mcp-session-id': session } });
-    return reply.ok;
-  } catch { return false; }
-}
-
-if (attachToken !== undefined && !await attached()) {
+if (attachToken !== undefined && !await acceptsLocalChatGptToken(servicePort, token)) {
   console.error('No running local service accepted the attach token; start it with `wayfinder serve`.');
   process.exit(1);
 }

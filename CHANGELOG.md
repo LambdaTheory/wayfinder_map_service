@@ -11,6 +11,12 @@ Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Rel
 - Keep the browser key out of process arguments and environments by using macOS Apple events over stdin, ignoring `BROWSER` and suppressing child diagnostics. Keep native keyboard activation on focused controls, and pause answers after the displayed question is withdrawn, replaced or settled until the human explicitly selects a question. Drain excess answer uploads so clients receive the full 413 refusal.
 - Require an explicitly selected Question Version in the current UI version for global shortcuts. Every changed poll, dialog close, write refresh, root focus loss and window refocus invalidates that selection; show a pause until deliberate reselection, including after an answer or Reopen Request. Explain unsupported platforms before starting the desk launcher, and leave URL fragments untouched when the desk is disabled.
 
+## 3.3.1 (2026-10-27)
+
+- Keep shipped ChatGPT attach probes, relay forwarding and dedicated-launcher MCP requests on explicit direct loopback transports, ignoring ambient Node/Python proxy configuration without changing the client's proxy environment. Authenticated probes do not follow redirects; the ChatGPT attach probe now fails after a three-second request deadline and releases its connection.
+- Retain attach session IDs when response headers arrive, so a partial initialization failure still attempts DELETE within a separate three-second deadline. Preserve 3.2.0's unhandled relay server-error behavior.
+- This transport fix changes no mandatory workflow rule or MCP tool usage; live ChatGPT evidence is deferred to the next approved run.
+
 ## 3.3.0 (2026-10-27)
 
 - Add Answer Desk `map_wait` with task and blocking execution, once-only delivery after the Map Quiet Window, and taking `map_read` for turn-start delivery. Answers and Reopen Requests retain Taken state through interruption and restart.
