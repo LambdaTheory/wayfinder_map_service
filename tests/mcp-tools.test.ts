@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,13 +10,14 @@ import type { CallToolResult as SdkCallToolResult } from '@modelcontextprotocol/
 type CallToolResult = SdkCallToolResult & { structuredContent?: Record<string, unknown> };
 import { Ajv, type AnySchema } from 'ajv';
 import { afterEach, expect, test } from 'vitest';
-import { createMapMcpServer, mapTools, toolsOnlyMapTools, workflowContract } from '../src/mcp-tools.js';
+import { createMapMcpServer, mapTools, toolsOnlyMapTools, answerDeskMapTools, toolsOnlyAnswerDeskMapTools, workflowContract } from '../src/mcp-tools.js';
 import { sqliteLifecycleForTests } from '../src/sqlite-internal.js';
 import type { SQLiteStorage } from '../src/sqlite-storage.js';
 import { calculateFrontier, parseId, prepareApply } from '../src/index.js';
-import type { Command, NonEmpty, Revision, TicketType } from '../src/index.js';
+import type { ClaimantId, Command, NonEmpty, Revision, TicketId, TicketType } from '../src/index.js';
 import { rejectionSeed, rejectionCases } from './helpers/mcp-rejection-cases.js';
 import { versioned } from './helpers/write-version.js';
+import { disabledDeskCases } from './helpers/disabled-desk-cases.js';
 
 const version: string = JSON.parse(readFileSync('package.json', 'utf8')).version;
 
@@ -28,10 +30,14 @@ function id(value: string) {
 }
 const configuration = { actorId: 'operator', clientId: 'codex-test' };
 const ajv = new Ajv({ strict: false });
-const schemas = new Map(mapTools.map(tool => [tool.name, {
+const defaultSchemas = new Map(mapTools.map(tool => [tool.name, {
   input: ajv.compile(tool.inputSchema), output: ajv.compile(tool.outputSchema! as AnySchema),
 }]));
-async function fixture(faults: Parameters<typeof sqliteLifecycleForTests>[0] = {}) {
+const schemas = defaultSchemas;
+const deskSchemas = new Map(answerDeskMapTools.map(tool => [tool.name, {
+  input: ajv.compile(tool.inputSchema), output: ajv.compile(tool.outputSchema! as AnySchema),
+}]));
+async function fixture(faults: Parameters<typeof sqliteLifecycleForTests>[0] = {}, answerDeskEnabled?: boolean, toolsOnly = false) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'wayfinder-mcp-tools-acceptance-')));
   cleanups.push(() => rmSync(directory, { recursive: true }));
   const path = join(directory, 'private', 'maps.sqlite');
@@ -39,7 +45,8 @@ async function fixture(faults: Parameters<typeof sqliteLifecycleForTests>[0] = {
   lifecycle.initialize(path);
   const storage = lifecycle.open(path);
   cleanups.push(() => storage.close());
-  const server = createMapMcpServer(storage, configuration);
+  const server = createMapMcpServer(storage, { ...configuration, toolsOnly, ...(answerDeskEnabled === undefined ? {} : { answerDeskEnabled }) });
+  const schemas = answerDeskEnabled ? deskSchemas : defaultSchemas;
   const client = new Client({ name: 'wayfinder-protocol-test', version: '0.1.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   let negotiatedProtocol: unknown;
@@ -109,16 +116,30 @@ test('P01/P02: SDK discovers exactly four complete schemas, once-only compact/de
   }
 });
 
-test('W02: the map_apply description names every command and field its input schema accepts', () => {
-  // Some clients do not pass nested oneOf schemas to the model, so the description must stand alone.
+test('W02: every advertised default command and field has standalone tool-description guidance', () => {
   const tool = mapTools.find(candidate => candidate.name === 'map_apply')!;
-  const commands = (tool.inputSchema.properties as { commands: { items: { oneOf: { properties: Record<string, { const?: string }> }[] } } })
-    .commands.items.oneOf;
+  const commands = (tool.inputSchema.properties as { commands: { items: { oneOf: { properties: Record<string, { const?: string }> }[] } } }).commands.items.oneOf;
   const description = workflowContract.toolDescriptions.map_apply;
   for (const command of commands) {
     const { kind, ...fields } = command.properties;
     expect(description).toContain(kind!.const!.replace('ticket.settle', '"kind":"ticket.settle"'));
     for (const field of Object.keys(fields)) expect(description).toContain(field);
+  }
+});
+
+test.each([false, true])('disabled tools/list exactly matches 3.1.0, including output schemas and descriptions (toolsOnly=%s)', async toolsOnly => {
+  const baseline = JSON.parse(readFileSync('tests/helpers/mcp-tools-v3.1.0.json', 'utf8'));
+  const f = await fixture({}, false, toolsOnly);
+  const { tools } = await f.client.listTools();
+  const hashes = Object.fromEntries(tools.map(tool => [tool.name, createHash('sha256')
+    .update(JSON.stringify(tool).replaceAll(workflowContract.version, '<release-version>')).digest('hex')]));
+  expect(hashes).toEqual(toolsOnly ? baseline.toolsOnlyMapTools : baseline.mapTools);
+  expect(JSON.stringify(tools)).not.toMatch(/desk|reopenRequest|reopenContext|reopenedAtRevision/i);
+  const enabled = await fixture({}, true, toolsOnly);
+  const enabledTools = (await enabled.client.listTools()).tools;
+  expect(enabledTools).toEqual(toolsOnly ? toolsOnlyAnswerDeskMapTools : answerDeskMapTools);
+  for (const word of ['deskQuestion.post', 'deskQuestion.withdraw', 'reopenRequest.close', 'deskAnswer', 'reopenRequestId', 'deskQuestions', 'reopenRequests', 'reopenContexts']) {
+    expect(JSON.stringify(enabledTools)).toContain(word);
   }
 });
 
@@ -405,12 +426,15 @@ test('P02/P03/D09: current reads pin observed N and writes return exact committe
   expect(written.structuredContent!.frontier).toEqual(['A']);
   expect((await originalCurrent(id('Acceptance.Alpha')))).toMatchObject({ value: { currentRevision: 3 } });
   adapter.commit = originalCommit;
-  adapter.readCurrent = async mapId => { const observed = await originalCurrent(mapId); await advance(); return observed; };
+  const originalInspect = f.storage.desk.inspect.bind(f.storage.desk);
+  let interleaved: Promise<void> | undefined;
+  f.storage.desk.inspect = mapId => { const observed = originalInspect(mapId); interleaved = advance(); return observed; };
   const read = await f.read();
   expect(snapshot(read).revision).toBe(3);
   expect(read.structuredContent!.frontier).toEqual(calculateFrontier(snapshot(read).state));
   expect(read.structuredContent!.frontier).toEqual(['A', 'T2']);
-  adapter.readCurrent = originalCurrent;
+  await interleaved;
+  f.storage.desk.inspect = originalInspect;
   expect(snapshot(await f.read()).revision).toBe(4);
   expect(snapshot(await f.read(2))).toEqual(snapshot(written));
   adapter.commit = async prepared => { const committed = await originalCommit(prepared); await advance(); return committed; };
@@ -550,4 +574,50 @@ test('V10: a configured local viewer origin adds viewerUrl to map_create and map
     expect(schemas.get('map_create')!.output({ ...compact, viewerUrl: link })).toBe(true);
     expect(schemas.get('map_apply')!.output({ ...compact, viewerUrl: link })).toBe(false);
   } finally { await client.close(); await server.close(); }
+});
+
+test('Answer Desk commands and current/history inspection round-trip through declared MCP schemas', async () => {
+  let now = Date.parse('2026-10-27T00:00:00.000Z');
+  const f = await fixture({ now: () => new Date(now).toISOString() }, true); await f.create();
+  const question = { questionId: 'Q.A', options: [{ label: 'One', description: 'First' }, { label: 'Two', description: 'Second' }],
+    recommendedOption: 1, recommendedAnswer: 'First route', whyKun: 'Choose the tradeoff', triage: 'needsKun', triageReason: 'A decision', gatesResearch: false };
+  const post = { kind: 'deskQuestion.post', ticketId: 'A', claimantId: 'work', question };
+  const applySchema = deskSchemas.get('map_apply')!.input;
+  expect(applySchema(versioned('map_apply', { mapId: 'Acceptance.Alpha', expectedRevision: 1, commands: [post] }))).toBe(true);
+  await f.apply([ticket('A', 'grilling'), { kind: 'claim.acquire', ticketId: 'A', claimantId: 'work' }, post], 1);
+  const mapId = id('Acceptance.Alpha');
+  const submitted = f.storage.desk.submitAnswers(mapId, [{ questionId: 'Q.A', questionVersion: 1, choice: { option: 2 } }]);
+  if (submitted.kind !== 'updated') throw Error('answer rejected'); const answer = submitted.value[0]!;
+  expect((await f.read()).structuredContent).toMatchObject({ revision: { revision: 2 }, deskQuestions: [{ state: 'answered', currentAnswer: answer }], reopenContexts: [], reopenRequests: [] });
+  expect((await f.read(2)).structuredContent).toMatchObject({ deskQuestions: [{ state: 'published' }] });
+  expect((await f.read(2)).structuredContent).not.toHaveProperty('reopenRequests');
+  const settle = { kind: 'ticket.settle', ticketId: 'A', ticketType: 'grilling', claimantId: 'work', settlement: settlement('grilling'), deskAnswer: { answerId: answer.answerId, questionVersion: 1 } };
+  expect((await f.apply([settle], 2)).structuredContent).toMatchObject({ rejection: { code: 'desk_answer_invalid' } });
+  now += 15_000; f.storage.desk.takeEligible(mapId, 'work' as ClaimantId);
+  await f.apply([settle], 2);
+  const filed = f.storage.desk.fileReopenRequest(mapId, { ticketId: 'A' as TicketId, settlementIntroducedAtRevision: 3, affectedTickets: [], affectedSettlementRevisions: {},
+    requested: { option: 2, label: 'Two', questionId: 'Q.A', questionVersion: 1 } });
+  if (filed.kind !== 'updated') throw Error('request rejected'); now += 15_000; f.storage.desk.takeEligible(mapId, 'other' as ClaimantId);
+  expect((await f.call('map_apply', { mapId, expectedRevision: 3, reopenRequestId: filed.value.requestId, commands: [{ kind: 'ticket.reopen', ticketId: 'A', reason: 'Kun requested' }] })).structuredContent).toMatchObject({ kind: 'committed' });
+  expect((await f.read()).structuredContent).toMatchObject({ deskQuestions: [{ state: 'superseded_by_reopen', currentAnswer: null }], reopenRequests: [],
+    reopenContexts: [{ ticketId: 'A', requestId: filed.value.requestId, requested: filed.value.requested, handledAtRevision: 4 }] });
+  expect((await f.read(4)).structuredContent).not.toHaveProperty('reopenContexts');
+});
+
+test.each([undefined, false])('Answer Desk setting %s disables all desk writes and taking reads before storage; ordinary tools remain available', async answerDeskEnabled => {
+  const f = await fixture({}, answerDeskEnabled); await f.create(); const before = await observe(f.storage, 1);
+  // Discovery installs the SDK output validator, as it does for ordinary clients.
+  expect((await f.client.listTools()).tools.map(t => t.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply']);
+  for (const entry of disabledDeskCases(version)) {
+    const result = await f.client.callTool({ name: entry.name, arguments: entry.arguments });
+    expect(result, entry.label).toEqual(entry.result);
+    expect(defaultSchemas.get(entry.name)!.output(result.structuredContent)).toBe(true);
+  }
+  const stored = await f.storage.adapter.readRevision(id('Acceptance.Alpha'), 1);
+  if (stored.kind !== 'found') throw Error('missing fixture');
+  const expected = { kind: 'found', revision: stored.value, frontier: [] };
+  expect((await f.read()).structuredContent).toEqual(expected);
+  expect((await f.read(1)).structuredContent).toEqual(expected);
+  expect(JSON.stringify(expected)).not.toMatch(/desk|reopenRequest|reopenContext|reopenedAtRevision/i);
+  expect(await observe(f.storage, 1)).toEqual(before);
 });

@@ -6,3 +6,5 @@ export { decodeApplyRequest } from './apply-input.js';
 export { calculateFrontier } from './frontier.js';
 export { createMemoryAdapter } from './memory-adapter.js';
 export type { StateAdapter } from './memory-adapter.js';
+export type * from './desk-types.js';
+export { affectedSettledTickets, projectDesk } from './desk-domain.js';

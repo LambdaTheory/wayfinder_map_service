@@ -1,0 +1,15 @@
+{
+  "source": "v3.1.0 (033b6f9), complete serialized tools/list definitions; only the release version is normalized",
+  "mapTools": {
+    "map_create": "d76ee7919a8e178329905d24e1cc7791892749acb43dfc04dd76b8dee006e7b9",
+    "map_list": "507a040a6a1bb25518112aab84ab0802d1383767f6084292a9955d1284d63d23",
+    "map_read": "544ef2a59488364ceae9e0e70a1c549b21ddc024e7c99b5b66231662f15fd8db",
+    "map_apply": "bf789018f302bc4da8ca6c14b12fb8a2478801e13333331685115362c982e9c6"
+  },
+  "toolsOnlyMapTools": {
+    "map_create": "1097c28ea6413e9ab01585fef829315d2142ac37698919951611f1a3a1d97ca0",
+    "map_list": "507a040a6a1bb25518112aab84ab0802d1383767f6084292a9955d1284d63d23",
+    "map_read": "544ef2a59488364ceae9e0e70a1c549b21ddc024e7c99b5b66231662f15fd8db",
+    "map_apply": "12d7600a298e3fda5ef3dfb9eaba8c508a2cad0c5b65905aaf46d2f16f163cb3"
+  }
+}

@@ -1,3 +1,5 @@
+import { projectDesk } from './desk-domain.js';
+import { emptyDesk } from './desk-types.js';
 import { Server, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 import type { CallToolRequest, CallToolResult } from '@modelcontextprotocol/server';
 import { calculateFrontier, decodeApplyRequest, prepareApply, prepareCreate } from './index.js';
@@ -5,15 +7,15 @@ import type { CreateMapInput, InvalidInput, MapId, MutationAuthor } from './type
 import type { SQLiteStorage } from './sqlite-storage.js';
 import { SQLiteFailure } from './sqlite-storage.js';
 import { invalid, isPlainObject, validateAuthor, validateId, validateObject } from './values.js';
-import { mapTools, toolsOnlyMapTools } from './mcp-schemas.js';
+import { mapTools, toolsOnlyMapTools, answerDeskMapTools, toolsOnlyAnswerDeskMapTools } from './mcp-schemas.js';
 import { workflowContract } from './workflow.generated.js';
 import { viewerUrl } from './viewer-http.js';
 
-export { mapTools, toolsOnlyMapTools } from './mcp-schemas.js';
+export { mapTools, toolsOnlyMapTools, answerDeskMapTools, toolsOnlyAnswerDeskMapTools } from './mcp-schemas.js';
 export { workflowContract } from './workflow.generated.js';
 // viewerOrigin is set by the local HTTP host, which also serves the read-only viewer. toolsOnly marks a client that shows its
 // model no server instructions; its write tools state the release instead.
-export interface ToolAuthorConfiguration { readonly actorId: string; readonly clientId: string; readonly viewerOrigin?: string; readonly toolsOnly?: boolean }
+export interface ToolAuthorConfiguration { readonly actorId: string; readonly clientId: string; readonly viewerOrigin?: string; readonly toolsOnly?: boolean; readonly answerDeskEnabled?: boolean }
 // The HTTP host owns admission/draining, including work whose response is lost.
 export type ToolCallControl = (call: () => Promise<CallToolResult>) => Promise<CallToolResult>;
 
@@ -21,15 +23,19 @@ export type ToolCallControl = (call: () => Promise<CallToolResult>) => Promise<C
 // instead of the high-level SDK's generic text errors/duplicate-text convenience.
 // Transport, admission, authentication and storage lifecycle belong to the host.
 export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAuthorConfiguration, control?: ToolCallControl): Server {
-  if (validateObject(configuration, [], ['actorId', 'clientId', 'viewerOrigin', 'toolsOnly'])
+  if (validateObject(configuration, [], ['actorId', 'clientId', 'viewerOrigin', 'toolsOnly', 'answerDeskEnabled'])
+    || (configuration.answerDeskEnabled !== undefined && typeof configuration.answerDeskEnabled !== 'boolean')
     || (configuration.toolsOnly !== undefined && typeof configuration.toolsOnly !== 'boolean')
     || validateAuthor({ actorId: configuration.actorId, clientId: configuration.clientId, occurredAt: new Date().toISOString() })
     || (configuration.viewerOrigin !== undefined && !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/.test(configuration.viewerOrigin))) {
     throw new Error('Invalid MCP author configuration');
   }
   const identity = { actorId: configuration.actorId, clientId: configuration.clientId };
-  const tools = configuration.toolsOnly ? toolsOnlyMapTools : mapTools;
-  const { viewerOrigin } = configuration;
+  const { viewerOrigin, answerDeskEnabled = false } = configuration;
+  if (!answerDeskEnabled && storage.hasDeskHistory()) throw new Error('The configured private SQLite database has used Answer Desk; enable answerDeskEnabled.');
+  const tools = answerDeskEnabled
+    ? (configuration.toolsOnly ? toolsOnlyAnswerDeskMapTools : answerDeskMapTools)
+    : (configuration.toolsOnly ? toolsOnlyMapTools : mapTools);
   const viewerLink = (mapId: string) => viewerOrigin === undefined ? {} : { viewerUrl: viewerUrl(viewerOrigin, mapId) };
   const author = (): MutationAuthor => ({ ...identity, occurredAt: new Date().toISOString() } as MutationAuthor);
   const server = new Server({ name: 'wayfinder-map', version: workflowContract.version }, {
@@ -98,7 +104,9 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
       if (create.kind === 'error') return inputFailure({ ...create.error, path: create.error.path.map((part, i) => i === 0 && part === 'id' ? 'mapId' : part) });
     } else if (tool.name === 'map_apply') {
       const { includeSnapshot: _snapshot, version: _version, ...fields } = raw;
-      apply = decodeApplyRequest({ ...fields, author: author() });
+      // Select the admitted syntax, retaining the ordinary validation order and
+      // typed invalid_input results when the staged desk capability is disabled.
+      apply = decodeApplyRequest({ ...fields, author: author() }, { answerDeskEnabled });
       if (apply.kind === 'error') return inputFailure(apply.error);
       if (apply.value.commands.length > 100) return inputFailure(invalid(['commands'], 'At most 100 commands required'));
     } else if (tool.name === 'map_read') {
@@ -120,22 +128,22 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
       if (tool.name === 'map_list') return envelope(storage.listMaps(raw));
       if (tool.name === 'map_read') {
         const mapId = raw.mapId as MapId;
-        let revision = raw.revision as number | undefined;
+        const revision = raw.revision as number | undefined;
         if (revision === undefined) {
-          const current = await storage.adapter.readCurrent(mapId);
+          const current = storage.desk.inspect(mapId);
           if (current.kind !== 'found') return envelope(current);
-          revision = current.value.currentRevision;
+          return envelope({ kind: 'found', revision: current.revision, frontier: calculateFrontier(current.revision.state), ...(answerDeskEnabled ? current.desk : {}), ...viewerLink(mapId) });
         }
         const read = await storage.adapter.readRevision(mapId, revision);
         return read.kind === 'found' ? envelope({ kind: 'found', revision: read.value, frontier: calculateFrontier(read.value.state),
-          ...viewerLink(mapId) }) : envelope(read);
+          ...(answerDeskEnabled ? projectDesk(read.value.state, emptyDesk, true) : {}), ...viewerLink(mapId) }) : envelope(read);
       }
       let prepared;
       if (create?.kind === 'ok') prepared = create.value;
       else if (apply?.kind === 'ok') {
         const current = await storage.adapter.readCurrent(apply.value.mapId);
         if (current.kind !== 'found') return envelope(current);
-        const result = prepareApply(current.value, apply.value);
+        const result = prepareApply(current.value, apply.value, storage.desk.read(apply.value.mapId));
         if (result.kind !== 'prepared') return envelope(result);
         prepared = result.change;
       } else throw new Error('Unreachable tool preparation');

@@ -10,7 +10,7 @@ const { prepareCreate, prepareApply, revisionFromPrepared } = captureDomain();
 import type { Command, Revision, NonEmpty } from '../../../src/types.ts';
 import { captureProblem } from './capture.ts';
 import type { CaptureInput, Reproduction } from './capture.ts';
-import { openCaptureDatabase, readRevisions } from './database.ts';
+import { openCaptureDatabase, readCaptureSource } from './database.ts';
 import { applySeedCommands, createSeedState, replayVisible, seedAuthor, visibleMap } from './seed.ts';
 import { validateScenario } from '../scenario.ts';
 import { F11 } from '../scenarios/safety.ts';
@@ -419,7 +419,7 @@ test('manual CLI writes a reusable bundle once, never overwrites it and never le
   expect(duplicate.status).toBe(1);
   expect(duplicate.stderr).not.toContain(dir);
   expect(readFileSync(join(out, 'capture.json'))).toEqual(before);
-  expect(readRevisions(path, 'Capture.Map', 28, false)).toHaveLength(1);
+  expect(readCaptureSource(path, 'Capture.Map', 28, false).revisions).toHaveLength(1);
 });
 
 test.each([

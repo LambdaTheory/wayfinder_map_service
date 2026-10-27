@@ -25,20 +25,25 @@ export interface LocalServiceConfiguration {
   readonly credentialsPath?: string;
   // The primary credential's client shows its model no server instructions (compatibility mode).
   readonly toolsOnly?: boolean;
+  // Staged Answer Desk capability; #114 enables it by default.
+  readonly answerDeskEnabled?: boolean;
 }
 export interface LocalMcpService {
   stop(): Promise<void>;
   metadataStatus(): { observations: number; missingObservations: number };
 }
 export class LocalServiceFailure extends Error {
-  constructor(readonly code: 'invalid_configuration' | 'storage_not_ready' | 'port_unavailable' | 'service_failure') {
-    super(`Local MCP ${code}`);
+  constructor(readonly code: 'invalid_configuration' | 'storage_not_ready' | 'port_unavailable' | 'service_failure' | 'answer_desk_required') {
+    super(code === 'answer_desk_required'
+      ? 'The configured private SQLite database has used Answer Desk; enable answerDeskEnabled (WAYFINDER_ANSWER_DESK_ENABLED=true).'
+      : `Local MCP ${code}`);
     this.name = 'LocalServiceFailure';
   }
 }
 
 export function captureConfiguration(input: LocalServiceConfiguration): LocalServiceConfiguration {
-  if (validateObject(input, [], ['databasePath', 'port', 'token', 'actorId', 'clientId', 'allowedOrigins', 'credentialsPath', 'toolsOnly'])
+  if (validateObject(input, [], ['databasePath', 'port', 'token', 'actorId', 'clientId', 'allowedOrigins', 'credentialsPath', 'toolsOnly', 'answerDeskEnabled'])
+    || (input.answerDeskEnabled !== undefined && typeof input.answerDeskEnabled !== 'boolean')
     || (input.toolsOnly !== undefined && typeof input.toolsOnly !== 'boolean')
     || typeof input.databasePath !== 'string' || !input.databasePath
     || !Number.isInteger(input.port) || input.port < 1 || input.port > 65535
@@ -112,6 +117,7 @@ interface Session {
 // Production enters through mcp-service.ts, which opens only existing private DBs.
 export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceConfiguration): Promise<LocalMcpService> {
   const config = captureConfiguration(input);
+  if (config.answerDeskEnabled !== true && storage.hasDeskHistory()) throw new LocalServiceFailure('answer_desk_required');
   const metadata = new CallMetadata(config.databasePath, config.token);
   const tokenHash = digest(`Bearer ${config.token}`);
   function authenticate(authorization: string | undefined): Credential | undefined {
@@ -140,7 +146,7 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
   };
   const control = (call: () => Promise<CallToolResult>) => metadata.observeTool(() => admit(call), classifyCallResult);
   const serverFor = (credential: Credential) => createMapMcpServer(storage, {
-    actorId: config.actorId, clientId: credential.clientId, viewerOrigin: `http://${host}`, toolsOnly: credential.toolsOnly,
+    actorId: config.actorId, clientId: credential.clientId, viewerOrigin: `http://${host}`, toolsOnly: credential.toolsOnly, answerDeskEnabled: config.answerDeskEnabled === true,
   }, control);
   async function sendProtocolResponse(result: Response, response: ServerResponse, observation: CallObservation | undefined) {
     // The legacy transport uses JSON mode; modern auto mode also yields JSON because

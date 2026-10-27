@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { startLocalMcpService } from '../dist/mcp-service.js';
 import { workflowContract } from '../dist/mcp-tools.js';
-import { openSQLite } from '../dist/sqlite-storage.js';
+import { backupSQLite } from '../dist/sqlite-storage.js';
 
 // Foreground, operator-started test connection. The database is an existing
 // private SQLite file; this program never initializes or substitutes one.
@@ -30,15 +30,11 @@ if (attachToken !== undefined && !/^[A-Za-z0-9._~-]{32,256}$/.test(attachToken))
 const token = attachToken ?? randomBytes(48).toString('hex');
 
 function backup() {
-  const source = openSQLite(databasePath);
-  try {
-    const timestamp = new Date().toISOString().replaceAll(':', '-');
-    const destination = join(dirname(databasePath), 'backups',
-      `maps-${timestamp}-${randomBytes(4).toString('hex')}.sqlite`);
-    source.backup(destination);
-  } finally {
-    source.close();
-  }
+  const timestamp = new Date().toISOString().replaceAll(':', '-');
+  const destination = join(dirname(databasePath), 'backups',
+    `maps-${timestamp}-${randomBytes(4).toString('hex')}.sqlite`);
+  // Attach mode may back up an older running service: never migrate its source.
+  backupSQLite(databasePath, destination);
   console.log('Consistent SQLite backup completed.');
 }
 

@@ -6,7 +6,7 @@ import { entries } from '../evidence.ts';
 import type { Entry } from '../evidence.ts';
 import type { Scenario, Seed } from '../scenario.ts';
 import { validateScenario } from '../scenario.ts';
-import { readRevisions } from './database.ts';
+import { readCaptureSource } from './database.ts';
 import { historyMap, replayVisible, visibleMap } from './seed.ts';
 import type { ClaimChoice, HistoryOverride } from './seed.ts';
 
@@ -41,6 +41,8 @@ export interface CaptureRecord {
   source: { mapId: string; revision: number; date: string; sessionRef: string; humanWords: string | null };
   purpose: string; restores: Seed['restores'];
   conversion: string[];
+  /** Explicit omissions; absent when the source has no known capture gap. */
+  gaps?: string[];
   claims: (ClaimChoice & { claimant: string })[];
   redactions: { rule: string; location: string; replacement: string; occurrences: number }[];
   verification: { seedSha256: string; sourceRevisionsVerified: number[] };
@@ -138,14 +140,15 @@ export function serializeCaptureOutput(bundle: CaptureBundle, rules: RedactionRu
   const files: Record<string, Buffer> = Object.fromEntries(Object.entries({ 'seed.json': bundle.seed, 'scenario.json': bundle.scenario, 'capture.json': bundle.record })
     .map(([file, value]) => [file, Buffer.from(JSON.stringify(value, null, 2) + '\n', 'utf8')]));
   const summary = Buffer.from(JSON.stringify({ scenario: bundle.scenario.id,
-    verdict: bundle.record.verdict.status, reproduction: bundle.record.reproduction.status }) + '\n', 'utf8');
+    verdict: bundle.record.verdict.status, reproduction: bundle.record.reproduction.status,
+    ...(bundle.record.gaps?.length ? { gaps: bundle.record.gaps } : {}) }) + '\n', 'utf8');
   for (const bytes of [...Object.values(files), summary]) guardPrivate(bytes.toString('utf8'), rules);
   return { files, summary };
 }
 
 export function captureProblem(database: string, input: CaptureInput): CaptureBundle {
   validate(input);
-  const raw = readRevisions(database, input.mapId, input.revision, input.restores === 'history');
+  const { revisions: raw, gaps } = readCaptureSource(database, input.mapId, input.revision, input.restores === 'history');
   const redactions: CaptureRecord['redactions'] = [];
   const records = redact(raw, input.redactions, redactions, '/source/revisions');
   // Redact metadata too, but never emit the redaction inputs themselves or the database path.
@@ -165,6 +168,7 @@ export function captureProblem(database: string, input: CaptureInput): CaptureBu
     ? 'History: one reconstructed map_apply per source apply Revision, preserving each Revision state and source client label; original command arguments are not stored in SQLite. Creation uses the Controller. Actor IDs, timestamps and semantic summaries are audit metadata, not restored by the seed.'
     : 'Current visible state only: creation, Tickets, Dependencies, content, Settlements and Claims are rebuilt; source Revision numbers, Settlement introduction Revisions and history are not restored.',
   'Empty Map/Ticket/Settlement extension containers omitted by B01; nonempty containers are refused. Evidence extensions are kept.',
+  ...gaps,
   ...claims.map(c => `Claim ${c.ticketId}: ${c.action} (${c.claimant}). ${c.reason}`)];
   let map = visibleMap(expected);
   let verified: number[] = [];
@@ -212,6 +216,7 @@ export function captureProblem(database: string, input: CaptureInput): CaptureBu
   const record: CaptureRecord = { schema: 'wayfinder-problem-capture/1', scenarioId: redactedInput.id,
     source: { mapId: redactedInput.mapId, revision: redactedInput.revision, date: redactedInput.date, sessionRef: redactedInput.sessionRef, humanWords: redactedInput.humanWords },
     purpose: redactedInput.purpose, restores: seed.restores, conversion, claims, redactions,
+    ...(gaps.length ? { gaps } : {}),
     verification: { seedSha256: digest(map), sourceRevisionsVerified: verified },
     history: input.restores === 'history' ? records.map(r => ({ revision: r.revision, author: r.author, changes: r.changes })) : [],
     verdict: { status: reasons.length ? 'paused' : 'specified', reasons, basis: redactedInput.verdict?.basis ?? null },
