@@ -379,6 +379,8 @@ Migrate the pinned SDK v1 package to SDK v2's `@modelcontextprotocol/server` and
 | Answer wait | Ordinary blocking `map_wait`; the tested Codex client did not see task tools | Opted-in Tasks extension for Claude Code; ordinary calls still need a non-task result |
 | Workflow guard | Explicit write `version` | The same explicit write `version`; transport success does not refresh model context |
 
+Observed client eras (#110 records exact versions): Codex 0.164.0 negotiates `2025-11-25`; Claude Code 2.1.310 uses `2026-07-28` for tasks; ChatGPT App 26.1016 opened with `server/discover` (`2026-07-28`) and was observed falling back to `initialize` (`2025-11-25`) after HTTP 400 / `-32000` (#80, PR #126). Serving the modern era enables ChatGPT's sessionless path at #110's release when its requests carry the required `MCP-Protocol-Version` and `Mcp-Method` headers, plus `Mcp-Name` for `tools/call`, `prompts/get` and `resources/read`. Missing required headers now return HTTP 400 / `-32020`; ChatGPT fallback on that response is unverified. Actual headers, selected era and fallback behavior are observed at the #114 run. ChatGPT's `toolsOnly` attestation and the write `version` guard are unchanged in either era.
+
 Both eras share `/mcp`, operator-controlled credential identity, the process's immutable workflow, Map authority and existing Host/Origin protections. Preserve instructions, Resource and Prompt delivery in the appropriate era and record the actual capabilities each installed client exposes. Do not add STDIO/channel bridges, per-client databases, OAuth or automatic Claim expiry. A protocol session remains distinct from the logical Claimant.
 
 ### 15.3 Tasks, storage and failure

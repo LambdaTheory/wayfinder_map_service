@@ -1,9 +1,9 @@
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client } from '@modelcontextprotocol/client';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { directAgent, directFetch } from './direct-http.ts';
 
-// The pinned SDK's accessor declarations conflict with Transport under exactOptionalPropertyTypes.
-// As in the shared test helper, use its actual runtime client here without weakening project checking.
+// The independent fixture controller keeps the SDK's legacy connection default;
+// test-agent traffic selects and exercises its own protocol era.
 export async function createControllerClient(port, token) {
   const endpoint = new URL(`http://127.0.0.1:${port}/mcp`);
   const agent = directAgent();

@@ -2,8 +2,8 @@
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { afterAll, describe, expect, test } from 'vitest';
 import { createMapMcpServer } from '../../src/mcp-tools.js';
 import { sqliteLifecycleForTests } from '../../src/sqlite-internal.js';

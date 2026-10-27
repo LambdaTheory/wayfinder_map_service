@@ -3,8 +3,9 @@ import type { IncomingHttpHeaders } from 'node:http';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { Ajv } from 'ajv';
+import type { CallToolResult as SdkCallToolResult } from '@modelcontextprotocol/server';
+type CallToolResult = SdkCallToolResult & { structuredContent?: Record<string, unknown> };
+import { Ajv, type AnySchema } from 'ajv';
 import { afterEach, expect, test } from 'vitest';
 import { createHttpTestClient } from './helpers/mcp-http-client.mjs';
 import { serveLocalMcp } from '../src/mcp-http-internal.js';
@@ -18,7 +19,7 @@ const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const token = 'isolated-viewer-token-not-a-live-credential';
 const ajv = new Ajv({ strict: false });
-const outputs = new Map(mapTools.map(tool => [tool.name, ajv.compile(tool.outputSchema!)]));
+const outputs = new Map(mapTools.map(tool => [tool.name, ajv.compile(tool.outputSchema! as AnySchema)]));
 
 async function freePort() {
   const server = createServer();

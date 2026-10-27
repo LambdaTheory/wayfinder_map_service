@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { createServer, request as httpRequest } from 'node:http';
+import { createLocalChatGptRelay } from './local-chatgpt-relay.mjs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { startLocalMcpService } from '../dist/mcp-service.js';
@@ -28,12 +28,6 @@ if (attachToken !== undefined && !/^[A-Za-z0-9._~-]{32,256}$/.test(attachToken))
   process.exit(1);
 }
 const token = attachToken ?? randomBytes(48).toString('hex');
-const requestHeaders = [
-  'accept', 'content-type', 'content-length', 'mcp-session-id', 'mcp-protocol-version',
-];
-const responseHeaders = [
-  'content-type', 'content-length', 'mcp-session-id', 'mcp-protocol-version',
-];
 
 function backup() {
   const source = openSQLite(databasePath);
@@ -87,44 +81,7 @@ try {
   process.exit(1);
 }
 
-const relay = createServer((incoming, outgoing) => {
-  if (incoming.url !== '/mcp') {
-    outgoing.writeHead(404).end();
-    return;
-  }
-  if (!['POST', 'DELETE'].includes(incoming.method)) {
-    outgoing.writeHead(405, { Allow: 'POST, DELETE' }).end();
-    return;
-  }
-  if (incoming.headers.origin !== undefined) {
-    outgoing.writeHead(403).end();
-    return;
-  }
-  const headers = {
-    host: `127.0.0.1:${servicePort}`,
-    authorization: `Bearer ${token}`,
-  };
-  for (const name of requestHeaders) {
-    if (incoming.headers[name] !== undefined) headers[name] = incoming.headers[name];
-  }
-  const upstream = httpRequest({
-    hostname: '127.0.0.1', port: servicePort, path: '/mcp',
-    method: incoming.method, headers,
-  }, response => {
-    const forwarded = {};
-    for (const name of responseHeaders) {
-      if (response.headers[name] !== undefined) forwarded[name] = response.headers[name];
-    }
-    outgoing.writeHead(response.statusCode ?? 502, forwarded);
-    response.pipe(outgoing);
-  });
-  upstream.on('error', () => {
-    if (!outgoing.headersSent) outgoing.writeHead(502).end();
-    else outgoing.destroy();
-  });
-  incoming.pipe(upstream);
-});
-relay.requestTimeout = 30_000;
+const relay = createLocalChatGptRelay(servicePort, token);
 
 try {
   await new Promise((resolve, reject) => {

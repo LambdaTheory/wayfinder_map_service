@@ -1,4 +1,4 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import { immutableClone } from './immutable.js';
 import { workflowContract } from './workflow.generated.js';
 

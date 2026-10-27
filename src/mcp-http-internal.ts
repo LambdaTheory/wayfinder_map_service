@@ -3,10 +3,9 @@ import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { isAbsolute } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { WebStandardStreamableHTTPServerTransport, createMcpHandler, isLegacyRequest, isInitializeRequest } from '@modelcontextprotocol/server';
+import { toWebRequest } from '@modelcontextprotocol/node';
+import type { CallToolResult, Server } from '@modelcontextprotocol/server';
 import { createMapMcpServer } from './mcp-tools.js';
 import type { SQLiteStorage } from './sqlite-storage.js';
 import { isPlainObject, validateAuthor, validateId, validateObject } from './values.js';
@@ -140,6 +139,23 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
     }
   };
   const control = (call: () => Promise<CallToolResult>) => metadata.observeTool(() => admit(call), classifyCallResult);
+  const serverFor = (credential: Credential) => createMapMcpServer(storage, {
+    actorId: config.actorId, clientId: credential.clientId, viewerOrigin: `http://${host}`, toolsOnly: credential.toolsOnly,
+  }, control);
+  async function sendProtocolResponse(result: Response, response: ServerResponse, observation: CallObservation | undefined) {
+    // The legacy transport uses JSON mode; modern auto mode also yields JSON because
+    // these tools emit no progress and subscriptions are disabled. Keep SDK diagnostics private.
+    const text = await result.text();
+    const payload = text ? JSON.parse(text) as Record<string, unknown> : undefined;
+    metadata.response(observation, payload, classifyCallResult);
+    if (payload?.error && typeof payload.error === 'object') {
+      payload.error = { code: (payload.error as { code: number }).code, message: 'Protocol request failed' };
+    }
+    if (!response.destroyed) {
+      response.writeHead(result.status, Object.fromEntries(result.headers));
+      response.end(payload ? JSON.stringify(payload) : undefined);
+    }
+  }
   async function handle(request: IncomingMessage, response: ServerResponse, observation: CallObservation | undefined) {
     if (stopping) { httpFailure(response, 503, 'Service stopping'); return; }
     if (request.headers.host !== host) { httpFailure(response, 403, 'Host forbidden'); return; }
@@ -180,6 +196,20 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
     }
     // stop() may have started while the request body was arriving.
     if (stopping) { httpFailure(response, 503, 'Service stopping'); return; }
+    // Omit optional IncomingMessage fields that the adapter's exact optional types do not accept.
+    const webRequest = await toWebRequest({ method: request.method!, url: request.url!, headers: request.headers,
+      [Symbol.asyncIterator]: () => request[Symbol.asyncIterator]() }, body);
+    if (!await isLegacyRequest(webRequest, body)) {
+      // Modern requests carry their protocol context on every call, not in an MCP
+      // session. The authenticated credential still supplies the author identity.
+      if (request.headers['mcp-session-id'] !== undefined) { httpFailure(response, 400, 'Modern requests do not use sessions'); return; }
+      const modernHandler = createMcpHandler(() => serverFor(credential),
+      { legacy: 'reject', maxSubscriptions: 0, maxRequestBodySize: MAX_REQUEST_BYTES });
+      try {
+        await sendProtocolResponse(await modernHandler.fetch(webRequest, { parsedBody: body }), response, observation);
+      } finally { await modernHandler.close(); }
+      return;
+    }
     const sessionId = request.headers['mcp-session-id'];
     let session = typeof sessionId === 'string' ? sessions.get(sessionId) : undefined;
     let initializing = false;
@@ -190,8 +220,7 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
       const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: randomUUID, enableJsonResponse: true,
         onsessioninitialized(id) { sessions.set(id, created); metadata.update(observation, value => { value.fields.mcpSessionId = id; }); },
       });
-      const server = createMapMcpServer(storage,
-        { actorId: config.actorId, clientId: credential.clientId, viewerOrigin: `http://${host}`, toolsOnly: credential.toolsOnly }, control);
+      const server = serverFor(credential);
       const created: Session = { credential: credential.key, clientId: credential.clientId, server, transport, pending: new Set(), closing: false };
       await server.connect(transport);
       session = created;
@@ -217,21 +246,9 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
     const lostResponse = new Promise<undefined>(resolve => { disconnected = () => resolve(undefined); });
     response.once('close', disconnected);
     try {
-      const headers = new Headers();
-      for (let i = 0; i < request.rawHeaders.length; i += 2) headers.append(request.rawHeaders[i]!, request.rawHeaders[i + 1]!);
-      const webRequest = new Request(`http://${host}/mcp`, { method: request.method!, headers });
       const result = await Promise.race([session.transport.handleRequest(webRequest, { parsedBody: body }), lostResponse]);
       if (result && !response.destroyed) {
-        // JSON-response mode (no event replay/subscriptions). Strip SDK diagnostic
-        // error data/prose, which must not expose malformed request contents.
-        const text = await result.text();
-        const payload = text ? JSON.parse(text) as Record<string, unknown> : undefined;
-        metadata.response(observation, payload, classifyCallResult);
-        if (payload?.error && typeof payload.error === 'object') {
-          payload.error = { code: (payload.error as { code: number }).code, message: 'Protocol request failed' };
-        }
-        response.writeHead(result.status, Object.fromEntries(result.headers));
-        response.end(payload ? JSON.stringify(payload) : undefined);
+        await sendProtocolResponse(result, response, observation);
       }
     }
     finally {

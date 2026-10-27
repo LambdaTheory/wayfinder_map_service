@@ -3,8 +3,28 @@ import { createServer, request } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { freePort, reservedPorts } from '../runner/service.ts';
 import { directAgent } from '../runner/direct-http.ts';
+import { mcpRequestHeaders, mcpResponseHeaders } from '../../../scripts/local-chatgpt-relay.mjs';
 
-export interface Exchange { id: string; at: string; httpMethod: string; request: Record<string, unknown>; response: unknown; status: number; sessionId: string | null }
+export interface Exchange {
+  id: string; at: string; httpMethod: string; request: Record<string, unknown>; response: unknown; status: number; sessionId: string | null;
+  /** Sole recorded request header; never persist authorization, cookies or the complete header bag. */
+  protocolVersionHeader: string | null;
+}
+/** Record the terminal RPC response regardless of JSON/SSE framing; never mistake a notification for a result. */
+export function rpcResponse(text: string, contentType: string, requestId: unknown): unknown {
+  if (!contentType.toLowerCase().startsWith('text/event-stream')) {
+    try { return JSON.parse(text); } catch { return null; }
+  }
+  let result: unknown = null;
+  for (const event of text.replace(/\r\n/g, '\n').split('\n\n').slice(0, -1)) {
+    const data = event.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).replace(/^ /, '')).join('\n');
+    try {
+      const message = JSON.parse(data);
+      if (message?.jsonrpc === '2.0' && message.id === requestId && ('result' in message || 'error' in message)) result = message;
+    } catch { /* Comments, incomplete events and malformed data cannot establish a result. */ }
+  }
+  return result;
+}
 export type RefusalReason = 'path_mismatch' | 'origin_present' | 'method_not_allowed' | 'body_too_large' | 'body_interrupted'
   | 'delete_body' | 'invalid_json' | 'non_object_json' | 'invalid_rpc' | 'invalid_tool_params' | 'outside_turn' | 'ownership_check_failed';
 export interface RefusalBody {
@@ -135,7 +155,7 @@ export async function startRelay(servicePort: number, token: string, observe: (e
     const id = `rpc-${++counter}`;
     const at = new Date().toISOString();
     const headers: Record<string, string | string[]> = { host: `127.0.0.1:${servicePort}`, authorization: `Bearer ${state.token}` };
-    for (const key of ['accept', 'content-type', 'mcp-session-id', 'mcp-protocol-version']) {
+    for (const key of mcpRequestHeaders) {
       if (incoming.headers[key] !== undefined) headers[key] = incoming.headers[key]!;
     }
     if (body.length) headers['content-length'] = String(body.length);
@@ -143,20 +163,20 @@ export async function startRelay(servicePort: number, token: string, observe: (e
     const finish = (response: unknown, status: number, sessionId: string | null) => {
       if (finished) return;
       finished = true;
-      try { observe({ id, at, httpMethod: incoming.method!, request: rpc, response, status, sessionId }); }
+      try { observe({ id, at, httpMethod: incoming.method!, request: rpc, response, status, sessionId,
+        protocolVersionHeader: typeof incoming.headers['mcp-protocol-version'] === 'string' ? incoming.headers['mcp-protocol-version'] : null }); }
       catch (error) { fail(error); respond(outgoing, 500); }
       finally { state.inFlight--; }
     };
     const upstream = request({ agent, hostname: '127.0.0.1', port: servicePort, path: '/mcp', method: incoming.method, headers }, response => {
       const forwarded: Record<string, string | string[]> = {};
-      for (const key of ['content-type', 'content-length', 'mcp-session-id', 'mcp-protocol-version']) {
+      for (const key of mcpResponseHeaders) {
         if (response.headers[key] !== undefined) forwarded[key] = response.headers[key]!;
       }
       const result: Buffer[] = [];
       response.on('data', (chunk: Buffer) => result.push(chunk));
       const done = () => {
-        let value: unknown = null;
-        try { value = JSON.parse(Buffer.concat(result).toString()); } catch { /* empty or interrupted result stays unknown */ }
+        const value = rpcResponse(Buffer.concat(result).toString(), String(response.headers['content-type'] ?? ''), rpc.id);
         finish(value, response.statusCode ?? 502, String(response.headers['mcp-session-id'] ?? incoming.headers['mcp-session-id'] ?? '') || null);
       };
       response.once('end', done); response.once('error', done);
