@@ -22,7 +22,11 @@ export async function createHttpTestClient(port, token, protocol = '2025-11-25')
       const response = await fetch(url, options);
       if (options?.method === 'GET') streamResponse({ status: response.status });
       if (options?.body && JSON.parse(options.body).method === 'initialize' && response.ok) {
-        initializeResult = (await response.clone().json()).result;
+        const text = await response.clone().text();
+        const payload = response.headers.get('content-type')?.includes('text/event-stream')
+          ? text.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => JSON.parse(line.slice(5))).find(value => value.result)
+          : JSON.parse(text);
+        initializeResult = payload.result;
         negotiatedProtocol = initializeResult.protocolVersion;
       }
       return response;

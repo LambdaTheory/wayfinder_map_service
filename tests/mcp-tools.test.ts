@@ -138,6 +138,10 @@ test.each([false, true])('disabled tools/list exactly matches 3.1.0, including o
   const enabled = await fixture({}, true, toolsOnly);
   const enabledTools = (await enabled.client.listTools()).tools;
   expect(enabledTools).toEqual(toolsOnly ? toolsOnlyAnswerDeskMapTools : answerDeskMapTools);
+  expect(enabledTools.map(tool => tool.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply', 'map_wait']);
+  for (const tool of [...tools, ...enabledTools]) {
+    for (const combinator of ['oneOf', 'anyOf', 'allOf']) expect(tool.inputSchema, tool.name).not.toHaveProperty(combinator);
+  }
   for (const word of ['deskQuestion.post', 'deskQuestion.withdraw', 'reopenRequest.close', 'deskAnswer', 'reopenRequestId', 'deskQuestions', 'reopenRequests', 'reopenContexts']) {
     expect(JSON.stringify(enabledTools)).toContain(word);
   }

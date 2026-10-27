@@ -652,6 +652,7 @@ def launch(options, prompt=None, passthrough=(), resume_id=None, cwd=None):
         argv = ["codex", "--no-daemon", "-C", str(cwd), "-m", model, "-c", 'model_reasoning_effort="{}"'.format(effort)]
         if method == "mcp":
             argv += ["-c", 'mcp_servers.wayfinder.url="http://127.0.0.1:{}/mcp"'.format(PORT)]
+            argv += ["-c", "mcp_servers.wayfinder.tool_timeout_sec=1800"]
         if resume_id:
             argv += ["resume", resume_id]
         argv += list(passthrough)
