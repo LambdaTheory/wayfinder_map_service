@@ -19,7 +19,11 @@ import { startRelay } from './relay.ts';
 import type { Exchange, RefusalReason, Relay, RelayRefusalEvent } from './relay.ts';
 import { writeCanaryCheckout } from '../../helpers/canary-release.mjs';
 
-type Tool = { name: string; description?: string | undefined; inputSchema: { properties?: Record<string, { description?: string | undefined }> | undefined } };
+import type { Tool } from '@modelcontextprotocol/client';
+function versionDescription(tool: Tool): string | undefined {
+  const field = tool.inputSchema.properties?.version;
+  return field && typeof field === 'object' && 'description' in field && typeof field.description === 'string' ? field.description : undefined;
+}
 export interface Capture {
   /** Native messages, in order; null means before the first call, otherwise after the named relay call. */
   messages: { text: string; afterCall: string | null; order?: number }[];
@@ -146,7 +150,8 @@ export class ChatGPTAttempt {
   }
 
   private parameterDescription() {
-    const description = this.tools.find(t => t.name === 'map_apply')?.inputSchema.properties?.version?.description;
+    const tool = this.tools.find(t => t.name === 'map_apply');
+    const description = tool && versionDescription(tool);
     if (!description) throw new Error('Built tools lack the compatibility version parameter');
     return description;
   }
@@ -233,7 +238,7 @@ export class ChatGPTAttempt {
     if (capture.toolsShown && (!Array.isArray(capture.toolsShown) || capture.toolsShown.length !== 4
       || new Set(capture.toolsShown.map(t => t?.name)).size !== 4
       || capture.toolsShown.some(t => !['map_create', 'map_read', 'map_list', 'map_apply'].includes(t?.name)
-        || typeof t.description !== 'string' || !t.inputSchema || (['map_create', 'map_apply'].includes(t.name) && typeof t.inputSchema.properties?.version?.description !== 'string'))))
+        || typeof t.description !== 'string' || !t.inputSchema || (['map_create', 'map_apply'].includes(t.name) && versionDescription(t) === undefined))))
       throw new Error('toolsShown must contain the four actual client tool definitions, including write version descriptions');
     const index = this.activeTurn;
     const turn = this.scenario.turns[index]!;
@@ -265,7 +270,9 @@ export class ChatGPTAttempt {
     if (capture.toolsShown) {
       // The operator's declaration alone cannot establish which definitions this chat received.
       const callIds = new Set(calls.filter(e => e.kind === 'tool-call' && e.server === 'wayfinder').map(e => e.kind === 'tool-call' ? e.callId : ''));
-      const sessionIds = new Set(this.exchanges.filter(e => e.httpMethod === 'POST' && callIds.has(e.id)).map(e => e.sessionId));
+      const callExchanges = this.exchanges.filter(e => e.httpMethod === 'POST' && callIds.has(e.id));
+      const sessionIds = new Set(callExchanges.map(e => e.sessionId));
+      const sessionless = callExchanges.length > 0 && callExchanges.every(e => e.sessionId === null);
       const sessionId = sessionIds.size === 1 ? [...sessionIds][0] : null;
       const boundary = this.snapshotBoundaries.get(`${this.phase}:${turn.session}`)!;
       const listed = sessionId ? this.exchanges.slice(this.wireSinceRestart, boundary).findLast(e => e.httpMethod === 'POST'
@@ -274,7 +281,10 @@ export class ChatGPTAttempt {
       const result = listed?.response as { result?: { tools?: unknown }; error?: unknown } | null | undefined;
       const verified = listed && listed.status === 200 && !result?.error && capture.toolsShownSource === source
         && isDeepStrictEqual(capture.toolsShown, result?.result?.tools);
-      const reason = !sessionId ? 'no unambiguous MCP session from this turn’s tool calls'
+      // Null is absence of identity, never a shared session. Modern tool snapshots need
+      // a future native-chat binding; clientInfo alone is shared across chats.
+      const reason = sessionless ? 'sessionless tool snapshot cannot yet be bound to this native chat; wire calls remain recorded'
+        : !sessionId ? 'no unambiguous MCP session from this turn’s tool calls'
         : !listed ? 'no tools/list for this MCP session before its first turn in this phase'
           : capture.toolsShownSource !== source ? 'missing or incorrect reference to the last pre-turn tools/list'
             : 'toolsShown differs from the recorded tools/list result or that request failed';
@@ -283,7 +293,7 @@ export class ChatGPTAttempt {
         firstTurnWireBoundary: boundary, wireSinceRestart: this.wireSinceRestart });
       if (verified) {
         given.toolDescriptions = { known: true, value: Object.fromEntries(capture.toolsShown.map(t => [t.name, t.description ?? ''])) };
-        given.rulesSource = { kind: 'tool-parameter', tool: 'map_apply', description: capture.toolsShown.find(t => t.name === 'map_apply')!.inputSchema.properties!.version!.description! };
+        given.rulesSource = { kind: 'tool-parameter', tool: 'map_apply', description: versionDescription(capture.toolsShown.find(t => t.name === 'map_apply')!)! };
         this.record.missing = this.record.missing.filter(m => m !== `given.${this.phase}.toolDescriptions` && m !== `given.${this.phase}.rulesSource`);
       } else {
         given.toolDescriptions = unknown(reason);
