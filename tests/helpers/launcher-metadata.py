@@ -6,9 +6,13 @@ import json
 import os
 from pathlib import Path
 import runpy
+import subprocess
+import sys
 
 loaded = runpy.run_path("scripts/wayfinder-agent/wayfinder")
 launcher = loaded["launch"].__globals__
+original_check_harness = launcher["check_harness"]
+original_claude_env = launcher["claude_env"]
 launcher["check_harness"] = lambda *_: None
 launcher["prepare_codex"] = lambda *_: None
 launcher["prepare_claude"] = lambda *_: None
@@ -17,7 +21,20 @@ launcher["ensure_service"] = lambda **_: launcher["primary_token"]()
 launcher["probe"] = lambda _: (200, "2.1.0")
 launcher["say"] = lambda *_: None
 executed = []
-os.execvpe = lambda command, argv, env: executed.append(env)
+agent_log = launcher["SVC"] / "synthetic-agent.json"
+def execute(command, argv, env):
+    # A real fake harness process observes only the environment passed at exec.
+    subprocess.run([sys.executable, "-c", "import json,os,sys; print(json.dumps([sys.argv[1:],dict(os.environ)]))", *argv],
+                   env=env, stdout=open(agent_log, "w"), check=True)
+    received_argv, received_env = json.loads(agent_log.read_text())
+    assert "synthetic-desk-secret" not in json.dumps([received_argv, received_env])
+    assert not any(name.startswith("WAYFINDER_ANSWER_DESK_") for name in received_env)
+    executed.append(received_env)
+os.execvpe = execute
+os.environ["WAYFINDER_ANSWER_DESK_KEY"] = "synthetic-desk-secret"
+os.environ["WAYFINDER_ANSWER_DESK_KEY_FILE"] = "/synthetic-desk-secret/key"
+opened_desks = []
+launcher["open_desk"] = lambda map_id, **_: opened_desks.append([map_id])
 options = {"harness": "codex", "method": "mcp", "model": "synthetic", "effort": "high"}
 cwd = Path(os.environ["HOME"])
 
@@ -66,5 +83,21 @@ diagnostics = []
 launcher["say"] = diagnostics.append
 launcher["launch"](options, cwd=cwd)
 assert len(executed) == 4
+launcher["launch"](dict(options, harness="claude"), map_id="Synthetic.Map", cwd=cwd)
+assert opened_desks == [["Synthetic.Map"]]
+launcher["launch"](dict(options, method="matt"), map_id="Local.Map", cwd=cwd)
+assert opened_desks == [["Synthetic.Map"]]
 assert "Wayfinder launch metadata missing: 1 observation" in diagnostics
+# Version probes are harness processes too; inherited operator capability must not reach them.
+probe = launcher["SVC"] / "probe-harness"
+probe.write_text("#!" + sys.executable + "\nimport json,os\nfrom pathlib import Path\nPath(__file__).with_name('probe-env.json').write_text(json.dumps(dict(os.environ)))\n")
+probe.chmod(0o700)
+binary = launcher["HARNESSES"]["codex"]["bin"]
+launcher["HARNESSES"]["codex"]["bin"] = str(probe)
+try:
+    original_check_harness("codex")
+finally:
+    launcher["HARNESSES"]["codex"]["bin"] = binary
+assert "synthetic-desk-secret" not in (launcher["SVC"] / "probe-env.json").read_text()
+assert not any(name.startswith("WAYFINDER_ANSWER_DESK_") for name in original_claude_env(cwd))
 print("launcher metadata verified")

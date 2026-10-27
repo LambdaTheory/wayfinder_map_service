@@ -7,7 +7,10 @@ import { connect } from 'node:net';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'vitest';
+import { specTypeSchemas } from '@modelcontextprotocol/client';
+import { rpcResponse } from './relay.ts';
 import { createHttpTestClient } from '../../helpers/mcp-http-client.mjs';
+import { chatgptDiscovery } from '../../helpers/chatgpt-discovery.js';
 import { ChatGPTAttempt } from './attempt.ts';
 import type { Capture } from './attempt.ts';
 import type { Exchange, RelayRefusal, RelayRefusalEvent } from './relay.ts';
@@ -679,7 +682,7 @@ for (const variant of ['matched', 'no-list', 'no-reference', 'different-version'
       }
       if (variant === 'stale-reference') await client.listTools(); // Same content, superseded wire reference.
       if (variant === 'no-reference') source = undefined;
-      if (variant === 'different-version') tools.find(t => t.name === 'map_apply')!.inputSchema.properties!.version!.description = 'Use version 8.8.8';
+      if (variant === 'different-version') (tools.find(t => t.name === 'map_apply')!.inputSchema.properties!.version as { description: string }).description = 'Use version 8.8.8';
       if (variant === 'different-rule') tools.find(t => t.name === 'map_apply')!.description += ' Extra operator-invented rule.';
       await a.begin();
       if (variant === 'late-list') { tools = (await client.listTools()).tools; source = listedSource(a); }
@@ -721,7 +724,7 @@ test('out-of-turn discovery reaches the service and wire while Map access stays 
     for (const method of ['tools/list', 'resources/list', 'resources/templates/list', 'prompts/list', 'ping']) {
       const response = await post(method);
       assert.equal(response.status, 200, method);
-      const body = await response.json();
+      const body = rpcResponse(await response.text(), response.headers.get('content-type') ?? '', id) as { id: number; result?: unknown; error?: unknown };
       assert.equal(body.id, id);
       if (method === 'resources/templates/list') {
         // The current service has no template handler; preserve its protocol error, not a relay 503.
@@ -762,6 +765,64 @@ test('out-of-turn discovery reaches the service and wire while Map access stays 
     assert.deepEqual(record.sessions[0].turns, []);
     assert.equal(record.events.some((e: { kind: string }) => e.kind === 'tool-call' || e.kind === 'resource-read'), false);
   } finally { await client?.close(); await f.cleanup(); }
+}, 30_000);
+
+test('ChatGPT recorded discovery, tools/list and writes work sessionlessly with toolsOnly attestation', async () => {
+  const root = fresh(); const a = await ChatGPTAttempt.start(attemptOptions(root, 'F11'));
+  try {
+    assert.deepEqual(refusalsOf(a.dir), []);
+    const discover = chatgptDiscovery;
+    const response = await fetch(`http://127.0.0.1:${a.relay.port}/mcp`, { method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream',
+        'mcp-protocol-version': '2026-07-28', 'mcp-method': 'server/discover' }, body: JSON.stringify(discover) });
+    const text = await response.text();
+    const recorded = () => existsSync(join(a.dir, 'raw/wire.json')) ? wireOf(a).find(e => e.request.method === 'server/discover') : undefined;
+    await eventually(() => recorded() !== undefined, () => `server/discover was not forwarded: HTTP ${response.status} ${text}`);
+    const exchange = recorded()!;
+    assert.equal(response.status, 200, text); assert.equal(exchange.status, 200);
+    const received = rpcResponse(text, response.headers.get('content-type') ?? '', discover.id) as { result: unknown };
+    assert.deepEqual(received, exchange.response);
+    const discovery = specTypeSchemas.DiscoverResult['~standard'].validate(received.result);
+    assert.equal(discovery.issues, undefined);
+    assert.match(JSON.stringify(received.result), /2026-07-28/);
+    assert.equal(exchange.httpMethod, 'POST'); assert.deepEqual(exchange.request, discover); assert.equal(exchange.sessionId, null);
+    assert.equal(exchange.protocolVersionHeader, '2026-07-28');
+    assert.equal(response.headers.get('mcp-session-id'), null);
+    const modern = await createHttpTestClient(a.relay.port, 'ignored', '2026-07-28');
+    try {
+      const tools = (await modern.client.listTools()).tools;
+      assert.deepEqual(tools.map(t => t.name), ['map_create', 'map_list', 'map_read', 'map_apply', 'map_wait']);
+      for (const name of ['map_create', 'map_apply']) {
+        const versionField = tools.find(t => t.name === name)!.inputSchema.properties!.version as { description: string };
+        assert.match(versionField.description, new RegExp(`set it to "${a.record.service.version}"`));
+      }
+      const source = listedSource(a);
+      await a.begin();
+      const mismatch = await modern.client.callTool({ name: 'map_create', arguments: { version: '0.0.0', mapId: 'ModernChatGPT', title: 'T', destination: 'D' } });
+      assert.deepEqual(mismatch.structuredContent, { kind: 'rejected', code: 'version_mismatch', version: '0.0.0', rules: 'wayfinder://workflow/exploration' });
+      assert.deepEqual((await modern.client.callTool({ name: 'map_read', arguments: { mapId: 'ModernChatGPT' } })).structuredContent,
+        { kind: 'not_found', code: 'map_not_found', mapId: 'ModernChatGPT' });
+      await a.end({ messagesComplete: true, otherToolsComplete: true, messages: [{ text: 'Fixed fixture response.', afterCall: null }], toolsShown: tools, toolsShownSource: source });
+      const snapshot = JSON.parse(readFileSync(join(a.dir, 'raw/tool-snapshot-0.json'), 'utf8'));
+      assert.equal(snapshot.verified, false); assert.match(snapshot.reason, /sessionless.*native chat/);
+      const wire = wireOf(a).filter(e => ['server/discover', 'tools/list', 'tools/call'].includes(String(e.request.method)));
+      assert.ok(wire.some(e => e.request.method === 'tools/call'));
+      assert.ok(wire.every(e => e.sessionId === null && e.status === 200 && e.response !== null));
+      assert.ok(a.record.events.some(e => e.kind === 'tool-call' && e.tool === 'map_create'));
+      const missingHeaders = await fetch(`http://127.0.0.1:${a.relay.port}/mcp`, { method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify(discover) });
+      assert.equal(missingHeaders.status, 400);
+      // SDK 2.4.0 emits -32020; the service retains its diagnostic-redaction policy.
+      // ChatGPT fallback on this code is unverified until #114 (only -32000 was observed).
+      assert.deepEqual(await missingHeaders.json(), { jsonrpc: '2.0', id: discover.id,
+        error: { code: -32020, message: 'Protocol request failed' } });
+      assert.equal(wireOf(a).at(-1)!.protocolVersionHeader, null);
+      // Independently establish that the legacy route remains available.
+      const fallback = await createHttpTestClient(a.relay.port, 'ignored');
+      try { assert.equal((await fallback.client.listTools()).tools.length, 5); await fallback.streamProbe; } finally { await fallback.client.close(); }
+    } finally { await modern.client.close(); }
+    assert.ok(refusalsOf(a.dir).every(r => r.httpMethod === 'GET' && r.status === 405));
+  } finally { await a.stop('cancelled'); rmSync(root, { recursive: true, force: true }); }
 }, 30_000);
 
 test('a session DELETE cannot fabricate a JSON-RPC tool call', async () => {
@@ -830,7 +891,7 @@ test('every relay refusal persists only diagnostic metadata, with unchanged guar
     a.relay.beforeForward = async () => {}; a.relay.active = true;
     const { client, streamProbe } = await createHttpTestClient(a.relay.port, 'ignored');
     try {
-      assert.equal((await client.listTools()).tools.length, 4);
+      assert.equal((await client.listTools()).tools.length, 5);
       assert.deepEqual(await streamProbe, { status: 405 }); // The SDK's optional GET probe keeps its existing refusal.
     }
     finally { await client.close(); }

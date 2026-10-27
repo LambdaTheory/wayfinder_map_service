@@ -1,16 +1,21 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { isAbsolute } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { WebStandardStreamableHTTPServerTransport, createMcpHandler, isLegacyRequest, isInitializeRequest } from '@modelcontextprotocol/server';
+import { toWebRequest } from '@modelcontextprotocol/node';
+import type { Server } from '@modelcontextprotocol/server';
 import { createMapMcpServer } from './mcp-tools.js';
+import type { ToolCallControl } from './mcp-tools.js';
+import { CallAdmission } from './call-admission.js';
+import { DeskDelivery, WaitCancelled } from './desk-delivery.js';
+import { sendMcpResponse } from './mcp-response.js';
 import type { SQLiteStorage } from './sqlite-storage.js';
 import { isPlainObject, validateAuthor, validateId, validateObject } from './values.js';
 import { handleViewer, requestTarget } from './viewer-http.js';
+import { createViewerKey } from './viewer-key.js';
 import { CallMetadata, classifyCallResult } from './call-metadata.js';
 import type { CallObservation } from './call-metadata.js';
 
@@ -26,20 +31,28 @@ export interface LocalServiceConfiguration {
   readonly credentialsPath?: string;
   // The primary credential's client shows its model no server instructions (compatibility mode).
   readonly toolsOnly?: boolean;
+  // Deprecated compatibility input: only true is accepted; Answer Desk is always enabled.
+  readonly answerDeskEnabled?: boolean;
+  // Private operator handoff to the launcher; never served over HTTP.
+  readonly answerDeskKeyPath?: string;
 }
 export interface LocalMcpService {
   stop(): Promise<void>;
   metadataStatus(): { observations: number; missingObservations: number };
 }
 export class LocalServiceFailure extends Error {
-  constructor(readonly code: 'invalid_configuration' | 'storage_not_ready' | 'port_unavailable' | 'service_failure') {
-    super(`Local MCP ${code}`);
+  constructor(readonly code: 'invalid_configuration' | 'storage_not_ready' | 'port_unavailable' | 'service_failure' | 'answer_desk_required') {
+    super(code === 'answer_desk_required'
+      ? 'Answer Desk is required by this release; remove answerDeskEnabled: false (WAYFINDER_ANSWER_DESK_ENABLED=false).'
+      : `Local MCP ${code}`);
     this.name = 'LocalServiceFailure';
   }
 }
 
 export function captureConfiguration(input: LocalServiceConfiguration): LocalServiceConfiguration {
-  if (validateObject(input, [], ['databasePath', 'port', 'token', 'actorId', 'clientId', 'allowedOrigins', 'credentialsPath', 'toolsOnly'])
+  if (validateObject(input, [], ['databasePath', 'port', 'token', 'actorId', 'clientId', 'allowedOrigins', 'credentialsPath', 'toolsOnly', 'answerDeskEnabled', 'answerDeskKeyPath'])
+    || (input.answerDeskEnabled !== undefined && typeof input.answerDeskEnabled !== 'boolean')
+    || (input.answerDeskKeyPath !== undefined && (typeof input.answerDeskKeyPath !== 'string' || !isAbsolute(input.answerDeskKeyPath)))
     || (input.toolsOnly !== undefined && typeof input.toolsOnly !== 'boolean')
     || typeof input.databasePath !== 'string' || !input.databasePath
     || !Number.isInteger(input.port) || input.port < 1 || input.port > 65535
@@ -49,7 +62,8 @@ export function captureConfiguration(input: LocalServiceConfiguration): LocalSer
     || (input.credentialsPath !== undefined && (typeof input.credentialsPath !== 'string' || !isAbsolute(input.credentialsPath)))) {
     throw new LocalServiceFailure('invalid_configuration');
   }
-  return structuredClone(input);
+  if (input.answerDeskEnabled === false) throw new LocalServiceFailure('answer_desk_required');
+  return structuredClone({ ...input, answerDeskEnabled: true });
 }
 function localOrigin(value: unknown): boolean {
   if (typeof value !== 'string') return false;
@@ -63,13 +77,9 @@ function errorBody(message: string, code = -32000) {
 }
 function httpFailure(response: ServerResponse, status: number, message: string, code = -32000) {
   if (response.destroyed || response.writableEnded) return;
+  if (response.headersSent) { response.destroy(); return; }
   response.writeHead(status, { 'Content-Type': 'application/json', Connection: 'close' });
   response.end(errorBody(message, code));
-}
-function refusal(code: 'service_busy' | 'service_stopping'): CallToolResult {
-  return { content: [], isError: true, structuredContent: {
-    kind: 'infrastructure_error', code, outcome: 'not_published', requiresRestart: false,
-  } };
 }
 const digest = (value: string) => createHash('sha256').update(value).digest();
 interface Credential { readonly key: Buffer; readonly clientId: string; readonly toolsOnly: boolean }
@@ -113,6 +123,8 @@ interface Session {
 // Production enters through mcp-service.ts, which opens only existing private DBs.
 export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceConfiguration): Promise<LocalMcpService> {
   const config = captureConfiguration(input);
+  if (config.answerDeskEnabled !== true && storage.hasDeskHistory()) throw new LocalServiceFailure('answer_desk_required');
+  const viewerKey = config.answerDeskEnabled === true ? createViewerKey(config.answerDeskKeyPath) : undefined;
   const metadata = new CallMetadata(config.databasePath, config.token);
   const tokenHash = digest(`Bearer ${config.token}`);
   function authenticate(authorization: string | undefined): Credential | undefined {
@@ -127,24 +139,40 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
   const origins = new Set(config.allowedOrigins ?? []);
   const sessions = new Map<string, Session>();
   let stopping = false;
-  let activeCalls = 0;
-  const drains = new Set<() => void>();
+  const admission = new CallAdmission();
+  const delivery = new DeskDelivery(storage, (call, signal) => admission.release(call, signal));
   const requests = new Set<Promise<void>>();
-  const admit = async (call: () => Promise<CallToolResult>): Promise<CallToolResult> => {
-    if (stopping) return refusal('service_stopping');
-    if (activeCalls >= 4) return refusal('service_busy');
-    activeCalls++;
-    try { return await call(); }
-    finally {
-      if (--activeCalls === 0) { for (const resolve of drains) resolve(); drains.clear(); }
-    }
+  const calls = new Set<Promise<unknown>>();
+  const responseContext = new AsyncLocalStorage<ServerResponse>();
+  const control: ToolCallControl = call => {
+    const response = responseContext.getStore();
+    // Both eras must cancel a suspended blocking wait on HTTP disconnect,
+    // including legacy SSE peers that send no notifications/cancelled.
+    // Only blocking waits consume this signal; writes keep their publication boundary.
+    const disconnected = new AbortController();
+    const close = () => disconnected.abort();
+    response?.once('close', close);
+    if (response?.destroyed) close();
+    const work = metadata.observeTool(() => admission.admit(suspend => call(suspend, disconnected.signal)), classifyCallResult).catch(error => {
+      // MCP cancellation suppresses the protocol response. End its HTTP stream
+      // too, otherwise the legacy SDK leaves an empty SSE exchange suspended.
+      if (error instanceof WaitCancelled && response && !response.destroyed && !response.writableEnded) response.end();
+      throw error;
+    }).finally(() => response?.removeListener('close', close));
+    calls.add(work); void work.then(() => calls.delete(work), () => calls.delete(work));
+    return work;
   };
-  const control = (call: () => Promise<CallToolResult>) => metadata.observeTool(() => admit(call), classifyCallResult);
+  const serverFor = (credential: Credential) => createMapMcpServer(storage, {
+    actorId: config.actorId, clientId: credential.clientId, viewerOrigin: `http://${host}`, toolsOnly: credential.toolsOnly, answerDeskEnabled: config.answerDeskEnabled === true,
+  }, control, delivery, `${credential.key.toString('hex')}:${credential.clientId}`);
+  async function sendProtocolResponse(result: Response, response: ServerResponse, observation: CallObservation | undefined) {
+    await sendMcpResponse(result, response, payload => metadata.response(observation, payload, classifyCallResult));
+  }
   async function handle(request: IncomingMessage, response: ServerResponse, observation: CallObservation | undefined) {
     if (stopping) { httpFailure(response, 503, 'Service stopping'); return; }
     if (request.headers.host !== host) { httpFailure(response, 403, 'Host forbidden'); return; }
-    // The read-only viewer needs no token; routing by pathname keeps /mcp?query on the 404 below.
-    if (requestTarget(request.url, host)?.pathname !== '/mcp') { await handleViewer(request, response, storage, host); return; }
+    // Viewer reads need no token; its optional response route has its own capability.
+    if (requestTarget(request.url, host)?.pathname !== '/mcp') { await handleViewer(request, response, storage, host, viewerKey); return; }
     const credential = authenticate(request.headers.authorization);
     if (!credential) { httpFailure(response, 401, 'Local token required'); return; }
     const presentedSession = typeof request.headers['mcp-session-id'] === 'string' ? sessions.get(request.headers['mcp-session-id']) : undefined;
@@ -180,6 +208,26 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
     }
     // stop() may have started while the request body was arriving.
     if (stopping) { httpFailure(response, 503, 'Service stopping'); return; }
+    // Omit optional IncomingMessage fields that the adapter's exact optional types do not accept.
+    const webRequest = await toWebRequest({ method: request.method!, url: request.url!, headers: request.headers,
+      [Symbol.asyncIterator]: () => request[Symbol.asyncIterator]() }, body);
+    if (!await isLegacyRequest(webRequest, body)) {
+      // Modern requests carry their protocol context on every call, not in an MCP
+      // session. The authenticated credential still supplies the author identity.
+      if (request.headers['mcp-session-id'] !== undefined) { httpFailure(response, 400, 'Modern requests do not use sessions'); return; }
+      const modernHandler = createMcpHandler(() => serverFor(credential),
+      { legacy: 'reject', maxSubscriptions: 0, maxRequestBodySize: MAX_REQUEST_BYTES });
+      // Modern HTTP cancellation is aborting the POST. It must also abort a
+      // blocking wait before any progress has caused auto mode to open SSE.
+      const blockingRequest = config.answerDeskEnabled === true && isPlainObject(body) && body.method === 'tools/call'
+        && isPlainObject(body.params) && body.params.name === 'map_wait';
+      const disconnected = () => { void modernHandler.close().catch(() => {}); };
+      if (blockingRequest) response.once('close', disconnected);
+      try {
+        await sendProtocolResponse(await modernHandler.fetch(webRequest, { parsedBody: body }), response, observation);
+      } finally { response.removeListener('close', disconnected); await modernHandler.close(); }
+      return;
+    }
     const sessionId = request.headers['mcp-session-id'];
     let session = typeof sessionId === 'string' ? sessions.get(sessionId) : undefined;
     let initializing = false;
@@ -187,11 +235,10 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
       if (sessionId !== undefined) { httpFailure(response, 404, 'Session not found'); return; }
       if (request.method !== 'POST' || !isInitializeRequest(body)) { httpFailure(response, 400, 'Initialization required'); return; }
       initializing = true;
-      const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: randomUUID, enableJsonResponse: true,
+      const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: randomUUID, enableJsonResponse: config.answerDeskEnabled !== true,
         onsessioninitialized(id) { sessions.set(id, created); metadata.update(observation, value => { value.fields.mcpSessionId = id; }); },
       });
-      const server = createMapMcpServer(storage,
-        { actorId: config.actorId, clientId: credential.clientId, viewerOrigin: `http://${host}`, toolsOnly: credential.toolsOnly }, control);
+      const server = serverFor(credential);
       const created: Session = { credential: credential.key, clientId: credential.clientId, server, transport, pending: new Set(), closing: false };
       await server.connect(transport);
       session = created;
@@ -217,21 +264,9 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
     const lostResponse = new Promise<undefined>(resolve => { disconnected = () => resolve(undefined); });
     response.once('close', disconnected);
     try {
-      const headers = new Headers();
-      for (let i = 0; i < request.rawHeaders.length; i += 2) headers.append(request.rawHeaders[i]!, request.rawHeaders[i + 1]!);
-      const webRequest = new Request(`http://${host}/mcp`, { method: request.method!, headers });
       const result = await Promise.race([session.transport.handleRequest(webRequest, { parsedBody: body }), lostResponse]);
       if (result && !response.destroyed) {
-        // JSON-response mode (no event replay/subscriptions). Strip SDK diagnostic
-        // error data/prose, which must not expose malformed request contents.
-        const text = await result.text();
-        const payload = text ? JSON.parse(text) as Record<string, unknown> : undefined;
-        metadata.response(observation, payload, classifyCallResult);
-        if (payload?.error && typeof payload.error === 'object') {
-          payload.error = { code: (payload.error as { code: number }).code, message: 'Protocol request failed' };
-        }
-        response.writeHead(result.status, Object.fromEntries(result.headers));
-        response.end(payload ? JSON.stringify(payload) : undefined);
+        await sendProtocolResponse(result, response, observation);
       }
     }
     finally {
@@ -245,11 +280,11 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
   const http = createServer((request, response) => {
     const observation = requestTarget(request.url, host)?.pathname === '/mcp'
       ? metadata.begin(request.method) : undefined;
-    const work = metadata.run(observation, async () => {
+    const work = responseContext.run(response, () => metadata.run(observation, async () => {
       try { await handle(request, response, observation); }
       catch { httpFailure(response, 500, 'Service failure; outcome unknown'); }
       finally { metadata.finishHttp(observation, response.writableEnded ? response.statusCode : null); }
-    });
+    }));
     requests.add(work); void work.finally(() => requests.delete(work));
   });
   http.requestTimeout = 30_000;
@@ -260,13 +295,23 @@ export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceC
       http.listen(config.port, '127.0.0.1', () => { http.removeListener('error', reject); resolve(); });
     });
   } catch { throw new LocalServiceFailure('port_unavailable'); }
+  try { viewerKey?.publish(); }
+  catch {
+    await new Promise<void>(resolve => http.close(() => resolve()));
+    metadata.stop();
+    throw new LocalServiceFailure('invalid_configuration');
+  }
   let stopped: Promise<void> | undefined;
   return { metadataStatus: () => metadata.status(), stop() {
     if (!stopped) {
       stopping = true;
+      viewerKey?.remove();
+      admission.stop();
+      delivery.stop();
       stopped = (async () => {
         await Promise.all([...requests]);
-        if (activeCalls) await new Promise<void>(resolve => drains.add(resolve));
+        await Promise.allSettled([...calls]);
+        await admission.drain();
         await Promise.all([...sessions.values()].map(session => session.server.close()));
         await new Promise<void>((resolve, reject) => { http.close(error => error ? reject(error) : resolve()); });
         storage.close();

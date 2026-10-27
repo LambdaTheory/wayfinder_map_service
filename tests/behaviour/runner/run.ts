@@ -20,6 +20,7 @@ import type { ClientLogin, CodexOptions, CodexSession, ControlProfile } from './
 import { dedicatedClientSkills, dedicatedContext, dedicatedLaunch, dedicatedLauncherSource, dedicatedLoginSecrets, dedicatedRollout, prepareDedicated, runDedicatedTurn } from './dedicated.ts';
 import type { DedicatedSetup } from './dedicated.ts';
 import { captureArtifacts } from './artifacts.ts';
+import { DeskPrecondition, prepareDeskTurn } from './desk.ts';
 import { connectController, historyCredentials } from './controller.ts';
 import { correlateReceipts, initialRules, readRollout, streamTurn } from './normalize.ts';
 import type { RolloutFacts } from './normalize.ts';
@@ -278,6 +279,7 @@ async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: ()
     for (const [label, credential] of Object.entries(historical)) secrets[`history-token-${label}`] = credential.token;
     service = await startService(serviceDir, controller, [...sessions.map(x => x.credential), ...Object.values(historical), ...(bait ? [bait] : [])], proxies.ports);
     service.stop = defer(service.stop);
+    secrets['answer-desk-key'] = readFileSync(service.answerDeskKeyPath, 'utf8');
     openDatabases(service.pid).forEach(d => opened.add(d));
     ctl = await connectController(service.port, controller.token, Object.fromEntries(Object.entries(historical).map(([label, c]) => [label, c.token])), emit);
     ctl.close = defer(ctl.close);
@@ -359,8 +361,9 @@ async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: ()
       actionRuns.set(a, running);
       return running;
     };
+    const preparedPrompts = new Map<number, string>();
     const runOne = async (index: number) => {
-      const turn = s.turns[index]!;
+      const turn = { ...s.turns[index]!, say: preparedPrompts.get(index) ?? s.turns[index]!.say };
       const session = sessions.find(x => x.label === turn.session)!;
       session.turn = index;
       if (turn.freshProcess) {
@@ -496,7 +499,15 @@ async function runOwnedAttempt(o: BatchOptions, p: PlannedAttempt, cancelled: ()
       // Gate every scripted answer before launching any member of this concurrent group.
       for (const i of group) {
         const turn = s.turns[i]!;
-        if (turn.kind !== 'reply') continue;
+        if (turn.desk) {
+          try { preparedPrompts.set(i, await prepareDeskTurn(service!.port, service!.answerDeskKeyPath, turn, i, emit)); }
+          catch (error) {
+            if (!(error instanceof DeskPrecondition)) throw error;
+            completeness = 'precondition-not-met'; detail = `turn ${i}: ${error.message}`; break;
+          }
+          continue;
+        }
+        if (!turn.answers) continue;
         const last = events.findLast(e => e.kind === 'message' && e.role === 'assistant' && e.session === turn.session);
         turn.answers!.cue.lastIndex = 0;
         if (!last || last.kind !== 'message' || !turn.answers!.cue.test(last.text)) {

@@ -226,7 +226,7 @@ For known rejects/conflicts/proven pre-publication failures, compare complete cu
 | D11 | Commit succeeds but response is lost: durable new Revision exists, receipt remains unknown until reread; no automatic replay or assertion that missing response means no change. |
 | D12 | Cleanup that cannot restore a usable connection stops DB operations until restart; no silent memory fallback or continued mutation. |
 | D13 | Real consistent backup opens independently with matching known snapshots/Claims; source unchanged; existing/active targets refused, partial result not success. |
-| P01 | Exactly four tools with matching declared schemas; unknown/system fields rejected; actual M1 command union rather than copied Demo logic. |
+| P01 | Exactly five tools with matching declared schemas (Answer Desk §9); unknown/system fields rejected; actual M1 command union rather than copied Demo logic. |
 | P02 | Compact defaults and opt-in snapshot variants match output schemas, exact committed version/Frontier, once-only structuredContent and no duplicate text. |
 | P03 | Current versus explicit history, service-returned revision values, distinct validation/not-found/conflict results and no all-history dump. |
 | P04 | ASCII keyset listing, default/boundary limits, nonexistent cursor boundary, more/end cursor, coherent pages, empty catalog and duplicate titles. |
@@ -244,7 +244,7 @@ Automated passing results do not prove installed-client interoperability. Comple
 
 | ID | Live evidence |
 | --- | --- |
-| L01 | Connect/discover the four tools and consume declared structured results correctly; record installed client, server commit/runtime/SDK/protocol environment. |
+| L01 | Connect/discover the five tools and consume declared structured results correctly; record installed client, server commit/runtime/SDK/protocol environment. |
 | L02 | Create Map/Destination; add prerequisite/dependent Tickets and Dependency, Fog and Scope Exclusion; observe Frontier; Claim and settle prerequisite, observe dependent unlock; Claim/settle dependent; explicitly reopen both and inspect earlier Claims/Settlements/history. |
 | L03 | Session B independently discovers A's Map via catalog and stable ID, reads current state and continues with its distinct logical Claimant. No ambiguous-title selection or replacement Map. |
 | L04 | A's stale expectedRevision after B advances produces Conflict/no publication; A rereads the latest observed head. Reconnect/new session retains history/Claims with no expiry/takeover. |
@@ -294,12 +294,14 @@ This follow-on slice includes an isolated ChatGPT Desktop acceptance through the
 `docs/agents/exploration-mcp.md` is the sole authored workflow source. It carries no version of its own (see 14.3) and stable named blocks from which the build deterministically derives all runtime guidance:
 
 - Initialization `instructions` begin with an independently complete safety core no longer than 512 characters. It states the sole-authority/outage boundary, full catalog check and create-once rule, authoritative reread after resumption/uncertainty, Frontier/Claim gate, latest-revision/no-replay rule, the post-Conflict human reauthorization gate and live-human Settlement boundary. A concise method summary follows it.
-- Each of the four tool descriptions is locally sufficient for its operation. `map_list` requires full pagination before creation and rejects title-as-handle selection; `map_create` is create-once and uncertain results require discovery/reread; `map_read` is the authority after resumption, conflict and uncertainty; `map_apply` states latest `expectedRevision`, Claim/Settlement boundaries, and that a Conflict voids the old request until the human sees the new Revision and issues a new request.
+- Each of the five tool descriptions is locally sufficient for its operation. `map_list` requires full pagination before creation and rejects title-as-handle selection; `map_create` is create-once and uncertain results require discovery/reread; `map_read` is the authority after resumption, conflict and uncertainty; `map_apply` states latest `expectedRevision`, Claim/Settlement boundaries, and that a Conflict voids the old request until the human sees the new Revision and issues a new request.
 - The complete authoritative Markdown, preceded by a `version: <version>` line, is exposed at stable URI `wayfinder://workflow/exploration` and a current-build immutable SemVer alias (for example `wayfinder://workflow/exploration/2.0.0`) with a Markdown media type. The service need not retain older workflow bodies.
 - The optional `start_wayfinder_exploration` Prompt accepts `mode=create|resume` and an optional stable Map ID. It only produces an entry message, has no storage side effect and contains no safety rule absent from instructions/tool metadata.
 - An optional external Wayfinder Skill is an invocation/method adapter only. It must not require a repository-relative file, duplicate the workflow body or become necessary for correct operation.
 
 A rule that changes what a caller writes lives in both the instructions and the description of every tool it governs. After an upgrade some clients keep a tool definition they loaded earlier while showing the new instructions, and ChatGPT shows its model the tool definitions only ([Open conversations across an upgrade](../implementation/client-upgrade.md)). Tool descriptions own how to call their tool.
+
+Answer Desk rules follow [Answer Desk §6](answer-desk.md#6-client-paths-and-protocol-state): `map_apply` carries all-askable posting, triage and verdict guards; `map_read` carries turn-start taking; `map_wait` carries blocking/task scheduling and the bounded-read alternative. All five descriptions are extracted from the same authored source.
 
 Protocol-level text is English; clients may answer users in their language. Resource and Prompt support never substitutes for initialization instructions and locally sufficient tool metadata.
 
@@ -321,7 +323,7 @@ The SDK v2 follow-on slice also serves `2026-07-28` clients, which are sessionle
 
 The build extracts and validates the named blocks and emits an immutable asset into `dist`; generated runtime copies are not committed. The service must run from built artifacts without the repository source path and captures one workflow contract for the process lifetime. Workflow changes require rebuild and restart; there is no hot reload or list-changed promise. A new connection receives the new instructions, Resources must be reread, and ChatGPT plugin snapshots follow their own rescan/republication lifecycle.
 
-Build/check gates reject invalid or non-incremented SemVer, a version written into the workflow source, a shipped change since the last release tag without a higher version, missing/duplicate/out-of-order blocks, a safety core over 512 characters, any business tool set other than the accepted four, a Prompt with side effects or unique safety rules, Resource/source divergence, version decrease/reuse and runtime source-path dependence. A failed workflow build never falls back to stale guidance. Transient internal comparison hashes are allowed for CI but are not public versions or URIs.
+Build/check gates reject invalid or non-incremented SemVer, a version written into the workflow source, a shipped change since the last release tag without a higher version, missing/duplicate/out-of-order blocks, a safety core over 512 characters, any business tool set other than the accepted five (§15.1), a Prompt with side effects or unique safety rules, Resource/source divergence, version decrease/reuse and runtime source-path dependence. A failed workflow build never falls back to stale guidance. Transient internal comparison hashes are allowed for CI but are not public versions or URIs.
 
 Expose the version as MCP `serverInfo.version`, as `version: <version>` after the safety core in initialization instructions, in Resource metadata, in Prompt output, in fixed safe readiness output and in acceptance evidence. Do not expose workflow bodies, private paths, credentials or Map content in logs. The project root `CHANGELOG.md` is the single release log, one section per version, and names each workflow behavior and compatibility change; the authoritative workflow file contains no separate changelog.
 
@@ -331,7 +333,7 @@ Preserve A01, D01–D13 and P01–P09. Add executable assertions for:
 
 - deterministic extraction, exact current workflow SemVer, named-block validation and all build refusal branches;
 - exact initialization instructions and declared capabilities through in-process SDK and real Streamable HTTP;
-- `tools/list` still returning exactly the four accepted tools with the generated local descriptions;
+- `tools/list` returning exactly the five accepted tools with the generated local descriptions;
 - stable/versioned Resource equality with the complete authoritative Markdown and process-lifetime immutability;
 - Prompt `create`/`resume`/optional-ID branches and zero storage effects;
 - fixed safe readiness version, reconnect/restart behavior and no source-path runtime dependency;
@@ -366,7 +368,7 @@ The [five-tool target](answer-desk.md#1-outcome-and-boundary) extends §4/§5 th
 
 Implementation updates exact-tool-set checks in §11 and §14 to the target at the step assigned in [Answer Desk §9](answer-desk.md#9-implementation-and-release-sequence). Preserve once-only results, immutable history, safe errors and unknown-outcome recovery; descriptions and annotations must match actual effects, including reads that take answers. Backup stays a local maintenance command.
 
-#114 updates the sole authored workflow and every governed tool description together, with generated Resources, Prompt and instructions retaining the process's one Release Version. This documentation PR changes none of those shipped surfaces.
+#114 updates the sole authored workflow and every governed tool description together, with generated Resources, Prompt and instructions retaining the process's one Release Version. The original #109 specification PR changed none of those shipped surfaces; #114 publishes them as 4.0.0.
 
 ### 15.2 SDK v2 and two protocol eras
 
@@ -379,6 +381,8 @@ Migrate the pinned SDK v1 package to SDK v2's `@modelcontextprotocol/server` and
 | Answer wait | Ordinary blocking `map_wait`; the tested Codex client did not see task tools | Opted-in Tasks extension for Claude Code; ordinary calls still need a non-task result |
 | Workflow guard | Explicit write `version` | The same explicit write `version`; transport success does not refresh model context |
 
+Observed client eras (#110 records exact versions): Codex 0.164.0 negotiates `2025-11-25`; Claude Code 2.1.310 uses `2026-07-28` for tasks; ChatGPT App 26.1016 opened with `server/discover` (`2026-07-28`) and was observed falling back to `initialize` (`2025-11-25`) after HTTP 400 / `-32000` (#80, PR #126). Serving the modern era enables ChatGPT's sessionless path at #110's release when its requests carry the required `MCP-Protocol-Version` and `Mcp-Method` headers, plus `Mcp-Name` for `tools/call`, `prompts/get`, `resources/read` and the Answer Desk extension methods `tasks/get`, `tasks/update` and `tasks/cancel`. Missing required headers now return HTTP 400 / `-32020`; ChatGPT fallback on that response is unverified. Actual headers, selected era and fallback behavior are observed at the #114 run. ChatGPT's `toolsOnly` attestation and the write `version` guard are unchanged in either era.
+
 Both eras share `/mcp`, operator-controlled credential identity, the process's immutable workflow, Map authority and existing Host/Origin protections. Preserve instructions, Resource and Prompt delivery in the appropriate era and record the actual capabilities each installed client exposes. Do not add STDIO/channel bridges, per-client databases, OAuth or automatic Claim expiry. A protocol session remains distinct from the logical Claimant.
 
 ### 15.3 Tasks, storage and failure
@@ -389,4 +393,4 @@ Implement the [Tasks, admission and shutdown contract](answer-desk.md#63-tasks-a
 
 ### 15.4 Verification and release boundary
 
-Keep existing domain/storage/protocol gates and add the [Answer Desk acceptance evidence](answer-desk.md#83-required-evidence). Its [Issue ownership and release sequence](answer-desk.md#9-implementation-and-release-sequence) assigns storage, taking reads, Reopen Requests and the keyed viewer route, while distinguishing specification acceptance from implementation and live-client acceptance. The #108 spikes establish feasibility only. Section 14.3 still determines the Release Version from shipped behavior; this documentation-only PR changes no shipped files and needs no bump, CHANGELOG entry or tag.
+Keep existing domain/storage/protocol gates and add the [Answer Desk acceptance evidence](answer-desk.md#83-required-evidence). Its [Issue ownership and release sequence](answer-desk.md#9-implementation-and-release-sequence) assigns storage, taking reads, Reopen Requests and the keyed viewer route, while distinguishing specification acceptance from implementation and live-client acceptance. The #108 spikes establish feasibility only. Section 14.3 still determines the Release Version from shipped behavior; the original #109 documentation-only PR needed no bump, CHANGELOG entry or tag; #114 ships the mandatory workflow as 4.0.0.

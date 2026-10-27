@@ -184,6 +184,46 @@ describe('one Attempt end to end, without a model', () => {
   }, 60_000);
 });
 
+describe('scripted Answer Desk human', () => {
+  test('a natural conversation answer reaches the agent unchanged and settles only carrier in one write', async () => {
+    const original = library.find(s => s.id === 'W2')!;
+    const scenario: Scenario = { ...original, turns: original.turns.map((t, i) => i ? t : { ...t, say: 'FAKE-DESK' }) };
+    const out = join(records, 'desk-conversation-attempt');
+    const result = await runAttempt({ batchId: 'T-desk-conversation', scenarios: [], count: 1, ceiling: 1, out, scratchRoot: scratch, ...clientState,
+      codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: sandboxAvailable, timeoutMs: 60_000 } },
+      { attemptId: 'D-1', scenario }, () => false, () => undefined);
+    expect(result.completeness).toBe('complete');
+    const record = JSON.parse(readFileSync(join(out, 'D-1/attempt.json'), 'utf8')) as AttemptRecord;
+    expect(record.events.some(e => e.kind === 'controller' && e.action === 'desk-answer')).toBe(false);
+    expect(record.sessions[0]!.turns[1]!.input).toBe('载体就用多维表格，入口我再想想。');
+    const state = record.maps[0]!.history.at(-1)!.state;
+    expect(state.tickets.find(t => t.id === 'task-carrier')!.settlement?.outcome.statement).toBe('Use Bitable as the carrier.');
+    expect(state.tickets.find(t => t.id === 'task-entry')!.status).toBe('open');
+    expect(state.deskQuestions?.find(q => q.ticketId === 'task-entry')!.state).toBe('published');
+    for (const item of itemsOf(scenario)) if (item.judge === 'script') expect(item.check(record).status, item.id).toBe('holds');
+  }, 60_000);
+  test('link-only chat → keyed answer → real taking read and cited Settlement, with no client key', async () => {
+    const original = library.find(s => s.id === 'W6b')!;
+    const scenario: Scenario = { ...original, turns: original.turns.map((t, i) => ({ ...t, say: i ? 'FAKE-DESK-TAKE' : 'FAKE-DESK' })) };
+    const out = join(records, 'desk-attempt');
+    const result = await runAttempt({ batchId: 'T-desk', scenarios: [], count: 1, ceiling: 1, out, scratchRoot: scratch, ...clientState,
+      codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: sandboxAvailable, timeoutMs: 60_000 } },
+      { attemptId: 'D-1', scenario }, () => false, () => undefined);
+    expect(result.completeness).toBe('complete');
+    const record = JSON.parse(readFileSync(join(out, 'D-1/attempt.json'), 'utf8')) as AttemptRecord;
+    const human = record.events.filter(e => e.actor === 'script-human' && e.kind === 'controller');
+    expect(human.map(e => e.kind === 'controller' && e.action)).toEqual(['desk-observed', 'desk-answer']);
+    const answered = record.maps[0]!.history.at(-1)!.state.tickets.find(t => t.id === 'no-category')!;
+    expect(answered.status).toBe('settled');
+    expect(answered.settlement).toHaveProperty('deskAnswer');
+    expect(record.sessions[0]!.turns[1]!.input).toBe('FAKE-DESK-TAKE');
+    const child = JSON.parse(readFileSync(join(out, 'D-1/raw/work/desk-agent-environment.json'), 'utf8')) as { args: string[]; environment: string[] };
+    expect(child.environment.filter(name => name.startsWith('WAYFINDER_ANSWER_DESK_'))).toEqual([]);
+    expect(child.args.join(' ')).not.toMatch(/answer-desk-key|x-wayfinder-key/);
+    expect(itemsOf(scenario).filter(i => i.judge === 'script').map(i => i.judge === 'script' && i.check(record).status)).not.toContain('violated');
+  }, 60_000);
+});
+
 describe('every planned Attempt gets a result', () => {
   const options = (out: string, timeoutMs = 60_000): BatchOptions => ({ batchId: 'T-fail', scenarios: [], count: 1, ceiling: 1,
     out, codex: { model: 'fake-model', effort: 'low', bin: fakeCodex, sandbox: false, timeoutMs }, scratchRoot: scratch, ...clientState });

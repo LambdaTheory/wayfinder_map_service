@@ -94,7 +94,7 @@ export function codexArgs(o: CodexOptions, port: number, workdir: string, thread
   const config = ['--json', '--skip-git-repo-check', '--ignore-user-config', '--disable', 'apps', '-m', o.model,
     '-c', `model_reasoning_effort="${o.effort}"`, '-c', 'check_for_update_on_startup=false',
     '-c', `mcp_servers.wayfinder.url="http://127.0.0.1:${port}/mcp"`,
-    '-c', 'mcp_servers.wayfinder.required=true', '-c', 'mcp_servers.wayfinder.default_tools_approval_mode="approve"',
+    '-c', 'mcp_servers.wayfinder.required=true', '-c', 'mcp_servers.wayfinder.tool_timeout_sec=1800', '-c', 'mcp_servers.wayfinder.default_tools_approval_mode="approve"',
     '--dangerously-bypass-approvals-and-sandbox'];
   return threadId ? ['exec', 'resume', ...config, threadId, '-'] : ['exec', ...config, '-C', workdir, '-'];
 }

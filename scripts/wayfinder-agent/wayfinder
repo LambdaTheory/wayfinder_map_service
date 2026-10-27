@@ -48,7 +48,7 @@ HARNESSES = {
 DEFAULT_EFFORT = "xhigh"
 METHODS = {"mcp": "MCP 版", "matt": "Matt 原版"}
 MATT_SKILL_NAMES = ("wayfinder", "grilling", "prototype", "research", "domain-modeling")
-SUBCOMMANDS = ("serve", "status", "stop", "restart", "maps", "sessions", "resume", "chatgpt", "help")
+SUBCOMMANDS = ("serve", "status", "stop", "restart", "maps", "desk", "sessions", "resume", "chatgpt", "help")
 REFUSED = {
     "login": "登录、登出请用日常的 codex 或 claude：专用 Agent 共用日常的登录，在这里做会动到它。",
     "logout": "登录、登出请用日常的 codex 或 claude：专用 Agent 共用日常的登录，在这里做会动到它。",
@@ -164,6 +164,18 @@ def local_time(iso):
 
 # ---------------------------------------------------------------- service
 
+class LocalServiceRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # A local-service credential must never be forwarded to a redirect target.
+        return None
+
+
+# Private opener: ignore environment/platform proxies and any installed default opener.
+# Do not change the harness's proxy environment or urllib's global networking state.
+LOCAL_SERVICE_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}), LocalServiceRedirectHandler())
+
+
 def primary_token():
     SVC.mkdir(parents=True, exist_ok=True)
     os.chmod(str(SVC), 0o700)
@@ -184,9 +196,10 @@ def post(token, body, session=None, method="POST"):
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request("http://127.0.0.1:{}/mcp".format(PORT), data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=3) as response:
+        with LOCAL_SERVICE_OPENER.open(request, timeout=3) as response:
             return response.status, response.read().decode(), response.headers.get("mcp-session-id")
     except urllib.error.HTTPError as error:
+        error.close()
         return error.code, "", None
     except (urllib.error.URLError, OSError):
         return 0, "", None
@@ -258,7 +271,8 @@ def ensure_service(quiet=False):
             die("{} 还没构建，请在那里运行 npm run build。".format(CHECKOUT))
         env = dict(os.environ, WAYFINDER_DATABASE_PATH=database_path(), WAYFINDER_PORT=str(PORT),
                    WAYFINDER_TOKEN=token, WAYFINDER_ACTOR_ID="Kun", WAYFINDER_CLIENT_ID="Wayfinder-Launcher",
-                   WAYFINDER_ALLOWED_ORIGINS="[]", WAYFINDER_CREDENTIALS_FILE=str(SVC / "credentials.json"))
+                   WAYFINDER_ALLOWED_ORIGINS="[]", WAYFINDER_CREDENTIALS_FILE=str(SVC / "credentials.json"),
+                   WAYFINDER_ANSWER_DESK_KEY_FILE=str(SVC / "answer-desk-key"))
         with open(str(SVC / "service.log"), "a") as log:
             child = subprocess.Popen([node_bin(), "dist/mcp-start.js"], cwd=str(CHECKOUT), env=env,
                                      stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
@@ -407,12 +421,17 @@ def agent_token(identity):
 
 # ---------------------------------------------------------------- harness setup
 
+def without_desk_authority(env):
+    """Only the launcher holds the browser capability, including during harness probes."""
+    return {name: value for name, value in env.items() if not name.startswith("WAYFINDER_ANSWER_DESK_")}
+
+
 def check_harness(harness):
     binary = HARNESSES[harness]["bin"]
     if not shutil.which(binary):
         die("找不到 {}。".format(binary))
     # A broken global install (e.g. a half-finished npm upgrade) shows here, before any state is touched.
-    if subprocess.run([binary, "--version"], capture_output=True).returncode != 0:
+    if subprocess.run([binary, "--version"], capture_output=True, env=without_desk_authority(os.environ)).returncode != 0:
         die("全局 {} 无法运行。在日常终端里修复后，用 {} --version 检查。".format(binary, binary))
 
 
@@ -526,7 +545,7 @@ def claude_env(state):
     for key in PROXY_VARS:
         if key in daily and key not in os.environ:
             env[key] = daily[key]
-    return env
+    return without_desk_authority(env)
 
 
 def daily_claude_ids():
@@ -613,7 +632,7 @@ def start_cwd(method):
     return cwd
 
 
-def launch(options, prompt=None, passthrough=(), resume_id=None, cwd=None):
+def launch(options, prompt=None, passthrough=(), resume_id=None, cwd=None, map_id=None):
     harness, method, model, effort = options["harness"], options["method"], options["model"], options["effort"]
     check_harness(harness)
     state = state_dir(harness, method)
@@ -639,11 +658,12 @@ def launch(options, prompt=None, passthrough=(), resume_id=None, cwd=None):
         argv = ["codex", "--no-daemon", "-C", str(cwd), "-m", model, "-c", 'model_reasoning_effort="{}"'.format(effort)]
         if method == "mcp":
             argv += ["-c", 'mcp_servers.wayfinder.url="http://127.0.0.1:{}/mcp"'.format(PORT)]
+            argv += ["-c", "mcp_servers.wayfinder.tool_timeout_sec=1800"]
         if resume_id:
             argv += ["resume", resume_id]
         argv += list(passthrough)
     else:
-        env = claude_env(state)
+        env = without_desk_authority(claude_env(state))
         prepare_claude(state, method, str(cwd), env)
         argv = ["claude", "--model", model, "--effort", effort, "--dangerously-skip-permissions", "--strict-mcp-config",
                 "--append-system-prompt-file", str(state / "wayfinder-instructions.md")]
@@ -652,6 +672,8 @@ def launch(options, prompt=None, passthrough=(), resume_id=None, cwd=None):
         if resume_id:
             argv += ["--resume", resume_id]
         argv += list(passthrough)
+    # Browser response authority never enters the harness, even if inherited from an operator shell.
+    env = without_desk_authority(env)
     if token:
         env["WAYFINDER_TOKEN"] = token
     if prompt:
@@ -660,6 +682,11 @@ def launch(options, prompt=None, passthrough=(), resume_id=None, cwd=None):
     if os.environ.get("WAYFINDER_AGENT_DRY_RUN"):  # tests: show the launch instead of running it
         print(json.dumps({"cwd": str(cwd), "argv": argv}, ensure_ascii=False))
         return
+    if method == "mcp" and map_id:
+        try:
+            open_desk(map_id, service_ready=True)
+        except DeskUnavailable:
+            say("答题台未打开；agent 照常启动，稍后可运行 wayfinder desk {}。".format(map_id))
     os.chdir(str(cwd))
     os.execvpe(argv[0], argv, env)
 
@@ -882,10 +909,67 @@ def cmd_status(_args):
             print("{} · {}：状态目录 {}".format(spec["label"], METHODS[method], state_dir(harness, method)))
 
 
+class DeskUnavailable(Exception):
+    """Only fixed, keyless operator guidance may cross this boundary."""
+
+
+def cmd_desk(args):
+    if len(args) != 1 or not ID_PATTERN.fullmatch(args[0]):
+        die("用法：wayfinder desk <地图 ID>")
+    try:
+        open_desk(args[0])
+    except DeskUnavailable as error:
+        die(str(error))
+
+
+def open_desk(map_id, service_ready=False):
+    if sys.platform != "darwin":
+        raise DeskUnavailable("答题入口目前只支持 macOS；其他平台尚无可安全传递钥匙的浏览器入口。")
+    if not service_ready:
+        ensure_service(quiet=True)
+    # Read only after the service is ready: every restart replaces this capability.
+    # Do not print the keyed URL or pass it through the harness/launch metadata.
+    try:
+        parent = SVC.lstat()
+        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or parent.st_mode & 0o077:
+            raise ValueError("private directory required")
+        fd = os.open(str(SVC / "answer-desk-key"), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd) as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise ValueError("private key required")
+            key = handle.read(128)
+        if not re.fullmatch(r"[A-Za-z0-9_-]{43}", key):
+            raise ValueError("invalid key")
+        view = get_json("/api/maps/{}/view".format(map_id))
+        if not isinstance(view, dict) or "desk" not in view:
+            raise ValueError("desk disabled")
+    except (OSError, ValueError):
+        raise DeskUnavailable("答题台或钥匙不可用；请确认服务版本、地图 ID 和私有钥匙文件。")
+    url = "http://127.0.0.1:{}/maps/{}#key={}".format(PORT, map_id, key)
+    try:
+        # Generic webbrowser controllers (including BROWSER) put the URL in argv.
+        # macOS opens the default browser through an Apple event instead. Only the
+        # pipe contains the URL; never use -e, shell interpolation or an env var.
+        opened = subprocess.run(["/usr/bin/osascript", "-"],
+                                input='open location "{}"\n'.format(url), text=True,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                env={"PATH": "/usr/bin:/bin"}, timeout=30).returncode == 0
+    except Exception:
+        raise DeskUnavailable("浏览器未打开答题台；请检查默认浏览器后重试。")
+    if not opened:
+        raise DeskUnavailable("浏览器未打开答题台；请检查默认浏览器后重试。")
+    # Current Orca CLI exposes URL input only in argv. No secure input contract is
+    # available to negotiate, so keep the Apple-event stdin path (follow-up #145).
+    note = "因 Orca 暂时无法安全接收地址，已在默认浏览器打开" if os.environ.get("ORCA_WORKTREE_ID") else "已在默认浏览器打开"
+    say("http://127.0.0.1:{}/maps/{} · {}".format(PORT, map_id, note))
+
+
 def cmd_help(_args):
     print("""用法：
   wayfinder [地图 ID] [--harness codex|claude] [--model 模型] [--effort 档位] [--method mcp|matt] [-- harness 参数]
       开一个专用 Agent；写了地图 ID 就开场续接它。flag 只管这一次，不带就是 Codex · gpt-6-astra · xhigh · MCP 版。
+  wayfinder desk <地图 ID>           打开带钥匙的答题台
   wayfinder maps                     列出所有地图（两个方法版本）
   wayfinder sessions [地图 ID]       列出专用 Agent 的会话，可按地图筛
   wayfinder resume <会话 ID>          接着某个会话，harness 和方法版本按原会话
@@ -902,7 +986,7 @@ def main():
     head = args[0] if args else ""
     if head in REFUSED:
         die(REFUSED[head])
-    if head in ("serve", "stop", "restart", "chatgpt") and default_method == "matt":
+    if head in ("serve", "stop", "restart", "chatgpt", "desk") and default_method == "matt":
         die("对照版不连 Wayfinder 服务；服务用 wayfinder {} 管理。".format(head))
     if head == "serve":
         ensure_service()
@@ -913,6 +997,8 @@ def main():
         ensure_service()
     elif head == "status":
         cmd_status(args[1:])
+    elif head == "desk":
+        cmd_desk(args[1:])
     elif head == "maps":
         cmd_maps(args[1:])
     elif head == "sessions":
@@ -928,7 +1014,7 @@ def main():
         if len(positional) > 1 or (positional and not ID_PATTERN.match(positional[0])):
             die("只认一个地图 ID；要原样交给 harness 的参数放在 -- 后面。wayfinder help 看用法。")
         prompt = "继续 Wayfinder 地图 {}".format(positional[0]) if positional else None
-        launch(options, prompt=prompt, passthrough=passthrough)
+        launch(options, prompt=prompt, passthrough=passthrough, map_id=positional[0] if positional else None)
 
 
 if __name__ == "__main__":

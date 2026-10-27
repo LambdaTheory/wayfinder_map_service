@@ -109,8 +109,16 @@ repair does not supply those readings or claim B02c acceptance.
 
 ## Final verification
 
-Node 26.3.0: `npm run build`, `npm test -- --maxWorkers=4` (**49 files, 2232
-tests passed**) and `npm run typecheck` all passed. `git diff --check` passed.
-The first default-concurrency suite had one existing concurrent-sandbox test
-exceed its 5-second timeout; the final complete suite used four workers and did
-not reproduce it. No tests were skipped in the final full run.
+Synced main `21a76c8`, preserving its SSE/JSON-RPC decoder alongside the discovery
+timing repair; synthetic responses include matching JSON-RPC IDs. The 15 targeted
+tests and the private Batch re-extraction still produce the results above.
+
+Node 26.3.0: `npm run build`,
+`npm test -- --maxWorkers=4 --testTimeout=30000` (**58 files, 2416 tests passed**)
+and `npm run typecheck` all passed. `git diff --check` passed. No tests were
+skipped in the final full run.
+
+Earlier full runs exceeded Vitest's default 5-second limit in two existing
+session integration tests. The latest timeout (`sessions.test.ts:158`) passed
+alone under that original limit in about two seconds. The final suite uses a
+30-second runner default; no test configuration file or Scenario deadline changed.

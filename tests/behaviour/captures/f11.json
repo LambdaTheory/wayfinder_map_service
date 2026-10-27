@@ -1,6 +1,7 @@
 {
   "schema": "wayfinder-historical-capture-trace/1",
   "scenarioId": "F11",
+  "scenarioVersion": 1,
   "source": {
     "mapId": "DistributedAgents.Feishu.20261023",
     "revisionBefore": 10,

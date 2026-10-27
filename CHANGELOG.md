@@ -4,6 +4,56 @@ All notable project changes are recorded here. Historical implementation evidenc
 
 Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Release Version, covers the service and the workflow it carries; `docs/spec/mcp-sqlite.md` §14.3 says which part to raise, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion` (`1.0.0` to `3.0.0` below), and the server reported a fixed `0.1.0`.
 
+## 4.0.0 (2026-10-27)
+
+- Answer Desk is enabled by default with one five-tool surface; the disabled mode is retired and explicit false configuration refuses startup.
+- Mandatory workflow: publish every askable question with unlock-first triage and reasons, announce only a short desk link, continue independent work, then settle released verdicts and publish newly unlocked questions in the same write. Claude Code uses task delivery, Codex waits after independent work, and ChatGPT takes answers at each turn start. Tool definitions carry these rules without requiring server instructions.
+- The dedicated launcher attempts to open a selected Map's keyed desk without handing the key to its agent; browser/platform/key/Map failures leave agent startup available with a keyless manual-open hint. Orca currently uses the secure default-browser stdin handoff pending a safe tab-input API.
+- ChatGPT is unverified on this major release. Its acceptance is deferred, not removed; the coordinator must obtain Kun's decision on any merge before that run.
+- An everyday database first started on 3.2.0 or later migrates one way to format 2 after a retained private backup; upgrading to this release also crosses that boundary if it has not already migrated.
+
+## 3.4.0 (2026-10-27)
+- Add the Answer Desk viewer behind the existing **default-off** `answerDeskEnabled` setting: service-ordered questions, options and full recommendations, keyboard/text answers, selected recommendation confirmation, answer changes, delivery/Settlement states and publication history. Two-second polling also follows desk-only writes without advancing a Map Revision.
+- Add one answer-only `POST /api/desk` route for submitting/changing answers, filing/replacing Reopen Requests and cancelling untaken requests. Exact loopback Host, same-origin checks, a separate process-scoped browser key and bounded JSON protect it; all other viewer routes remain GET/HEAD. When disabled the route returns 404 and the viewer has no desk UI.
+- Add `wayfinder desk <mapId>`: open the viewer with a private service-generated key in the fragment, strip it immediately and retain it only in page closure memory. A service restart rotates the key; no MCP credential can substitute for it. Reopen entry displays the exact affected Settlement bindings and requires re-review when they change. MCP tools and workflow text remain unchanged; coordinated real-client acceptance stays with #114.
+- Keep the browser key out of process arguments and environments by using macOS Apple events over stdin, ignoring `BROWSER` and suppressing child diagnostics. Bind answer shortcuts to the displayed Question Version, and pause after it is withdrawn, replaced or settled until the human explicitly selects a question. Drain excess answer uploads so clients receive the full 413 refusal.
+- Restore continuous keyboard answering: explicit selection arms immediately; advancing after an answer, closing a dialog and filing/cancelling Reopen Requests arm the displayed question after a highlighted 600 ms delay. Unrelated polling, queue reordering and root focus preserve that identity; current-question changes require reselection. Refocus refreshes before restoring an already armed or arming question; initial and acknowledged-but-unselected questions stay paused. An explicit option click on a paused current question advances normally. Enter/1–3/t never follow a focused button; Tab/Space remain available for controls. Explain unsupported platforms before starting the desk launcher, and leave URL fragments untouched when the desk is disabled.
+
+## 3.3.1 (2026-10-27)
+
+- Keep shipped ChatGPT attach probes, relay forwarding and dedicated-launcher MCP requests on explicit direct loopback transports, ignoring ambient Node/Python proxy configuration without changing the client's proxy environment. Authenticated probes do not follow redirects; the ChatGPT attach probe now fails after a three-second request deadline and releases its connection.
+- Retain attach session IDs when response headers arrive, so a partial initialization failure still attempts DELETE within a separate three-second deadline. Preserve 3.2.0's unhandled relay server-error behavior.
+- This transport fix changes no mandatory workflow rule or MCP tool usage; live ChatGPT evidence is deferred to the next approved run.
+
+## 3.3.0 (2026-10-27)
+
+- Add Answer Desk `map_wait` with task and blocking execution, once-only delivery after the Map Quiet Window, and taking `map_read` for turn-start delivery. Answers and Reopen Requests retain Taken state through interruption and restart.
+- Keep Answer Desk **disabled by default** behind `answerDeskEnabled` / `WAYFINDER_ANSWER_DESK_ENABLED=true`: disabled discovery remains four tools with the existing schemas and errors; enabled discovery exposes five tools in both protocol eras. Mandatory workflow text is unchanged until #114.
+- Stream blocking-wait progress over SSE with redacted protocol errors, share delivery admission across protocol instances, and raise the dedicated Codex MCP timeout to 1,800 seconds. Real-client journeys remain for the coordinated acceptance run.
+- Encode retained Tasks results for the official extension decoder and allow retry after a lost collection response; cancel blocking waits on HTTP disconnect in both eras before they take later answers. Keep enabled tool input schemas free of top-level combinators, with taking-read constraints described in fields and enforced by the service.
+
+## 3.2.0 (2026-10-27)
+
+- Add format-2 Desk Question, Desk Answer and Reopen Request storage; service startup alone explicitly opts into migration, first retains a consistent private backup, then migrates format 1 atomically. Every backup uses a read-only source connection, preserving format 1 or 2 in both source and output, including the ChatGPT runner's initial, scheduled and final backups when attached to an older running service.
+- Add versioned question publication/withdrawal, typed Taken-answer Settlement citations and guarded Reopen Request handling/closure. Commit rechecks desk state to prevent stale answers or superseded requests winning a race.
+- Expose current/history desk inspection, affected settled dependents and handled-request context through `map_read`; preserve requested options until the target settles again.
+- Stage Answer Desk commands, schemas and inspection projections behind the default-off `answerDeskEnabled` service setting (`WAYFINDER_ANSWER_DESK_ENABLED=true` for isolated runs), shared by both protocol eras. Disabled tool definitions match 3.1.0 apart from the Release Version; ordinary reads have no added desk projections. Disabled desk syntax follows the original input-validation path and returns the same declared `invalid_input` results as 3.1.0, including after SDK tool discovery. Four tools and the existing workflow remain; #112/#113 supply delivery and browser UI, and #114 publishes the coordinated workflow and enables the desk by default.
+- Refuse disabled startup with `answer_desk_required` if retained desk records show the database has used Answer Desk; the operator message names the enable setting without exposing paths. Migrated but unused databases continue to start normally. Preserve original Revision history in both cases.
+
+## 3.1.0 (2026-10-27)
+
+- Migrate to MCP SDK v2: server/client 2.4.0 and Node adapter 2.1.2. `/mcp` retains sessionful `2025-11-25` initialization and restart-404 recovery, and explicitly enables sessionless `2026-07-28` discovery and per-request metadata. Both eras share the unchanged four tools, schemas, workflow, Resource, Prompt, credential identity and admission limits.
+- ChatGPT connectivity on this release is unverified; live check at #114. Missing-header discovery now returns HTTP 400 / `-32020` instead of the previously observed `-32000`; fallback on the new error is unverified.
+- The everyday ChatGPT relay and behaviour-test relay share the MCP request-header allowlist, including `Mcp-Method` and `Mcp-Name`, so conforming modern discovery and named calls reach the service. The behaviour relay captures terminal JSON/SSE responses and only the non-secret `MCP-Protocol-Version` header; sessionless tool-snapshot attribution remains insufficient evidence until bound to a native chat.
+- SDK v2 classifies malformed tool-call parameters as JSON-RPC `InvalidParams` (`-32602`), replacing SDK v1's `InternalError` (`-32603`). Neither path publishes a Map mutation.
+
+## 3.0.0 (2026-10-27)
+
+- A human question is neither an instruction nor a verdict: answer it and ask before acting. Changing Scope Exclusions, the Destination or Notes, or narrowing a question or removing a Dependency to move work out, requires the human's explicit instruction or agreement. When a Ticket is found beyond the Destination, the agent now releases its Claim and proposes a Scope Exclusion. The initialization instructions carry the answer, ask and proposal steps; both the instructions and the `map_apply` description state the human authorization requirement. The dedicated `wayfinder` skill and full workflow Resource follow that boundary; the four tool schemas and Map model are unchanged.
+- F11 reproduced three times on Release Version 2.0.2: agents treated the human's question as their own discovery that work was beyond the Destination, then changed the Map before the human answered. The former self-discovery rule allowed that path, so the new boundary covers both a human question and the agent's own finding ([#87 root cause and proposed wording](https://github.com/kun-g/wayfinder_map_service/issues/87#issuecomment-6405351705), [Kun's approval](https://github.com/kun-g/wayfinder_map_service/issues/87#issuecomment-6405899011)). This is a major release because it changes a mandatory rule.
+- F11 Scenario v2 limits its scope-change check to Scope Exclusion additions, updates and removals and Dependency removals; Fog changes no longer fail that item. Earlier Attempts keep their recorded Scenario version and are not re-judged under the revised check.
+- Known failures at release, accepted by Kun on 2026-10-27: with Codex gpt-6-astra, S6, S11, S12, S13, W5, W6 and W6b fail and W3 is flaky (F11 passes 2/2); in the ChatGPT App, S0b, S1, S5 and F11 fail, and the F11 Attempt was influenced by ChatGPT carrying context across chats. There is no 2.x baseline, so these are not measured regressions. Each failing Scenario has its own Issue, listed on [#87](https://github.com/kun-g/wayfinder_map_service/issues/87).
+
 ## 2.1.0 (2026-10-26)
 
 - Record private call metadata by default for every local MCP service entry, including reads, refusals, Conflicts and failures. Failed metadata writes preserve business results and expose cumulative missing observations.

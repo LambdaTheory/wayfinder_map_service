@@ -1,3 +1,4 @@
+import { rpcResponse } from '../chatgpt/relay.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -10,7 +11,7 @@ const { prepareCreate, prepareApply, revisionFromPrepared } = captureDomain();
 import type { Command, Revision, NonEmpty } from '../../../src/types.ts';
 import { captureProblem } from './capture.ts';
 import type { CaptureInput, Reproduction } from './capture.ts';
-import { openCaptureDatabase, readRevisions } from './database.ts';
+import { openCaptureDatabase, readCaptureSource } from './database.ts';
 import { applySeedCommands, createSeedState, replayVisible, seedAuthor, visibleMap } from './seed.ts';
 import { validateScenario } from '../scenario.ts';
 import { F11 } from '../scenarios/safety.ts';
@@ -419,7 +420,7 @@ test('manual CLI writes a reusable bundle once, never overwrites it and never le
   expect(duplicate.status).toBe(1);
   expect(duplicate.stderr).not.toContain(dir);
   expect(readFileSync(join(out, 'capture.json'))).toEqual(before);
-  expect(readRevisions(path, 'Capture.Map', 28, false)).toHaveLength(1);
+  expect(readCaptureSource(path, 'Capture.Map', 28, false).revisions).toHaveLength(1);
 });
 
 test.each([
@@ -542,7 +543,7 @@ test('history seed replays on a disposable service with original client labels, 
       const response = await realFetch(...args);
       const body = args[1]?.body;
       if (!dropped && typeof body === 'string') {
-        const request = JSON.parse(body) as { params?: { name?: string; arguments?: { mapId?: string } } };
+        const request = JSON.parse(body) as { id?: unknown; params?: { name?: string; arguments?: { mapId?: string } } };
         if (request.params?.name === 'map_apply' && request.params.arguments?.mapId === 'LostReply') {
           await response.clone().text(); // The server committed before the simulated response loss.
           dropped = true;
@@ -567,11 +568,12 @@ test('history seed replays on a disposable service with original client labels, 
       const response = await realFetch(...args);
       const body = args[1]?.body;
       if (typeof body === 'string') {
-        const request = JSON.parse(body) as { params?: { name?: string; arguments?: { mapId?: string } } };
+        const request = JSON.parse(body) as { id?: unknown; params?: { name?: string; arguments?: { mapId?: string } } };
         if (request.params?.name === 'map_read' && request.params.arguments?.mapId === 'IncorrectMapText') {
-          const result = await response.json() as { result: { structuredContent: { revision: { state: { title: string } } } } };
+          const result = rpcResponse(await response.text(), response.headers.get('content-type') ?? '', request.id) as { result: { structuredContent: { revision: { state: { title: string } } } } };
           result.result.structuredContent.revision.state.title = 'Unexpected title';
-          return new Response(JSON.stringify(result), { status: response.status, headers: response.headers });
+          const headers = new Headers(response.headers); headers.set('content-type', 'application/json'); headers.delete('content-length');
+          return new Response(JSON.stringify(result), { status: response.status, headers });
         }
       }
       return response;

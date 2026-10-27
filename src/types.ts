@@ -1,3 +1,4 @@
+import type { DeskAnswerCitation, DeskCommand, DeskQuestion } from './desk-types.js';
 declare const idBrand: unique symbol;
 export type Id<K extends string> = string & { readonly [idBrand]: K };
 export type MapId = Id<'Map'>;
@@ -46,6 +47,7 @@ export interface Settlement<T extends TicketType> {
 }
 export type StoredSettlement<T extends TicketType> = Settlement<T> & {
   readonly introducedAtRevision: RevisionNumber;
+  readonly deskAnswer?: DeskAnswerCitation;
 };
 export interface TicketBase<T extends TicketType> {
   readonly id: TicketId;
@@ -57,7 +59,7 @@ export interface TicketBase<T extends TicketType> {
 }
 export type StoredTicket = {
   [T in TicketType]: TicketBase<T> & (
-    | { readonly status: 'open'; readonly claim: ClaimantId | null }
+    | { readonly status: 'open'; readonly claim: ClaimantId | null; readonly reopenedAtRevision?: RevisionNumber }
     | { readonly status: 'settled'; readonly claim: null; readonly settlement: StoredSettlement<T> }
   )
 }[TicketType];
@@ -76,6 +78,7 @@ export interface StoredMapState {
   readonly tickets: readonly StoredTicket[];
   readonly extensions: Extensions;
   readonly currentRevision: RevisionNumber;
+  readonly deskQuestions?: readonly DeskQuestion[];
 }
 export interface MutationAuthor {
   readonly actorId: ActorId;
@@ -103,9 +106,10 @@ export type Access = { readonly claimantId?: ClaimantId };
 export type TicketPatch = Readonly<Partial<Pick<TicketInput, 'title' | 'question' | 'type' | 'extensions'>>>;
 export type SettleCommand = {
   [T in TicketType]: { readonly kind: 'ticket.settle'; readonly ticketId: TicketId; readonly ticketType: T;
-    readonly claimantId: ClaimantId; readonly settlement: Settlement<T> }
+    readonly claimantId: ClaimantId; readonly settlement: Settlement<T>; readonly deskAnswer?: DeskAnswerCitation }
 }[TicketType];
 export type Command = { readonly kind: 'map.update'; readonly patch: MapPatch }
+  | DeskCommand
   | SettleCommand
   | { readonly kind: 'ticket.reopen'; readonly ticketId: TicketId; readonly reason: string }
   | (({ readonly kind: 'claim.acquire' } | { readonly kind: 'claim.release'; readonly reason?: string }) & {
@@ -124,12 +128,17 @@ export interface ApplyRequest {
   readonly expectedRevision: RevisionNumber;
   readonly author: MutationAuthor;
   readonly commands: NonEmpty<Command>;
+  readonly reopenRequestId?: string;
 }
 export type CommandErrorCode = 'ticket_already_exists' | 'ticket_not_found' | 'ticket_not_open' | 'claim_required' | 'claim_mismatch'
   | 'ticket_already_claimed' | 'unsettled_dependency' | 'claim_not_found' | 'settlement_type_mismatch' | 'ticket_not_settled'
+  | 'desk_question_active' | 'desk_question_not_found' | 'desk_question_identity_mismatch' | 'desk_answer_required' | 'desk_answer_invalid'
+  | 'reopen_request_not_found' | 'reopen_request_pending' | 'reopen_request_handled' | 'reopen_request_inactive' | 'reopen_request_stale'
+  | 'reopen_target_omitted' | 'reopen_set_mismatch' | 'reopen_authorization_exceeded' | 'reopen_close_guard'
   | 'self_dependency' | 'dependency_already_exists' | 'dependency_not_found' | 'content_already_exists' | 'content_not_found';
 export type CommandRejection = { readonly stage: 'command'; readonly commandIndex: number;
-  readonly code: CommandErrorCode; readonly ticketIds: readonly TicketId[] };
+  readonly code: CommandErrorCode; readonly ticketIds: readonly TicketId[];
+  readonly uncoveredTickets?: readonly { readonly ticketId: TicketId; readonly reason: 'not_listed' | 'settlement_changed' }[] };
 export type InvariantErrorCode = 'dependency_cycle' | 'dangling_dependency'
   | 'settled_ticket_has_open_prerequisite' | 'claimed_ticket_has_open_prerequisite';
 export type InvariantRejection = { readonly stage: 'final_state'; readonly code: InvariantErrorCode; readonly ticketIds: readonly TicketId[] };
@@ -167,6 +176,7 @@ export interface Conflict {
   readonly currentRevision: RevisionNumber;
 }
 export type CommitResult =
+  | { readonly kind: 'rejected'; readonly rejection: Rejection }
   | { readonly kind: 'committed'; readonly revision: Revision; readonly frontier: readonly TicketId[] }
   | { readonly kind: 'conflict'; readonly conflict: Conflict }
   | { readonly kind: 'rejected'; readonly code: 'map_already_exists' | 'map_not_found'; readonly mapId: MapId };

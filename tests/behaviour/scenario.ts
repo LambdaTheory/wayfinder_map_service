@@ -108,6 +108,14 @@ export interface Turn {
     /** Runtime gate over the session's last assistant message. The precondition is judged again afterwards. */
     cue: RegExp;
   };
+  /** Gate on current Pending desk publications instead of the last chat message.
+   * The Controller alone submits scripted verdicts; `say` contains only the conversation input.
+   */
+  desk?: {
+    mapId: string;
+    ticketIds: string[];
+    submit?: { ticketId: string; choice: 'recommendation' | { text: string } }[];
+  };
   /** Start this session's client afresh (recovery in a new session) instead of resuming it. */
   freshProcess?: boolean;
   /** Start together with the previous turn (concurrent sessions). */
@@ -202,7 +210,12 @@ export function validateScenario(s: Scenario, kind: 'scenario' | 'upgrade-check'
     if (!turn.say?.trim()) err(`turn ${index} says nothing`);
     if (!sessions.has(turn.session) && turn.kind !== 'opening') err(`turn ${index} is the first of session ${turn.session} but not an opening`);
     if (sessions.has(turn.session) && turn.kind === 'opening' && !turn.freshProcess) err(`turn ${index} reopens session ${turn.session} without freshProcess`);
-    if (turn.kind === 'reply' && !turn.answers) err(`turn ${index} is a reply without the proposal it answers`);
+    if (turn.kind === 'reply' && !turn.answers && !turn.desk) err(`turn ${index} is a reply without the proposal it answers`);
+    if (turn.answers && turn.desk) err(`turn ${index} cannot gate on both chat and desk`);
+    if (turn.desk) {
+      if (!turn.desk.mapId || !turn.desk.ticketIds.length) err(`turn ${index} needs a Map and desk Tickets`);
+      if (turn.desk.submit?.some(s => !turn.desk!.ticketIds.includes(s.ticketId))) err(`turn ${index} submits outside the observed questions`);
+    }
     if (turn.kind !== 'reply' && turn.answers) err(`turn ${index} declares a proposal but is not a reply`);
     if (turn.concurrent && index === 0) err('the first turn cannot be concurrent');
     sessions.add(turn.session);

@@ -1,3 +1,6 @@
+import type { DeskState } from './desk-types.js';
+import { emptyDesk } from './desk-types.js';
+import { deskEffects, handleReopen, validateReopenCitation } from './desk-domain.js';
 import type { ApplyRequest, CreateMapInput, InvalidInput, MapId, MutationAuthor, NonEmpty, PrepareResult, Result, SemanticChange, StoredMapState } from './types.js';
 import { invalid, isPlainObject, validateAuthor, validateExtensions, validateId, validateObject } from './values.js';
 import { immutableClone } from './immutable.js';
@@ -14,6 +17,8 @@ interface PreparedBase {
   readonly next: StoredMapState;
   readonly author: MutationAuthor;
   readonly changes: NonEmpty<SemanticChange>;
+  readonly request?: ApplyRequest;
+  readonly desk?: DeskState;
 }
 export type PreparedCommit = PreparedBase & (
   | { readonly kind: 'create'; readonly priorRevision: null }
@@ -38,7 +43,7 @@ export function prepareCreate(input: CreateMapInput): Result<PreparedCommit, Inv
   }) };
 }
 
-export function prepareApply(current: StoredMapState, request: ApplyRequest): PrepareResult {
+export function prepareApply(current: StoredMapState, request: ApplyRequest, desk: DeskState = emptyDesk): PrepareResult {
   const decoded = decodeApplyRequest(request);
   if (decoded.kind === 'error') return { kind: 'rejected', rejection: { stage: 'input', error: decoded.error } };
   request = decoded.value;
@@ -51,31 +56,43 @@ export function prepareApply(current: StoredMapState, request: ApplyRequest): Pr
   if (request.expectedRevision !== current.currentRevision) return { kind: 'conflict', conflict: {
     mapId: request.mapId, expectedRevision: request.expectedRevision, currentRevision: current.currentRevision,
   } };
+  const citation = validateReopenCitation(current, desk, request);
+  if (citation) return { kind: 'rejected', rejection: citation };
   const initial = structuredClone(current);
+  let nextDesk = structuredClone(desk);
   let next = structuredClone(initial);
   for (const [commandIndex, command] of request.commands.entries()) {
-    const result = applyCommand(next, command, commandIndex);
+    const result = applyCommand(next, command, commandIndex, nextDesk, request.author.occurredAt);
     if (result.kind === 'error') return { kind: 'rejected', rejection: result.error };
+    nextDesk = deskEffects(next, nextDesk, command);
     next = result.value;
+    if (command.kind === 'ticket.reopen' && request.reopenRequestId
+      && desk.reopenRequests.some(r => r.requestId === request.reopenRequestId && r.ticketId === command.ticketId)) {
+      next = { ...next, tickets: next.tickets.map(t => t.id === command.ticketId && t.status === 'open'
+        ? { ...t, reopenedAtRevision: current.currentRevision + 1 } : t) };
+    }
   }
   const graphError = checkFinalGraph(next);
   if (graphError) return { kind: 'rejected', rejection: graphError };
-  if (isDeepStrictEqual(comparableState(initial), comparableState(next))) return { kind: 'rejected', rejection: { stage: 'final_state', code: 'no_changes' } };
+  if (isDeepStrictEqual(comparableState(initial), comparableState(next)) && isDeepStrictEqual(desk, nextDesk)) return { kind: 'rejected', rejection: { stage: 'final_state', code: 'no_changes' } };
   if (!Number.isSafeInteger(current.currentRevision + 1)) return { kind: 'rejected', rejection: {
     stage: 'input', error: invalid(['expectedRevision'], 'Cannot advance beyond positive safe revisions'),
   } };
   next = { ...next, currentRevision: current.currentRevision + 1 };
   const change: PreparedCommit = {
     [preparedBrand]: true, kind: 'apply', priorRevision: current.currentRevision,
-    mapId: current.id, next, author: request.author,
+    mapId: current.id, next, author: request.author, request, desk: handleReopen(nextDesk, request, next.currentRevision),
     changes: request.commands.map((command, commandIndex) => ({
       commandIndex, command: command.kind, subjectId: command.kind === 'map.update' ? current.id
         : command.kind === 'content.add' || command.kind === 'content.update' ? command.item.id
         : command.kind === 'content.remove' ? command.itemId
+        : command.kind === 'reopenRequest.close' ? command.requestId
+        : command.kind === 'deskQuestion.post' ? command.question.questionId
+        : command.kind === 'deskQuestion.withdraw' ? command.questionId
         : command.kind === 'ticket.create' ? command.ticket.id
         : command.kind === 'ticket.update' || command.kind === 'ticket.settle' || command.kind === 'ticket.reopen' || command.kind === 'claim.acquire' || command.kind === 'claim.release' || command.kind === 'claim.clear'
           ? command.ticketId : command.dependentId,
-      ...(command.kind === 'claim.clear' || command.kind === 'ticket.reopen' || (command.kind === 'claim.release' && command.reason !== undefined)
+      ...(command.kind === 'deskQuestion.withdraw' || command.kind === 'reopenRequest.close' || command.kind === 'claim.clear' || command.kind === 'ticket.reopen' || (command.kind === 'claim.release' && command.reason !== undefined)
         ? { reason: command.reason } : {}),
     })) as unknown as NonEmpty<SemanticChange>,
   };

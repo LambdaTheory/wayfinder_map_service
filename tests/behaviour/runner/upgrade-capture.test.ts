@@ -21,7 +21,7 @@ const output = (value: unknown, blocks = true) => JSON.stringify({ type: 'respon
   output: blocks ? [{ type: 'input_text', text: 'Script completed' }, { type: 'input_text', text: JSON.stringify(value) }] : JSON.stringify(value) } });
 const rollout = (text: string) => ({ text, visibleModel: 'fixture', effort: 'low', cliVersion: '0.164.0' });
 const wire = (c: UpgradeContract, turn = 0): (RelayObservation & { turn: number })[] => [{ phase: 'response', at: '', requestId: 1,
-  method: 'tools/list', sessionId: 'mcp-session', status: 200, turn, body: JSON.stringify({ result: { tools: definitions(c) } }) }];
+  method: 'tools/list', sessionId: 'mcp-session', status: 200, turn, body: JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: definitions(c) } }) }];
 
 test.each([true, false])('code-mode tool discovery exposes initial rules and retains them across a process restart (blocks=%s)', blocks => {
   const u = upgrade();
@@ -83,7 +83,7 @@ function lateDiscoveryAttempt(): AttemptRecord {
     ...a.events.slice(3, 5).map(completed), output(resource), ...a.events.slice(6).map(completed),
   ].join('\n');
   const log: (RelayObservation & { turn: number })[] = [...wire(u.contracts.after, 1), { phase: 'response', at: '', requestId: 2,
-    method: 'resources/read', sessionId: 'mcp-session', status: 200, turn: 1, body: JSON.stringify({ result: resource }) }];
+    method: 'resources/read', sessionId: 'mcp-session', status: 200, turn: 1, body: JSON.stringify({ jsonrpc: '2.0', id: 2, result: resource }) }];
   const initial = { ...u }; delete initial.restart;
   a.given = [...upgradeRules(initial, rollout(output(toolList(u.contracts.before))), [], wire(u.contracts.before), 'A', 0, 0),
     ...upgradeRules(u, rollout(native), a.events, log, 'A', 1, 3)];

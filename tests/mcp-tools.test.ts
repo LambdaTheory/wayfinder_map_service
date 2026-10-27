@@ -2,17 +2,18 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { CallToolResultSchema, ErrorCode, LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { Ajv } from 'ajv';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { ProtocolErrorCode, LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/server';
+import type { CallToolResult as SdkCallToolResult } from '@modelcontextprotocol/server';
+type CallToolResult = SdkCallToolResult & { structuredContent?: Record<string, unknown> };
+import { Ajv, type AnySchema } from 'ajv';
 import { afterEach, expect, test } from 'vitest';
-import { createMapMcpServer, mapTools, toolsOnlyMapTools, workflowContract } from '../src/mcp-tools.js';
+import { createMapMcpServer, mapTools, toolsOnlyMapTools, answerDeskMapTools, workflowContract } from '../src/mcp-tools.js';
 import { sqliteLifecycleForTests } from '../src/sqlite-internal.js';
 import type { SQLiteStorage } from '../src/sqlite-storage.js';
 import { calculateFrontier, parseId, prepareApply } from '../src/index.js';
-import type { Command, NonEmpty, Revision, TicketType } from '../src/index.js';
+import type { ClaimantId, Command, NonEmpty, Revision, TicketId, TicketType } from '../src/index.js';
 import { rejectionSeed, rejectionCases } from './helpers/mcp-rejection-cases.js';
 import { versioned } from './helpers/write-version.js';
 
@@ -27,10 +28,14 @@ function id(value: string) {
 }
 const configuration = { actorId: 'operator', clientId: 'codex-test' };
 const ajv = new Ajv({ strict: false });
-const schemas = new Map(mapTools.map(tool => [tool.name, {
-  input: ajv.compile(tool.inputSchema), output: ajv.compile(tool.outputSchema!),
+const defaultSchemas = new Map(mapTools.map(tool => [tool.name, {
+  input: ajv.compile(tool.inputSchema), output: ajv.compile(tool.outputSchema! as AnySchema),
 }]));
-async function fixture(faults: Parameters<typeof sqliteLifecycleForTests>[0] = {}) {
+const schemas = defaultSchemas;
+const deskSchemas = new Map(answerDeskMapTools.map(tool => [tool.name, {
+  input: ajv.compile(tool.inputSchema), output: ajv.compile(tool.outputSchema! as AnySchema),
+}]));
+async function fixture(faults: Parameters<typeof sqliteLifecycleForTests>[0] = {}, answerDeskEnabled?: boolean, toolsOnly = false) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'wayfinder-mcp-tools-acceptance-')));
   cleanups.push(() => rmSync(directory, { recursive: true }));
   const path = join(directory, 'private', 'maps.sqlite');
@@ -38,7 +43,8 @@ async function fixture(faults: Parameters<typeof sqliteLifecycleForTests>[0] = {
   lifecycle.initialize(path);
   const storage = lifecycle.open(path);
   cleanups.push(() => storage.close());
-  const server = createMapMcpServer(storage, configuration);
+  const server = createMapMcpServer(storage, { ...configuration, toolsOnly, ...(answerDeskEnabled === undefined ? {} : { answerDeskEnabled }) });
+  const schemas = answerDeskEnabled ? deskSchemas : defaultSchemas;
   const client = new Client({ name: 'wayfinder-protocol-test', version: '0.1.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   let negotiatedProtocol: unknown;
@@ -78,11 +84,11 @@ async function observe(storage: SQLiteStorage, head: number) {
   })));
 }
 
-test('P01/P02: SDK discovers exactly four complete schemas, once-only compact/default/false and opt-in snapshots', async () => {
+test('P01/P02: SDK discovers exactly five complete schemas, once-only compact/default/false and opt-in snapshots', async () => {
   const f = await fixture();
   const listed = await f.client.listTools();
   expect(listed.tools).toEqual(mapTools);
-  expect(listed.tools.map(tool => tool.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply']);
+  expect(listed.tools.map(tool => tool.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply', 'map_wait']);
   expect(LATEST_PROTOCOL_VERSION).toBe('2025-11-25');
   expect(f.negotiatedProtocol).toBe('2025-11-25');
   expect(f.server.getClientVersion()).toEqual({ name: 'wayfinder-protocol-test', version: '0.1.0' });
@@ -108,17 +114,42 @@ test('P01/P02: SDK discovers exactly four complete schemas, once-only compact/de
   }
 });
 
-test('W02: the map_apply description names every command and field its input schema accepts', () => {
-  // Some clients do not pass nested oneOf schemas to the model, so the description must stand alone.
+test('W02: every advertised default command and field has standalone tool-description guidance', () => {
   const tool = mapTools.find(candidate => candidate.name === 'map_apply')!;
-  const commands = (tool.inputSchema.properties as { commands: { items: { oneOf: { properties: Record<string, { const?: string }> }[] } } })
-    .commands.items.oneOf;
+  const commands = (tool.inputSchema.properties as { commands: { items: { oneOf: { properties: Record<string, { const?: string }> }[] } } }).commands.items.oneOf;
   const description = workflowContract.toolDescriptions.map_apply;
   for (const command of commands) {
     const { kind, ...fields } = command.properties;
     expect(description).toContain(kind!.const!.replace('ticket.settle', '"kind":"ticket.settle"'));
     for (const field of Object.keys(fields)) expect(description).toContain(field);
   }
+});
+
+test.each([false, true])('the default five tools include all desk schemas (toolsOnly=%s)', async toolsOnly => {
+  const f = await fixture({}, undefined, toolsOnly);
+  const { tools } = await f.client.listTools();
+  expect(tools).toEqual(toolsOnly ? toolsOnlyMapTools : mapTools);
+  expect(tools.map(tool => tool.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply', 'map_wait']);
+  for (const tool of tools) {
+    for (const combinator of ['oneOf', 'anyOf', 'allOf']) expect(tool.inputSchema, tool.name).not.toHaveProperty(combinator);
+  }
+  for (const word of ['deskQuestion.post', 'deskQuestion.withdraw', 'reopenRequest.close', 'deskAnswer', 'reopenRequestId', 'deskQuestions', 'reopenRequests', 'reopenContexts']) {
+    expect(JSON.stringify(tools)).toContain(word);
+  }
+});
+
+test('W01/W02: F11 guidance requires a human instruction or agreement before moving work out of a Map', () => {
+  const instructions = workflowContract.instructions;
+  const description = workflowContract.toolDescriptions.map_apply;
+  expect(instructions).toContain('A Ticket found beyond the Destination is never settled as a decision: release its Claim and propose a Scope Exclusion.');
+  expect(instructions).toContain("A question from the human is not an instruction or a verdict, even when you agree: answer it and ask before acting on it. Changing what a Map covers is the human's call: add or remove Scope Exclusions, change the Destination or Notes, or narrow a question or remove a Dependency to move work out, only on the human's explicit instruction or agreement to that proposal.");
+  expect(description).toContain("never move answers, recommendations or conversation into questions or Notes. Change Scope Exclusions, the Destination or Notes, or narrow a question or remove a Dependency to move work out, only on the human's explicit instruction or agreement; a question from the human is neither.");
+  expect(instructions).toContain('that verdict is the agreement to reopen it. Keep a Claim across turns only while waiting for that reply;');
+  expect(instructions).toContain("citing the request in the reason. A question from the human is not an instruction or a verdict,");
+  expect(instructions.split('\n\n').find(paragraph => paragraph.startsWith('Verdicts and Claims:')))
+    .toMatch(/agreement to that proposal\.$/);
+  expect(workflowContract.markdown).not.toContain('add a Scope Exclusion and tell the human');
+  expect(workflowContract.markdown).toContain("Put newly precise Tickets, Dependencies, Fog changes and Scope Exclusions in the same ordered atomic batch when they are part of that resolution. Change Scope Exclusions, the Destination or Notes, or narrow a question or remove a Dependency to move work out, only on the human's explicit instruction or agreement; a question from the human is neither.");
 });
 
 test('U00: writes name the release whose rules they follow; a missing or other version is refused before anything is read or written', async () => {
@@ -138,7 +169,7 @@ test('U00: writes name the release whose rules they follow; a missing or other v
     .structuredContent).toEqual(refused(null));
   expect((await f.read()).structuredContent).toMatchObject({ revision: { revision: 1 } });
   for (const name of ['map_create', 'map_apply']) {
-    const schema = mapTools.find(tool => tool.name === name)!.inputSchema as { required: string[]; properties: Record<string, { description: string }> };
+    const schema = mapTools.find(tool => tool.name === name)!.inputSchema as unknown as { required: string[]; properties: Record<string, { description: string }> };
     expect(schema.required).toContain('version');
     expect(schema.properties.version!.description).not.toContain(workflowContract.version);
     // Compatibility mode differs only in the version help, which states the release.
@@ -203,7 +234,7 @@ test.each(['grilling', 'prototype', 'research', 'task'] as const)('P01/P02/P03: 
   expect(settled.structuredContent!.frontier).toEqual(['B']);
   expect(snapshot(settled).state.tickets[0]).toMatchObject({ claim: null, status: 'settled', settlement: { ...settlement(type), introducedAtRevision: 4 } });
   const read4 = await f.read(4);
-  expect(read4.structuredContent).toEqual({ ...settled.structuredContent, kind: 'found' });
+  expect(read4.structuredContent).toEqual({ ...settled.structuredContent, kind: 'found', deskQuestions: [] });
   const reopened = await f.apply([{ kind: 'ticket.reopen', ticketId: 'A', reason: ' Reconsider\n' }], 4);
   expect(reopened.structuredContent!.frontier).toEqual(['A']);
   expect(snapshot(reopened).changes[0]).toEqual({ commandIndex: 0, command: 'ticket.reopen', subjectId: 'A', reason: ' Reconsider\n' });
@@ -390,12 +421,15 @@ test('P02/P03/D09: current reads pin observed N and writes return exact committe
   expect(written.structuredContent!.frontier).toEqual(['A']);
   expect((await originalCurrent(id('Acceptance.Alpha')))).toMatchObject({ value: { currentRevision: 3 } });
   adapter.commit = originalCommit;
-  adapter.readCurrent = async mapId => { const observed = await originalCurrent(mapId); await advance(); return observed; };
+  const originalInspect = f.storage.desk.inspect.bind(f.storage.desk);
+  let interleaved: Promise<void> | undefined;
+  f.storage.desk.inspect = mapId => { const observed = originalInspect(mapId); interleaved = advance(); return observed; };
   const read = await f.read();
   expect(snapshot(read).revision).toBe(3);
   expect(read.structuredContent!.frontier).toEqual(calculateFrontier(snapshot(read).state));
   expect(read.structuredContent!.frontier).toEqual(['A', 'T2']);
-  adapter.readCurrent = originalCurrent;
+  await interleaved;
+  f.storage.desk.inspect = originalInspect;
   expect(snapshot(await f.read()).revision).toBe(4);
   expect(snapshot(await f.read(2))).toEqual(snapshot(written));
   adapter.commit = async prepared => { const committed = await originalCommit(prepared); await advance(); return committed; };
@@ -404,21 +438,22 @@ test('P02/P03/D09: current reads pin observed N and writes return exact committe
   expect((await originalCurrent(id('Acceptance.Alpha')))).toMatchObject({ value: { currentRevision: 6 } });
 });
 
-test('P05: unknown tool and malformed tools/call are protocol errors, never fabricated domain errors', async () => {
+test('P05: legacy unknown tools, malformed calls and task markers are protocol errors without publication', async () => {
   const f = await fixture();
-  await expect(f.client.callTool({ name: 'unknown', arguments: {} })).rejects.toMatchObject({ code: ErrorCode.InvalidParams });
+  await expect(f.client.callTool({ name: 'unknown', arguments: {} })).rejects.toMatchObject({ code: ProtocolErrorCode.InvalidParams });
   expect((await f.call('map_list')).structuredContent).toMatchObject({ maps: [] });
   const responses: unknown[] = [];
   f.clientTransport.onmessage = message => { responses.push(message); };
   await f.clientTransport.send({ jsonrpc: '2.0', id: 900, method: 'tools/call', params: { name: 42 } });
   await f.clientTransport.send({ jsonrpc: '2.0', id: 901, method: 'tools/call', params: { name: 'map_read', arguments: 'bad' } });
   await f.clientTransport.send({ jsonrpc: '2.0', id: 902, method: 'tools/call', params: { name: 'map_create', task: {},
-    arguments: { mapId: 'TaskUnsupported', title: 'T', destination: 'D' } } });
+    arguments: { version, mapId: 'TaskUnsupported', title: 'T', destination: 'D' } } });
   await new Promise<void>(resolve => setImmediate(resolve));
   expect(responses).toHaveLength(3);
-  // The pinned SDK's request-schema parse reports InternalError; it is still
+  // The legacy SDK transport retains params.task; modern HTTP strips that deprecated field.
+  // Legacy malformed or unsupported task requests return InvalidParams; this is
   // a JSON-RPC error, not a successful tools/call or a business rejection.
-  for (const response of responses) expect(response).toMatchObject({ error: { code: ErrorCode.InternalError } });
+  for (const response of responses) expect(response).toMatchObject({ error: { code: ProtocolErrorCode.InvalidParams } });
   expect(f.storage.listMaps()).toMatchObject({ maps: [] });
 });
 
@@ -498,8 +533,8 @@ test('P01: author configuration rejected before serving, captured against later 
   await server.connect(st); await client.connect(ct);
   try {
     await client.callTool({ name: 'map_create', arguments: versioned('map_create', { mapId: 'Captured', title: 'T', destination: 'D' }) });
-    const read = await client.request({ method: 'tools/call', params: { name: 'map_read', arguments: { mapId: 'Captured' } } }, CallToolResultSchema);
-    expect(snapshot(read).author).toMatchObject(configuration);
+    const read = await client.request({ method: 'tools/call', params: { name: 'map_read', arguments: { mapId: 'Captured' } } });
+    expect(snapshot(read as CallToolResult).author).toMatchObject(configuration);
   } finally { await client.close(); await server.close(); }
 });
 
@@ -534,4 +569,37 @@ test('V10: a configured local viewer origin adds viewerUrl to map_create and map
     expect(schemas.get('map_create')!.output({ ...compact, viewerUrl: link })).toBe(true);
     expect(schemas.get('map_apply')!.output({ ...compact, viewerUrl: link })).toBe(false);
   } finally { await client.close(); await server.close(); }
+});
+
+test('Answer Desk commands and current/history inspection round-trip through declared MCP schemas', async () => {
+  let now = Date.parse('2026-10-27T00:00:00.000Z');
+  const f = await fixture({ now: () => new Date(now).toISOString() }, true); await f.create();
+  const question = { questionId: 'Q.A', options: [{ label: 'One', description: 'First' }, { label: 'Two', description: 'Second' }],
+    recommendedOption: 1, recommendedAnswer: 'First route', whyKun: 'Choose the tradeoff', triage: 'needsKun', triageReason: 'A decision', gatesResearch: false };
+  const post = { kind: 'deskQuestion.post', ticketId: 'A', claimantId: 'work', question };
+  const applySchema = deskSchemas.get('map_apply')!.input;
+  expect(applySchema(versioned('map_apply', { mapId: 'Acceptance.Alpha', expectedRevision: 1, commands: [post] }))).toBe(true);
+  await f.apply([ticket('A', 'grilling'), { kind: 'claim.acquire', ticketId: 'A', claimantId: 'work' }, post], 1);
+  const mapId = id('Acceptance.Alpha');
+  const submitted = f.storage.desk.submitAnswers(mapId, [{ questionId: 'Q.A', questionVersion: 1, choice: { option: 2 } }]);
+  if (submitted.kind !== 'updated') throw Error('answer rejected'); const answer = submitted.value[0]!;
+  expect((await f.read()).structuredContent).toMatchObject({ revision: { revision: 2 }, deskQuestions: [{ state: 'answered', currentAnswer: answer }], reopenContexts: [], reopenRequests: [] });
+  expect((await f.read(2)).structuredContent).toMatchObject({ deskQuestions: [{ state: 'published' }] });
+  expect((await f.read(2)).structuredContent).not.toHaveProperty('reopenRequests');
+  const settle = { kind: 'ticket.settle', ticketId: 'A', ticketType: 'grilling', claimantId: 'work', settlement: settlement('grilling'), deskAnswer: { answerId: answer.answerId, questionVersion: 1 } };
+  expect((await f.apply([settle], 2)).structuredContent).toMatchObject({ rejection: { code: 'desk_answer_invalid' } });
+  now += 15_000; f.storage.desk.takeEligible(mapId, 'work' as ClaimantId);
+  await f.apply([settle], 2);
+  const filed = f.storage.desk.fileReopenRequest(mapId, { ticketId: 'A' as TicketId, settlementIntroducedAtRevision: 3, affectedTickets: [], affectedSettlementRevisions: {},
+    requested: { option: 2, label: 'Two', questionId: 'Q.A', questionVersion: 1 } });
+  if (filed.kind !== 'updated') throw Error('request rejected'); now += 15_000; f.storage.desk.takeEligible(mapId, 'other' as ClaimantId);
+  expect((await f.call('map_apply', { mapId, expectedRevision: 3, reopenRequestId: filed.value.requestId, commands: [{ kind: 'ticket.reopen', ticketId: 'A', reason: 'Kun requested' }] })).structuredContent).toMatchObject({ kind: 'committed' });
+  expect((await f.read()).structuredContent).toMatchObject({ deskQuestions: [{ state: 'superseded_by_reopen', currentAnswer: null }], reopenRequests: [],
+    reopenContexts: [{ ticketId: 'A', requestId: filed.value.requestId, requested: filed.value.requested, handledAtRevision: 4 }] });
+  expect((await f.read(4)).structuredContent).not.toHaveProperty('reopenContexts');
+});
+
+test('retired false setting is refused before MCP tools can advertise incompatible rules', async () => {
+  const f = await fixture();
+  expect(() => createMapMcpServer(f.storage, { ...configuration, answerDeskEnabled: false })).toThrow('Answer Desk is required');
 });
