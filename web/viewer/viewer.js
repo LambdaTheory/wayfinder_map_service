@@ -1,8 +1,13 @@
-// Read-only Wayfinder Map viewer. It only reads /api/*; Map changes happen in the agent through MCP.
+// Wayfinder Map viewer; optional Answer Desk writes only human responses.
 // The page CSP forbids inline styles, so elements are built here and positioned through CSSOM.
 (() => {
   'use strict';
   const POLL_MS = 2000;
+  // Read and strip the capability only when the service confirms the desk is enabled.
+  // The disabled viewer leaves URL fragments alone; enabled keys stay in closures only.
+  let browserKey;
+  let deskController = null;
+  let deskMode = false;
   const $ = id => document.getElementById(id);
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const px = value => `${Math.round(value)}px`;
@@ -74,7 +79,7 @@
   document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
 
   async function pollMap() {
-    const response = await fetch(`/api/maps/${encodeURIComponent(mapId)}/view?known=${view ? view.revision : 0}`,
+    const response = await fetch(`/api/maps/${encodeURIComponent(mapId)}/view?known=${view && !view.desk ? view.revision : 0}`,
       { cache: 'no-store', signal: AbortSignal.timeout(5000) });
     if (response.status === 204) return;
     if (response.status === 404 || response.status === 400) {
@@ -83,11 +88,25 @@
     }
     if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
     const next = await response.json();
+    const deskChanged = !!view?.desk !== !!next.desk;
+    if (!next.desk && deskController) { deskController.destroy(); deskController = null; deskMode = false; }
+    if (next.desk && !deskController) {
+      if (browserKey === undefined) {
+        browserKey = new URLSearchParams(location.hash.slice(1)).get('key');
+        if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+        deskMode = !!browserKey;
+      }
+      const { createDesk } = await import('/viewer/desk.js');
+      deskController = createDesk({ h, mapId, key: browserKey, refresh: pollMap });
+    }
     const previous = view;
     view = next;
     missing = false;
     // If drawing fails, keep asking for this Revision rather than calling a half-drawn page current.
-    try { renderMap(previous && previous.revision !== next.revision ? previous : null); }
+    try {
+      if (!previous || previous.revision !== next.revision || deskChanged) renderMap(previous);
+      deskController?.update(next.desk, next.revision);
+    }
     catch (error) { view = previous; throw error; }
   }
 
@@ -123,6 +142,7 @@
 
   // Another site may link any address here; only a well-formed Map ID is echoed.
   function renderMissing() {
+    if (deskController) { deskController.destroy(); deskController = null; }
     const wellFormed = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(mapId);
     document.title = 'Wayfinder 地图';
     $('title').textContent = wellFormed ? mapId : '地址不对';
@@ -143,10 +163,27 @@
     const oldGraph = $('main').querySelector('.graph');
     const kept = oldGraph ? { left: oldGraph.scrollLeft, top: oldGraph.scrollTop } : null;
     const pageY = scrollY;
-    $('main').replaceChildren(
+    const drawing = h('div', { class: 'map-drawing' },
       h('div', { class: 'change' }, h('span', { class: 'k' }, `修订 ${view.revision} 改了`), h('span', null, summary(view.latest))),
       h('div', { class: 'mapbox card-box' }, graph(previous)),
       h('div', { class: 'below' }, outside(), legend()));
+    if (deskController && $('main').contains(deskController.element)) {
+      $('main').querySelector('.map-drawing').replaceWith(drawing);
+      drawing.hidden = deskMode;
+      deskController.update(view.desk, view.revision);
+    } else if (deskController) {
+      const graphButton = h('button', { type: 'button' }, '地图');
+      const deskButton = h('button', { type: 'button' }, '答题台');
+      const switchMode = mode => {
+        deskMode = mode; $('main').querySelector('.map-drawing').hidden = mode; deskController.element.hidden = !mode;
+        graphButton.setAttribute('aria-pressed', String(!mode)); deskButton.setAttribute('aria-pressed', String(mode));
+        if (mode) { selected = null; renderDetail(); }
+      };
+      graphButton.onclick = () => switchMode(false); deskButton.onclick = () => switchMode(true);
+      $('main').replaceChildren(h('nav', { class: 'desk-tabs', 'aria-label': '地图视图' }, graphButton, deskButton), deskController.element, drawing);
+      deskController.update(view.desk, view.revision);
+      switchMode(deskMode);
+    } else $('main').replaceChildren(drawing);
     const newGraph = $('main').querySelector('.graph');
     if (kept && newGraph) { newGraph.scrollLeft = kept.left; newGraph.scrollTop = kept.top; }
     if (scrollY !== pageY) scrollTo(scrollX, pageY);

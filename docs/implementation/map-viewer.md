@@ -2,6 +2,8 @@
 
 Status: implemented. Automated gates and one installed-Codex journey passed on 2026-10-23. On 2026-10-25 the user used it and found nothing to change for now. Still open: the ChatGPT check of workflow `2.1.0` at the next live tunnel test.
 
+The later [Answer Desk viewer](answer-desk-viewer.md) adds the accepted keyed answer-only exception behind a default-off setting. This record preserves the original read-only release evidence.
+
 Requirements and accepted design: [docs/spec/map-viewer.md](../spec/map-viewer.md). The implementation plan and requirement pages were reviewed outside the repository; they are not product Map state.
 
 ## Delivered behaviour
