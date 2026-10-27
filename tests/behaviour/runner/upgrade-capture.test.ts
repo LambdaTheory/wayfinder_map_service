@@ -23,6 +23,86 @@ const rollout = (text: string) => ({ text, visibleModel: 'fixture', effort: 'low
 const wire = (c: UpgradeContract, turn = 0): (RelayObservation & { turn: number })[] => [{ phase: 'response', at: '', requestId: 1,
   method: 'tools/list', sessionId: 'mcp-session', status: 200, turn, body: JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: definitions(c) } }) }];
 
+const message = (seq: number, text: string): EventRecord => ({ seq, at: '', actor: 'agent', session: 'A', turn: 1,
+  kind: 'message', role: 'assistant', text });
+const completed = (event: EventRecord) => JSON.stringify({ type: 'event_msg', payload: { type: 'item_completed', item: event.kind === 'message'
+  ? { type: 'AgentMessage', content: [{ type: 'text', text: event.text }] }
+  : event.kind === 'tool-call' ? { type: 'McpToolCall', server: event.server, tool: event.tool, arguments: event.arguments } : {} } });
+const response = (event: EventRecord) => JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant',
+  content: [{ type: 'output_text', text: event.kind === 'message' ? event.text : '' }] } });
+function replyAttempt() {
+  const a = historyAttempt(false);
+  a.upgrade = upgrade('resume');
+  a.upgrade.contracts.after.instructions += `\n${replyRule}`;
+  a.upgrade.contracts.after.markdown += `\n${replyRule}`;
+  return a;
+}
+
+test.each(['Plain reply.', 'LANTERN Current instructions.'])('split discovery enforces the first instructions without backdating full tools (%s)', text => {
+  const a = replyAttempt();
+  const u = a.upgrade!;
+  const list = toolList(u.contracts.after);
+  a.events = [message(3, text), message(4, 'LANTERN Done.')];
+  const native = [output([list[0]]), response(a.events[0]!), completed(a.events[0]!),
+    output([list[1]]), response(a.events[1]!), completed(a.events[1]!)].join('\n');
+  a.given = upgradeRules(u, rollout(native), a.events, wire(u.contracts.after, 1), 'A', 1, 3);
+  expect(noCanaryReplyViolation(a).status).toBe(text.startsWith('LANTERN') ? 'holds' : 'violated');
+  expect(a.given.findLast(g => g.fromSeq <= 3)).toMatchObject({ instructions: { known: true }, toolDescriptions: { known: false } });
+  expect(a.given.findLast(g => g.fromSeq <= 4)).toMatchObject({ instructions: { known: true }, toolDescriptions: { known: true } });
+});
+
+test.each([false, true])('a Resource before discovery covers the intervening reply without importing future definitions (runner sort=%s)', sorted => {
+  const a = replyAttempt();
+  const u = a.upgrade!;
+  const resource = { contents: [{ uri: 'wayfinder://workflow/exploration', text: `version: ${u.contracts.after.version}\n\n${u.contracts.after.markdown}` }] };
+  const read: EventRecord = { seq: 3, at: '', actor: 'agent', session: 'A', turn: 1, kind: 'tool-call', callId: 'read',
+    server: 'wayfinder', tool: 'read_mcp_resource', arguments: { uri: 'wayfinder://workflow/exploration' },
+    result: { known: true, value: resource }, failed: false, requestId: { known: true, value: '2' } };
+  a.events = [read, { seq: 4, at: '', actor: 'agent', session: 'A', turn: 1, kind: 'resource-read', uri: 'wayfinder://workflow/exploration', ok: true },
+    message(5, 'I read the rules.'), message(6, 'LANTERN Done.')];
+  const native = [completed(read), output(resource), completed(a.events[2]!), output(toolList(u.contracts.after)), completed(a.events[3]!)].join('\n');
+  const log: (RelayObservation & { turn: number })[] = [...wire(u.contracts.after, 1), { phase: 'response', at: '', requestId: 2,
+    method: 'resources/read', sessionId: 'mcp-session', status: 200, turn: 1, body: JSON.stringify({ jsonrpc: '2.0', id: 2, result: resource }) }];
+  a.given = upgradeRules(u, rollout(native), a.events, log, 'A', 1, 3);
+  if (sorted) a.given.sort((a, b) => a.fromSeq - b.fromSeq);
+  expect(noCanaryReplyViolation(a).status).toBe('violated');
+  expect(replyCanary(a).status).toBe('violated');
+  expect(a.given.find(g => g.fromSeq === 4)).toMatchObject({ instructions: { known: false }, toolDescriptions: { known: false }, resourceText: { known: true } });
+  expect(a.given.find(g => g.fromSeq === 6)).toMatchObject({ instructions: { known: true }, toolDescriptions: { known: true } });
+  // The checker also handles a historical record whose phase array is out of order.
+  a.given.reverse();
+  expect(noCanaryReplyViolation(a).status).toBe('violated');
+});
+
+test.each(['missing', 'response-first', 'completion-first'])('a missing early completion cannot backdate discovery before its assistant response (%s)', order => {
+  const a = replyAttempt();
+  const u = a.upgrade!;
+  a.events = [message(3, 'I have not discovered tools yet.'), message(4, 'LANTERN Done.')];
+  const early = order === 'completion-first' ? [completed(a.events[0]!), response(a.events[0]!)]
+    : [response(a.events[0]!), ...(order === 'response-first' ? [completed(a.events[0]!)] : [])];
+  const native = [...early,
+    output(toolList(u.contracts.after)), response(a.events[1]!), completed(a.events[1]!)].join('\n');
+  a.given = upgradeRules(u, rollout(native), a.events, wire(u.contracts.after, 1), 'A', 1, 3);
+  expect(noCanaryReplyViolation(a).status).toBe('holds');
+  expect(a.given[0]!.fromSeq).toBe(4);
+});
+
+test.each([false, true])('an unpositioned discovery stays unknown even after another matched discovery (rediscovery=%s)', rediscovery => {
+  const a = replyAttempt();
+  const u = a.upgrade!;
+  const read: EventRecord = { seq: 5, at: '', actor: 'agent', session: 'A', turn: 1, kind: 'tool-call', callId: 'read',
+    server: 'wayfinder', tool: 'map_read', arguments: { mapId: 'Upgrade.Probe' },
+    result: { known: true, value: { kind: 'found' } }, failed: false, requestId: { known: true, value: '5' } };
+  a.events = [message(3, 'LANTERN Start.'), message(4, 'Plain reply after the unpositioned discovery.'), read, message(6, 'LANTERN End.')];
+  const native = [completed(a.events[0]!), completed(message(0, 'No matching normalized Event.')), output(toolList(u.contracts.after)),
+    completed(a.events[1]!), completed(read), ...(rediscovery ? [output(toolList(u.contracts.after))] : []), completed(a.events[3]!)].join('\n');
+  a.given = upgradeRules(u, rollout(native), a.events, wire(u.contracts.after, 1), 'A', 1, 3);
+  expect(noCanaryReplyViolation(a).status).toBe('unknown');
+  expect(replyCanary(a).status).toBe('unknown');
+  expect(a.given[0]).toMatchObject({ instructions: { known: false, reason: expect.stringContaining('unpositioned') },
+    toolDescriptions: { known: false, reason: expect.stringContaining('unpositioned') } });
+});
+
 test.each([true, false])('code-mode tool discovery exposes initial rules and retains them across a process restart (blocks=%s)', blocks => {
   const u = upgrade();
   const phases = upgradeRules(u, rollout(output(toolList(u.contracts.before), blocks)), [], wire(u.contracts.before), 'A', 0, 0);
@@ -57,9 +137,10 @@ test.each(['resource', 'other-server', 'malformed'])('code-mode %s output cannot
   for (const phase of phases) expect(phase).toMatchObject({ instructions: { known: false }, toolDescriptions: { known: false } });
 });
 
-function lateDiscoveryAttempt(): AttemptRecord {
+function lateDiscoveryAttempt(restartSeq = 2): AttemptRecord {
   const a = historyAttempt(false);
   const u = upgrade('resume');
+  u.restart!.seq = restartSeq;
   u.contracts.after.instructions += `\n${replyRule}`;
   u.contracts.after.markdown += `\n${replyRule}`;
   a.upgrade = u;
@@ -75,9 +156,6 @@ function lateDiscoveryAttempt(): AttemptRecord {
   a.events = [message(3, 'I will continue the probe.'), call(4, 'map_read'), call(5, 'map_apply'), call(6, 'list_mcp_resources'), call(7, 'read_mcp_resource'),
     { ...base, seq: 8, kind: 'resource-read', uri: 'wayfinder://workflow/exploration', ok: true },
     message(9, 'LANTERN I have the current rules.'), call(10, 'map_read'), call(11, 'map_apply'), message(12, 'LANTERN Added the Ticket.')];
-  const completed = (event: EventRecord) => JSON.stringify({ type: 'event_msg', payload: { type: 'item_completed', item: event.kind === 'message'
-    ? { type: 'AgentMessage', content: [{ type: 'text', text: event.text }] }
-    : event.kind === 'tool-call' ? { type: 'McpToolCall', server: event.server, tool: event.tool, arguments: event.arguments } : {} } });
   const native = [
     ...a.events.slice(0, 3).map(completed), output(toolList(u.contracts.after)),
     ...a.events.slice(3, 5).map(completed), output(resource), ...a.events.slice(6).map(completed),
@@ -101,16 +179,28 @@ test('code-mode rules start at discovery, after earlier replies and writes in th
   expect(noCanaryReplyViolation(a).status).toBe('violated');
 });
 
+const recoveryCheck = upgradeChecks.find(u => u.id === 'U-codex-resume')!.expect.find(i => i.id === 'resume-refusal-recovery')!.check!;
+
 test('code-mode discovery after a refusal does not move the service restart boundary', () => {
-  const check = upgradeChecks.find(u => u.id === 'U-codex-resume')!.expect.find(i => i.id === 'resume-refusal-recovery')!.check!;
-  expect(check(lateDiscoveryAttempt()).status).toBe('holds');
+  expect(recoveryCheck(lateDiscoveryAttempt()).status).toBe('holds');
+});
+
+test('recovery excludes an unrecovered pre-restart refusal but includes the post-restart refusal before discovery', () => {
+  const a = lateDiscoveryAttempt();
+  const refusal = a.events.find(e => e.kind === 'tool-call' && e.seq === 5)!;
+  const retry = a.events.find(e => e.kind === 'tool-call' && e.seq === 11)!;
+  a.events.unshift({ ...refusal, seq: 0, turn: 0 }, { ...retry, seq: 1, turn: 0 });
+  expect(recoveryCheck(a).status).toBe('holds');
 });
 
 test('a refusal before the service restart does not establish post-restart recovery', () => {
+  expect(recoveryCheck(lateDiscoveryAttempt(6))).toMatchObject({ status: 'violated', absenceOnly: true, reason: 'no version_mismatch after the restart' });
+});
+
+test('historical records without a restart retain the recorded after-phase recovery boundary', () => {
   const a = lateDiscoveryAttempt();
-  a.upgrade!.restart!.seq = 6;
-  const check = upgradeChecks.find(u => u.id === 'U-codex-resume')!.expect.find(i => i.id === 'resume-refusal-recovery')!.check!;
-  expect(check(a)).toMatchObject({ status: 'violated', absenceOnly: true, reason: 'no version_mismatch after the restart' });
+  delete a.upgrade!.restart;
+  expect(recoveryCheck(a)).toMatchObject({ status: 'violated', absenceOnly: true, reason: 'no version_mismatch after the restart' });
 });
 
 function historyAttempt(nested: boolean): AttemptRecord {

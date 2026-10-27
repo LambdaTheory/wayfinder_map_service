@@ -131,7 +131,8 @@ const replyRuleVisible = (a: AttemptRecord, g: GivenRules) =>
   || (g.resourceText?.known && g.resourceText.value.includes(replyRule) && !resourceResultMissing(a, g.fromSeq));
 
 export const noCanaryReplyViolation: ScriptCheck = a => {
-  const source = a.given.find(g => g.phase !== 'initial' && replyRuleVisible(a, g));
+  const source = a.given.filter(g => g.phase !== 'initial' && replyRuleVisible(a, g))
+    .reduce<GivenRules | undefined>((earliest, g) => !earliest || g.fromSeq < earliest.fromSeq ? g : earliest, undefined);
   if (!source) return unknown('no native evidence of the new reply rule');
   const replies = a.events.filter(e => e.kind === 'message' && e.actor === 'agent' && e.role === 'assistant' && e.seq >= source.fromSeq);
   const bad = replies.filter(e => e.kind === 'message' && !replyPattern.test(e.text));

@@ -45,25 +45,43 @@ export function upgradeRules(upgrade: NonNullable<AttemptRecord['upgrade']>, rol
   const nativeEvents = events.filter(e => e.actor === 'agent' && e.session === session && e.turn === turn);
   let nextSeq = fromSeq;
   let positioned = true;
+  let unpositionedDiscovery = false;
+  let responseMessage: EventRecord | undefined;
+  let completedMessage: EventRecord | undefined;
+  const place = (match: EventRecord | undefined) => {
+    positioned = !!match;
+    if (match) {
+      nextSeq = match.seq + 1;
+      // Resource reads have a derived event immediately after the native tool call.
+      if (nativeEvents.some(event => event.seq === nextSeq && event.kind === 'resource-read')) nextSeq++;
+    }
+  };
   for (const line of rollout?.text.split('\n') ?? []) {
     try {
       const e = JSON.parse(line);
       const p = e.payload;
-      // Code-mode exec outputs have no normalized Event of their own. Place discovery
-      // between the surrounding native completions, never at the beginning of the turn.
+      // Code-mode exec outputs have no normalized Event of their own. Assistant
+      // responses also anchor discovery when their duplicate completion is missing.
+      if (e.type === 'response_item' && p?.type === 'message' && p.role === 'assistant') {
+        const message = Array.isArray(p.content) ? p.content.filter((c: { type?: string } | null) => c?.type === 'output_text')
+          .map((c: { text?: string }) => c.text ?? '').join('') : null;
+        const duplicate = completedMessage?.kind === 'message' && completedMessage.text === message ? completedMessage : undefined;
+        const match = duplicate ?? nativeEvents.find(event => event.seq >= nextSeq && event.kind === 'message' && event.role === 'assistant' && event.text === message);
+        place(match);
+        responseMessage = duplicate ? undefined : match;
+        completedMessage = undefined;
+      }
       if (e.type === 'event_msg' && p?.type === 'item_completed') {
         const item = p.item;
         if (item?.type === 'AgentMessage' || item?.type === 'McpToolCall') {
           const message = Array.isArray(item.content) ? item.content.map((c: { text?: string } | null) => c?.text ?? '').join('') : null;
-          const match = nativeEvents.find(event => event.seq >= nextSeq && (item.type === 'AgentMessage'
+          const duplicate = item.type === 'AgentMessage' && responseMessage?.kind === 'message' && responseMessage.text === message ? responseMessage : undefined;
+          const match = duplicate ?? nativeEvents.find(event => event.seq >= nextSeq && (item.type === 'AgentMessage'
             ? event.kind === 'message' && event.role === 'assistant' && event.text === message
             : event.kind === 'tool-call' && event.server === item.server && event.tool === item.tool && isDeepStrictEqual(event.arguments, item.arguments)));
-          positioned = !!match;
-          if (match) {
-            nextSeq = match.seq + 1;
-            // Resource reads have a derived event immediately after the native tool call.
-            if (nativeEvents.some(event => event.seq === nextSeq && event.kind === 'resource-read')) nextSeq++;
-          }
+          place(match);
+          completedMessage = item.type === 'AgentMessage' && !duplicate ? match : undefined;
+          responseMessage = undefined;
         }
       }
       if (e.type !== 'response_item' || !p) continue;
@@ -80,8 +98,13 @@ export function upgradeRules(upgrade: NonNullable<AttemptRecord['upgrade']>, rol
             if (!Array.isArray(list)) continue;
             const descriptions = list.filter(t => typeof t?.name === 'string' && t.name.startsWith('mcp__wayfinder__') && typeof t.description === 'string')
               .map(t => t.description);
-            if (descriptions.length && positioned) discoveries.push({ fromSeq: nextSeq,
-              text: (discoveries.at(-1)?.text ?? '') + JSON.stringify(descriptions) + '\n' });
+            if (descriptions.length) {
+              // A later anchor cannot prove that the first exposure happened later.
+              // Keep prior proven knowledge, but do not fill gaps from rediscovery.
+              if (!positioned) unpositionedDiscovery = true;
+              if (!unpositionedDiscovery) discoveries.push({ fromSeq: nextSeq,
+                text: (discoveries.at(-1)?.text ?? '') + JSON.stringify(descriptions) + '\n' });
+            }
           } catch { /* Non-JSON exec output does not expose tool definitions. */ }
         }
       }
@@ -89,46 +112,60 @@ export function upgradeRules(upgrade: NonNullable<AttemptRecord['upgrade']>, rol
     } catch { /* Missing native channel remains unknown. */ }
   }
   const phase = (contract: typeof before, seq: number, initial: boolean): GivenRules => {
-    const instructionDiscovery = discoveries.find(d => shown(channels.instructions + d.text, contract.instructions));
-    const toolDiscovery = discoveries.find(d => Object.values(contract.toolDescriptions).every(text => shown(channels.tools + d.text, text)));
-    const nativeInstructions = shown(channels.instructions, contract.instructions);
+    const instructionDiscovery = discoveries.find(d => d.fromSeq <= seq && shown(channels.instructions + d.text, contract.instructions));
+    const toolDiscovery = discoveries.find(d => d.fromSeq <= seq && Object.values(contract.toolDescriptions).every(text => shown(channels.tools + d.text, text)));
     const nativeTools = Object.values(contract.toolDescriptions).every(d => shown(channels.tools, d));
     const rules = initialRules(contract.version, contract.instructions, contract.toolDescriptions,
       rollout && { ...rollout, text: channels.instructions + (instructionDiscovery?.text ?? '') });
     rules.toolDescriptions = rollout && (nativeTools || toolDiscovery)
       ? { known: true, value: contract.toolDescriptions } : { known: false, reason: 'tool descriptions not found in native additional_tools or code-mode discovery' };
-    const exposedAt = Math.max(seq, nativeInstructions ? seq : instructionDiscovery?.fromSeq ?? seq, nativeTools ? seq : toolDiscovery?.fromSeq ?? seq);
+    if (unpositionedDiscovery) {
+      const reason = 'unpositioned Wayfinder discovery: its first exposure cannot be established from native Events';
+      if (!rules.instructions.known) rules.instructions = { known: false, reason };
+      if (!rules.toolDescriptions.known) rules.toolDescriptions = { known: false, reason };
+    }
     const tools = log.flatMap(e => {
       if (e.turn !== turn || e.phase !== 'response' || e.method !== 'tools/list' || e.status !== 200) return [];
       try { const list = (rpcReply(e.body, e.requestId)?.result as { tools?: unknown[] } | undefined)?.tools; return Array.isArray(list) ? [list] : []; } catch { return []; }
     }).find(list => list.every(t => t !== null && typeof t === 'object' && 'name' in t && typeof t.name === 'string'
       && 'description' in t && t.description === contract.toolDescriptions[t.name]));
-    return { ...rules, session, turn, fromSeq: exposedAt, phase: initial ? 'initial' : 'after-restart', serviceVersion: contract.version,
+    return { ...rules, session, turn, fromSeq: seq, phase: initial ? 'initial' : 'after-restart', serviceVersion: contract.version,
       resources: 'available', toolDefinitions: tools ? { known: true, value: tools } : { known: false, reason: 'No matching tools/list response in this native turn' } };
   };
+  const phases = (contract: typeof before, seq: number, initial: boolean): GivenRules[] => {
+    // Instructions can be visible in the first batch before the complete tool set arrives.
+    // Emit each knowledge change instead of delaying both channels to the last discovery.
+    const instructionSeq = shown(channels.instructions, contract.instructions) ? seq
+      : discoveries.find(d => shown(channels.instructions + d.text, contract.instructions))?.fromSeq;
+    const toolSeq = Object.values(contract.toolDescriptions).every(d => shown(channels.tools, d)) ? seq
+      : discoveries.find(d => Object.values(contract.toolDescriptions).every(text => shown(channels.tools + d.text, text)))?.fromSeq;
+    const boundaries = [...new Set([instructionSeq, toolSeq].filter((n): n is number => n !== undefined).map(n => Math.max(seq, n)))];
+    return (boundaries.length ? boundaries.sort((a, b) => a - b) : [seq]).map(n => phase(contract, n, initial));
+  };
   const result: GivenRules[] = [];
-  if (restart === undefined || restart >= fromSeq) result.push(phase(before, fromSeq, true));
+  if (restart === undefined || restart >= fromSeq) result.push(...phases(before, fromSeq, true));
   if (restart !== undefined) {
-    const fresh = phase(after, Math.max(fromSeq, restart), false);
+    const fresh = phases(after, Math.max(fromSeq, restart), false);
     // In-process Codex can retain the original instructions and tools even though the service reinitialized.
     // Preserve exactly that exposure until a successful Resource read, rather than claiming a refresh.
-    if (!fresh.instructions.known && upgrade.mode === 'process') {
-      const retained = phase(before, fresh.fromSeq, false);
-      retained.serviceVersion = after.version;
-      result.push(retained);
-    } else result.push(fresh);
+    if (!fresh.some(g => g.instructions.known) && upgrade.mode === 'process') {
+      result.push(...phases(before, Math.max(fromSeq, restart), false).map(g => ({ ...g, serviceVersion: after.version })));
+    } else result.push(...fresh);
     const read = events.find(e => e.kind === 'resource-read' && e.actor === 'agent' && e.session === session && e.turn === turn
       && e.seq > restart && e.ok && e.uri === 'wayfinder://workflow/exploration');
     const delivered = log.some(e => e.turn === turn && e.phase === 'response' && e.method === 'resources/read' && e.status === 200
       && resourceText(e.body, e.requestId) === currentResource);
     if (read) {
       const exposed = delivered && rollout && shown(channels.outputs, currentResource);
-      result.push({ ...result.at(-1)!, fromSeq: read.seq,
+      const current = phase(after, read.seq, false);
+      const atRead = !current.instructions.known && upgrade.mode === 'process'
+        ? { ...phase(before, read.seq, false), serviceVersion: after.version } : current;
+      result.push({ ...atRead,
         rulesSource: exposed ? { kind: 'resource', uri: 'wayfinder://workflow/exploration', versionLine: `version: ${after.version}` } : { kind: 'unknown', reason: 'Resource reply not corroborated by wire and native output' },
         resourceText: exposed ? { known: true, value: currentResource } : { known: false, reason: 'Successful read recorded, but its current rules text is missing' } });
     }
   }
-  return result;
+  return result.sort((a, b) => a.fromSeq - b.fromSeq);
 }
 
 export function resourceText(body: string, requestId?: unknown): string | null {
