@@ -159,6 +159,18 @@ function refuse(response: ServerResponse, status: number, error: string) {
   response.end(body);
 }
 
+async function refuseOversizedAnswer(request: IncomingMessage, response: ServerResponse) {
+  const body = Buffer.from(JSON.stringify({ error: 'request_too_large' }));
+  response.writeHead(413, { ...securityHeaders, 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': body.length, Connection: 'close' });
+  response.flushHeaders();
+  // Let the uploader consume the explicit refusal rather than resetting its socket.
+  // Discard excess bytes without accumulating or parsing them, as on the MCP route.
+  try {
+    for await (const _chunk of request.iterator({ destroyOnReturn: false })) { /* Discard. */ }
+  } catch { /* A disconnected uploader may no longer receive the refusal. */ }
+  if (!response.destroyed) response.end(body);
+}
+
 // The single write route has no query syntax, CORS preflight, or cookie authority.
 async function answerRoute(request: IncomingMessage, response: ServerResponse, storage: SQLiteStorage, host: string, key: ViewerKey) {
   if (request.method !== 'POST') {
@@ -172,13 +184,13 @@ async function answerRoute(request: IncomingMessage, response: ServerResponse, s
   if (!key.accepts(request.headers['x-wayfinder-key'])) return refuse(response, 403, 'key_required');
   if (!/^application\/json(?:;\s*charset=utf-8)?$/i.test(request.headers['content-type'] ?? '')) return refuse(response, 415, 'json_required');
   const limit = 1_048_576;
-  if (Number(request.headers['content-length']) > limit) return refuse(response, 413, 'request_too_large');
+  if (Number(request.headers['content-length']) > limit) return refuseOversizedAnswer(request, response);
   let input: unknown;
   try {
     const chunks: Buffer[] = []; let bytes = 0;
     for await (const chunk of request.iterator({ destroyOnReturn: false })) {
       bytes += chunk.length;
-      if (bytes > limit) return refuse(response, 413, 'request_too_large');
+      if (bytes > limit) return refuseOversizedAnswer(request, response);
       chunks.push(chunk);
     }
     input = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));

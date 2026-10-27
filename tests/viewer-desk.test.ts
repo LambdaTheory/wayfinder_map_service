@@ -48,7 +48,7 @@ async function fixture(enabled?: boolean) {
   function http(path: string, method = 'GET', value?: unknown, headers: Record<string, string> = {}) {
     const body = value === undefined ? '' : typeof value === 'string' ? value : JSON.stringify(value);
     return new Promise<{status: number; body: string; headers: Record<string, unknown>; json: () => any}>((resolve, reject) => {
-      const req = request({ hostname: '127.0.0.1', port, path, method, headers: { ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}), ...headers } }, res => {
+      const req = request({ hostname: '127.0.0.1', port, path, method, headers: { ...(body && !headers['Transfer-Encoding'] ? { 'Content-Length': Buffer.byteLength(body) } : {}), ...headers } }, res => {
         let text = ''; res.setEncoding('utf8'); res.on('data', s => text += s); res.on('end', () => resolve({ status: res.statusCode!, body: text, headers: res.headers, json: () => JSON.parse(text) }));
       }); req.on('error', reject); req.end(body);
     });
@@ -94,7 +94,10 @@ test('one keyed entry: no token substitution, query keys, cross-origin, Host, un
   expect((await f.write(value, { 'Content-Type': 'text/plain' })).status).toBe(415);
   expect((await f.write('{')).status).toBe(400);
   expect((await f.write(f.answer('A', { text: ' \n ' }))).status).toBe(400);
-  expect((await f.write(' '.repeat(1_048_577))).status).toBe(413);
+  for (const headers of [{}, { 'Transfer-Encoding': 'chunked' }]) {
+    const refused = await f.write(' '.repeat(1_048_577), headers);
+    expect(refused.status).toBe(413); expect(refused.json()).toEqual({ error: 'request_too_large' });
+  }
   expect(await f.history()).toEqual(before); expect(f.storage.desk.read(mapId).answers).toEqual([]);
   const result = await f.write(value); expect(result.status).toBe(200);
   expect(result.headers).toMatchObject({ 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'cross-origin-resource-policy': 'same-origin' });

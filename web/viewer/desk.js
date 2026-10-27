@@ -9,15 +9,20 @@ export function createDesk({ h, mapId, key, refresh }) {
   const live = q => ['pending', 'answered', 'taken'].includes(q.state);
   const identity = q => `${q.questionId}/${q.questionVersion}`;
   const choiceText = choice => !choice ? '尚未回答' : 'text' in choice ? choice.text : `${choice.option}. ${choice.label}`;
-  let data = null, fingerprint = '', active = null, busy = false, editor = null;
+  let data = null, fingerprint = '', active = null, changedQuestion = null, busy = false, editor = null;
   const selected = new Set();
   const button = (label, fn, props = {}) => {
     const b = h('button', { type: 'button', ...props }, label); b.onclick = fn; return b;
   };
-  const canWrite = () => !!key && !busy;
+  const canWrite = () => !!key && !busy && !changedQuestion;
   const notice = message => { status.textContent = message; };
   const title = q => h('span', null, h('code', null, q.ticketId), ` · 第 ${q.questionVersion} 版`);
   const answer = (q, choice) => ({ questionId: q.questionId, questionVersion: q.questionVersion, choice });
+  function chooseQuestion(q) {
+    changedQuestion = null; active = q ? identity(q) : null; render();
+    const card = content.querySelector('.desk-question');
+    card.focus(); card.scrollIntoView({ block: 'nearest' });
+  }
   function closeEditor() { editor = null; dialog.close(); dialog.replaceChildren(); }
   dialog.addEventListener('cancel', event => { event.preventDefault(); if (!busy) closeEditor(); });
 
@@ -124,7 +129,12 @@ export function createDesk({ h, mapId, key, refresh }) {
     }
   }
   function questionCard(q) {
-    if (!q) return h('article', { class: 'desk-question card-box' }, h('h2', null, '当前没有待答题'), h('p', { class: 'desk-muted' }, 'agent 发布新题后会出现在这里。已答题的处理进度在下方。'));
+    if (changedQuestion) return h('article', { class: 'desk-question card-box', role: 'alert' },
+      title(changedQuestion), h('h2', null, '问题已变，请重新选择题目后再回答。'),
+      h('p', null, `刚才查看：${changedQuestion.question}`),
+      h('p', null, '这道题已撤回、替换或结算。答复已暂停；请重新选题，或确认后查看当前题目。'),
+      button('已了解，查看当前题目', () => chooseQuestion(data.deskQuestions.find(q => q.state === 'pending'))));
+    if (!q) return h('article', { class: 'desk-question card-box', tabindex: '-1' }, h('h2', null, '当前没有待答题'), h('p', { class: 'desk-muted' }, 'agent 发布新题后会出现在这里。已答题的处理进度在下方。'));
     const context = data.reopenContexts.find(c => c.ticketId === q.ticketId);
     return h('article', { class: 'desk-question card-box', tabindex: '-1' }, title(q), h('h2', null, q.question),
       h('p', { class: 'desk-impact' }, `解锁 ${q.immediateUnlocks} 题 · 下游未定 ${q.downstreamUnsettled} 题${q.gatesResearch ? ' · 决定是否开展长调研' : ''}`),
@@ -144,7 +154,7 @@ export function createDesk({ h, mapId, key, refresh }) {
   function render() {
     if (!data) return;
     const pending = data.deskQuestions.filter(q => q.state === 'pending');
-    const current = data.deskQuestions.find(q => identity(q) === active && live(q)) ?? pending[0];
+    const current = changedQuestion ? null : data.deskQuestions.find(q => identity(q) === active && live(q)) ?? pending[0];
     active = current ? identity(current) : null;
     for (const id of selected) if (!pending.some(q => identity(q) === id && q.triage === 'followRecommendation')) selected.delete(id);
     const queue = h('nav', { class: 'desk-queue card-box', 'aria-label': '待答题' }, h('h2', null, `待答 · ${pending.length}`));
@@ -153,7 +163,7 @@ export function createDesk({ h, mapId, key, refresh }) {
       const nextGroup = q.immediateUnlocks > 0 || q.gatesResearch ? '先答能解锁的' : q.triage === 'needsKun' ? '需要你看' : '照推荐即可';
       if (nextGroup !== group) { queue.append(h('h3', null, nextGroup)); group = nextGroup; }
       queue.append(button([h('strong', null, q.question), h('span', null, `${q.ticketId} · 解锁 ${q.immediateUnlocks} · 下游 ${q.downstreamUnsettled}`)],
-        () => { active = identity(q); render(); }, { class: 'desk-queue-item', 'aria-current': identity(q) === active ? 'true' : 'false' }));
+        () => chooseQuestion(q), { class: 'desk-queue-item', 'aria-current': identity(q) === active ? 'true' : 'false' }));
     }
     const easy = pending.filter(q => q.triage === 'followRecommendation');
     const bulk = h('details', { class: 'desk-bulk card-box' }, h('summary', null, `批量确认推荐 · ${easy.length} 题`));
@@ -168,7 +178,7 @@ export function createDesk({ h, mapId, key, refresh }) {
       const row = h('article', { class: `desk-answer card-box ${q.state}` }, title(q), h('h3', null, q.state === 'withdrawn' ? h('s', null, q.question) : q.question),
         h('p', { class: 'desk-state' }, names[q.state]), q.withdrawnReason && h('p', null, `撤回原因：${q.withdrawnReason}`),
         q.currentAnswer && h('p', { class: 'desk-full-answer' }, choiceText(q.currentAnswer.choice)),
-        live(q) && button('修改答复', () => { active = identity(q); render(); content.querySelector('.desk-question').scrollIntoView({ block: 'nearest' }); }, { disabled: !canWrite() }));
+        live(q) && button('修改答复', () => chooseQuestion(q), { disabled: !key || busy }));
       if (q.answerHistory.length) row.append(h('details', null, h('summary', null, `答复记录 · ${q.answerHistory.length}`), q.answerHistory.map(a =>
         h('p', { class: 'desk-full-answer' }, `${a.stale ? '旧答复（已失效）' : '当前答复'}：${choiceText(a.choice)}`))));
       history.append(row);
@@ -191,9 +201,7 @@ export function createDesk({ h, mapId, key, refresh }) {
   }
   const keydown = event => {
     if (element.hidden || dialog.open || !canWrite() || event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey
-      || event.target.closest('input,textarea,select,a,summary,[contenteditable]')) return;
-    const control = event.target.closest('button');
-    if (control && !control.closest('.desk-question,.desk-queue')) return;
+      || event.target.closest('button,input,textarea,select,a,summary,[contenteditable],[role="button"],[role="link"]')) return;
     const q = data?.deskQuestions.find(q => identity(q) === active && live(q)); if (!q) return;
     const option = event.key === 'Enter' ? q.recommendedOption : /^[1-3]$/.test(event.key) ? Number(event.key) : null;
     if (option && q.options[option - 1]) { event.preventDefault(); submit(q, { option }); }
@@ -202,6 +210,11 @@ export function createDesk({ h, mapId, key, refresh }) {
   document.addEventListener('keydown', keydown);
   return { element, destroy() { closeEditor(); element.remove(); document.removeEventListener('keydown', keydown); }, update(next) {
     if (!next) return;
+    // Polling must never silently move a pending keystroke onto a different publication.
+    // Keep the interruption across subsequent polls, including when no pending question remains.
+    if (active && !next.deskQuestions.some(q => identity(q) === active && live(q))) {
+      changedQuestion = data.deskQuestions.find(q => identity(q) === active); active = null;
+    }
     data = next; const nextFingerprint = JSON.stringify(next);
     if (fingerprint !== nextFingerprint) { fingerprint = nextFingerprint; render(); updateEditor(); }
   } };

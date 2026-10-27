@@ -30,7 +30,7 @@ const settle = (id, answer) => ({ kind: 'ticket.settle', ticketId: id, claimantI
   settlement: { outcome: { kind: 'decision', statement: '使用合成数据完成首轮验证', rationale: '范围已确认' }, evidence: [], references: [], provenance: { method: 'synthetic fixture', sources: [] }, extensions: {} },
   ...(answer ? { deskAnswer: { answerId: answer.answerId, questionVersion: answer.questionVersion } } : {}),
 });
-async function apply(commands, reopenRequestId) {
+async function apply(commands, reopenRequestId, mapId = 'Synthetic.AnswerDesk') {
   const { value: state } = await storage.adapter.readCurrent(mapId);
   const p = prepareApply(state, { mapId, expectedRevision: state.currentRevision, commands, author, ...(reopenRequestId ? { reopenRequestId } : {}) }, storage.desk.read(mapId));
   assert.equal(p.kind, 'prepared', JSON.stringify(p));
@@ -42,7 +42,93 @@ const free = createServer(); await new Promise(r => free.listen(0, '127.0.0.1', 
 assert(![18765, 18766].includes(port));
 const keyPath = join(directory, 'private', 'browser-key');
 const config = { databasePath, port, token: 'synthetic-browser-test-mcp-token-only', actorId: 'synthetic', clientId: 'browser-test', answerDeskEnabled: true, answerDeskKeyPath: keyPath };
-const output = resolve('docs/implementation/answer-desk-viewer'); mkdirSync(output, { recursive: true });
+const output = resolve(process.env.WAYFINDER_BROWSER_EVIDENCE_DIR ?? 'docs/implementation/answer-desk-viewer'); mkdirSync(output, { recursive: true });
+async function tabTo(page, control) {
+  // Exercise native focus traversal, not locator.focus() or a synthetic key event.
+  for (let i = 0; i < 60; i++) {
+    await page.keyboard.press('Tab');
+    if (await control.evaluate(node => node === document.activeElement)) return;
+  }
+  assert.fail('Tab did not reach the requested control');
+}
+async function verifyFocusAndChangedQuestions(context, origin, key) {
+  const id = 'Synthetic.Keyboard';
+  const created = prepareCreate({ id, title: 'Keyboard regression', destination: 'No unintended answers', author });
+  assert.equal(created.kind, 'ok'); await storage.adapter.commit(created.value);
+  const mutate = commands => apply(commands, undefined, id);
+  const count = () => storage.desk.read(id).answers.length;
+  const questions = () => storage.desk.inspect(id).desk.deskQuestions;
+  const posted = name => post(name, 'One', 'needsKun', { options: [
+    { label: 'One', description: 'First' }, { label: 'Two', description: 'Second' }, { label: 'Three', description: 'Third' },
+  ] });
+  const withdraw = name => ({ kind: 'deskQuestion.withdraw', ticketId: name, claimantId: 'synthetic-worker', questionId: `Q.${name}`, questionVersion: 1, reason: 'Changed premise' });
+  await mutate(['A', 'B', 'C'].flatMap(name => [create(name, name, `Question ${name}?`), claim(name), posted(name)]));
+  const page = await context.newPage(); page.setDefaultTimeout(10000);
+  let writes = 0;
+  page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/desk')) writes++; });
+  const queue = name => page.locator('.desk-queue-item').filter({ hasText: `Question ${name}?` });
+  const bodyKey = async key => { await page.locator('body').click({ position: { x: 2, y: 2 } }); await page.keyboard.press(key); };
+  const expectCard = name => page.locator('.desk-question h2').getByText(`Question ${name}?`, { exact: true }).waitFor();
+  try {
+    await page.goto(`${origin}/maps/${id}#key=${key}`); await expectCard('A');
+    await tabTo(page, queue('B')); await page.keyboard.press('Enter'); await expectCard('B');
+    assert.equal(count(), 0); assert.equal(writes, 0);
+    await tabTo(page, page.getByRole('button', { name: '写文字答复 · t' })); await page.keyboard.press('Enter');
+    await page.getByRole('textbox', { name: '文字答复', exact: true }).waitFor();
+    assert.equal(count(), 0); assert.equal(writes, 0);
+    await tabTo(page, page.getByRole('button', { name: '取消', exact: true })); await page.keyboard.press('Enter');
+    assert.equal(await page.locator('dialog[open]').count(), 0);
+    await tabTo(page, page.locator('.desk-question .desk-option').nth(1));
+    await page.keyboard.press('1'); await page.keyboard.press('t');
+    assert.equal(count(), 0); assert.equal(writes, 0); assert.equal(await page.locator('dialog[open]').count(), 0);
+    await page.keyboard.press('Enter'); await expectCard('A');
+    assert.equal(questions().find(q => q.ticketId === 'B').currentAnswer.choice.option, 2);
+    await tabTo(page, page.locator('.desk-question .desk-option').nth(2)); await page.keyboard.press('Enter'); await expectCard('C');
+    assert.equal(questions().find(q => q.ticketId === 'A').currentAnswer.choice.option, 3);
+    await bodyKey('Enter'); await page.locator('.desk-summary').getByText(/已答 3/).waitFor();
+    assert.equal(questions().find(q => q.ticketId === 'C').currentAnswer.choice.option, 1);
+
+    // Replacement keeps the old reading context until a deliberate new selection.
+    await mutate(['D', 'E'].flatMap(name => [create(name, name, `Question ${name}?`), claim(name), posted(name)]));
+    await expectCard('D');
+    const replacement = posted('D'); replacement.question.options.reverse();
+    await mutate([withdraw('D'), replacement]);
+    const interrupted = page.getByRole('heading', { name: '问题已变，请重新选择题目后再回答。', exact: true });
+    await interrupted.waitFor();
+    const before = count(), beforeWrites = writes;
+    for (const key of ['Enter', '1', '2', '3', 't']) await bodyKey(key);
+    assert.equal(count(), before); assert.equal(writes, beforeWrites);
+    assert.equal(await page.locator('.desk-question .desk-option').count(), 0);
+    assert.equal(await page.locator('dialog[open]').count(), 0);
+    await mutate([{ kind: 'map.update', patch: { title: 'Still awaiting selection' } }]);
+    await page.getByRole('heading', { name: 'Still awaiting selection', exact: true }).waitFor();
+    assert(await interrupted.isVisible());
+    await tabTo(page, queue('D')); await page.keyboard.press('Enter'); await expectCard('D');
+    assert.equal(count(), before); assert.equal(writes, beforeWrites);
+    await bodyKey('1'); await expectCard('E');
+    const latest = questions().find(q => q.ticketId === 'D' && q.questionVersion === 2);
+    assert.equal(latest.currentAnswer.choice.label, 'Three');
+
+    // Withdrawal without a replacement (empty queue) must stay paused when a new question arrives.
+    await mutate([withdraw('E')]); await interrupted.waitFor();
+    await mutate([create('F', 'F', 'Question F?'), claim('F'), posted('F')]); await queue('F').waitFor();
+    assert(await interrupted.isVisible());
+    await bodyKey('Enter'); assert.equal(count(), before + 1); assert.equal(writes, beforeWrites + 1);
+    await tabTo(page, queue('F')); await page.keyboard.press('Enter'); await expectCard('F');
+    assert.equal(count(), before + 1);
+    await bodyKey('2'); await page.locator('.desk-summary').getByText(/已答 5/).waitFor();
+    // Settlement of the answer being edited also requires deliberate navigation.
+    await page.locator('.desk-answer').filter({ hasText: 'Question B?' }).getByRole('button', { name: '修改答复' }).click();
+    fakeTime += 15000; storage.desk.takeEligible(id, 'synthetic-worker');
+    await mutate([settle('B', questions().find(q => q.ticketId === 'B').currentAnswer)]); await interrupted.waitFor();
+    await bodyKey('Enter'); assert.equal(count(), before + 2); assert.equal(writes, beforeWrites + 2);
+    // Acknowledge with an empty queue so settled-history actions do not stay locked forever.
+    await tabTo(page, page.getByRole('button', { name: '已了解，查看当前题目', exact: true })); await page.keyboard.press('Enter');
+    await page.getByRole('heading', { name: '当前没有待答题', exact: true }).waitFor();
+    assert(await page.getByRole('button', { name: '请求重开', exact: true }).isEnabled());
+    assert.equal(count(), before + 2); assert.equal(writes, beforeWrites + 2);
+  } finally { await page.close(); }
+}
 try {
   const created = prepareCreate({ id: mapId, title: '答题台 · 合成示例', destination: '验证关键选择，形成一份可以执行的计划', author });
   await storage.adapter.commit(created.value);
@@ -71,6 +157,7 @@ try {
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.screenshot({ path: join(output, '375px.png'), fullPage: true });
   await page.setViewportSize({ width: 1280, height: 960 }); await page.waitForTimeout(250);
+  await verifyFocusAndChangedQuestions(context, `http://127.0.0.1:${port}`, key);
   // Viewing and cancelling do nothing; whitespace is disabled; drafts survive desk-only polling.
   await page.locator('.desk-queue-item').filter({ hasText: '第一轮先验证多大范围？' }).click(); await page.keyboard.press('t');
   const text = page.getByRole('textbox', { name: '文字答复', exact: true }); await text.fill('  ');
@@ -138,6 +225,7 @@ try {
   }
   await reopenRequested({ option: 2, label: '一次覆盖全部', questionId: 'Q.Requested', questionVersion: 1 });
   const beforeMarker = answerCount();
+  await page.locator('.desk-queue-item').filter({ hasText: '重开后确认哪个方案？' }).click();
   await page.locator('.desk-requested').getByText('Kun 要求：2 · 推荐：1。标记不是答案，仍需选择。', { exact: true }).waitFor();
   assert.equal(answerCount(), beforeMarker); assert.equal(inspect().deskQuestions.find(q => q.ticketId === 'Requested' && q.questionVersion === 2).currentAnswer, null);
   await page.locator('body').click({ position: { x: 2, y: 2 } }); await page.keyboard.press('Enter');
@@ -146,6 +234,7 @@ try {
   assert.equal(confirmed.choice.option, 1); fakeTime += 15000; storage.desk.takeEligible(mapId, 'synthetic-worker');
   await apply([settle('Requested', confirmed)]);
   await reopenRequested({ text: '先补充成本比较，再给我选择。' });
+  await page.locator('.desk-queue-item').filter({ hasText: '重开后确认哪个方案？' }).click();
   await page.getByText('Kun 要求重开：先补充成本比较，再给我选择。', { exact: true }).waitFor();
   await page.getByRole('button', { name: '写文字答复 · t' }).click(); assert.equal(await text.inputValue(), '');
   await apply([{ kind: 'deskQuestion.withdraw', ticketId: 'Requested', claimantId: 'synthetic-worker', questionId: 'Q.Requested', questionVersion: 3, reason: '新材料改变了问题' }, post('Requested', '小范围验证')]);
@@ -174,7 +263,7 @@ try {
   await page.getByRole('button', { name: '答题台', exact: true }).waitFor({ state: 'detached' });
   assert.equal(await page.locator('.desk').count(), 0);
   assert.equal((await page.request.post(`http://127.0.0.1:${port}/api/desk`, { data: {} })).status(), 404);
-  console.log('Browser evidence passed: light/dark/375px; fragment/storage; keyboard/text/bulk/edit; live polling; stale reopen list; cancellation; Taken/Settled; requested-option marker and text context; restart; disabled UI.');
+  console.log('Browser evidence passed: light/dark/375px; fragment/storage; Tab/Enter queue/text/options; changed-question pause and deliberate selection; keyboard/text/bulk/edit; live polling; stale reopen list; cancellation; Taken/Settled; requested-option marker and text context; restart; disabled UI.');
 } finally {
   await browser?.close(); await service?.stop(); storage.close(); rmSync(directory, { recursive: true, force: true });
 }
