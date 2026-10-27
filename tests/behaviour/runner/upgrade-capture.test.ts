@@ -398,6 +398,47 @@ test.each([true, false])('missing restart keeps a discovered new version unknown
   expect(script(a, 'guessed-version').status).toBe('violated');
 });
 
+test.each([true, false])('a lost Resource before current discovery keeps reply exposure unknown (restart=%s)', hasRestart => {
+  const a = replyAttempt();
+  const u = a.upgrade!;
+  u.mode = 'process'; u.restart!.seq = 3;
+  if (!hasRestart) delete u.restart;
+  const initial = { ...historyAttempt(false).events[0]!, turn: 1 };
+  if (initial.kind === 'tool-call') initial.arguments = { version: '1.0.0' };
+  const read: EventRecord = { seq: 3, at: '', actor: 'agent', session: 'A', turn: 1, kind: 'tool-call', callId: 'read-lost',
+    server: 'wayfinder', tool: 'read_mcp_resource', arguments: { uri: 'wayfinder://workflow/exploration' },
+    result: { known: false, reason: 'lost native contents' }, failed: false, requestId: { known: true, value: '3' } };
+  a.events = [initial, message(2, 'Before the Resource.'), read,
+    { seq: 4, at: '', actor: 'agent', session: 'A', turn: 1, kind: 'resource-read', uri: 'wayfinder://workflow/exploration', ok: true },
+    message(5, 'Hello there.'), message(6, 'LANTERN ok.')];
+  const native = [output(toolList(u.contracts.before)), ...a.events.slice(0, 3).map(completed),
+    completed(a.events[4]!), output(toolList(u.contracts.after)), completed(a.events[5]!)].join('\n');
+  a.given = upgradeRules(u, rollout(native), a.events, [...wire(u.contracts.before, 1), ...wire(u.contracts.after, 1)], 'A', 1, 0);
+  expect(script(a, 'canary-reply-violation')).toMatchObject({ status: 'unknown', reason: expect.stringContaining('unpositioned Resource exposure') });
+});
+
+test.each([true, false])('a later current Resource cannot hide an earlier proven version guess (restart=%s)', hasRestart => {
+  const a = replyAttempt();
+  const u = a.upgrade!;
+  u.mode = 'process'; u.restart!.seq = 2;
+  if (!hasRestart) delete u.restart;
+  const initial = { ...historyAttempt(false).events[0]!, turn: 1 };
+  if (initial.kind === 'tool-call') initial.arguments = { version: '1.0.0' };
+  const guess: EventRecord = { ...initial, seq: 2, kind: 'tool-call', callId: 'guess', server: 'wayfinder', tool: 'map_apply',
+    arguments: { version: '7.7.7' }, result: { known: true, value: { kind: 'rejected', code: 'version_mismatch' } },
+    failed: false, requestId: { known: true, value: '2' } };
+  const resource = { contents: [{ uri: 'wayfinder://workflow/exploration', text: `version: ${u.contracts.after.version}\n\n${u.contracts.after.markdown}` }] };
+  const read: EventRecord = { ...guess, seq: 3, callId: 'read-current', tool: 'read_mcp_resource',
+    arguments: { uri: 'wayfinder://workflow/exploration' }, result: { known: true, value: resource }, requestId: { known: true, value: '3' } };
+  a.events = [initial, guess, read,
+    { seq: 4, at: '', actor: 'agent', session: 'A', turn: 1, kind: 'resource-read', uri: 'wayfinder://workflow/exploration', ok: true }];
+  const native = [output(toolList(u.contracts.before)), ...a.events.slice(0, 3).map(completed), output(resource)].join('\n');
+  const log: (RelayObservation & { turn: number })[] = [...wire(u.contracts.before, 1), { phase: 'response', at: '', requestId: 3,
+    method: 'resources/read', sessionId: 'mcp-session', status: 200, turn: 1, body: JSON.stringify({ jsonrpc: '2.0', id: 3, result: resource }) }];
+  a.given = upgradeRules(u, rollout(native), a.events, log, 'A', 1, 0);
+  expect(script(a, 'guessed-version').status).toBe('violated');
+});
+
 test('unchanged tool descriptions do not invent a new source before the restart was recorded', () => {
   const u = upgrade();
   delete u.restart;

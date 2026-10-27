@@ -332,3 +332,47 @@ no skipped tests or timeout override), `npm run typecheck` and
 `git diff --check` pass. The final full run uses the same code and tests as the
 isolated privacy rerun. No real client, model, Batch, tunnel, everyday service
 or real database was used.
+
+## Fifth-review repair: missing restart preserves both uncertainty and proof
+
+Addressed [Claude independent re-review 3](https://github.com/kun-g/wayfinder_map_service/pull/147#issuecomment-6448351035).
+Merged `origin/main` at `93871ee` (Release Version 5.0.0) without conflicts before
+the repair. This round changes only the upgrade extractor, its synthetic
+regressions and this record; it adds no Release Version change. The verdict
+criteria, Scenario definitions and `normalize.ts` are unchanged by this repair.
+
+Without a restart record, a Resource read is excluded only when its native
+contents are known to differ from the current Resource. Missing contents remain
+an unknown exposure at that read, exactly as with a recorded restart. The same
+path now creates a fresh metadata phase only at an actual discovery or the
+start of an unpositioned interval. A later Resource read no longer creates an
+empty phase at turn start that hides the earlier visible old rules.
+
+Both required regressions ran before the repair: **2 failed / 49 passed**,
+including both passing recorded-restart controls. After repair all **51 capture
+tests pass**.
+
+| Missing-restart regression | Before | After | Recorded-restart control |
+| --- | --- | --- | --- |
+| R4-A: lost Resource, plain reply, current discovery, compliant reply | `canary-reply-violation=holds` | `unknown`, Resource exposure reason retained | `unknown` |
+| R4-C: visible old rules, refused 7.7.7 guess, proven current Resource | `guessed-version=unknown` | `violated` | `violated` |
+
+Both independent Codex reproduction scripts still pass **6/6**. The existing
+fixed regressions for Claude's earlier findings also remain in the passing
+capture suite. The coordinator confirmed these are the retained coverage for
+the earlier 13 probes; their standalone scripts were not retained.
+
+The fifth B02c replay uses a new private copy and no model. All four reconstructed
+Attempts, including `given` and `missing`, equal the third replay, as do the
+complete report and the engine-only report. Both cells remain
+`insufficient-evidence`: resume-1 still lacks native rediscovery and all four
+Attempts still need independent `mismatch-as-outage` readings. The original
+**37/37** file hashes match the earlier manifest and this replay's before/after
+manifests; their SHA-256 remains
+`d1d0981952d7759a7d1a91a2681f55e245ea2b69c7a93ade0de4aaf6ec4d1e14`.
+
+Final validation on Node **26.3.0**: `npm run build`,
+`npm test -- --maxWorkers=4` (**58 files / 2480 tests passed**, 209.53 seconds,
+no skips or timeout override), `npm run typecheck` and `git diff --check` pass.
+No real model, client, Batch, tunnel, everyday service or real database was used;
+ports 18765/18766 were untouched. The PR remains unmerged.

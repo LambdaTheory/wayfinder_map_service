@@ -132,7 +132,9 @@ export function upgradeRules(upgrade: NonNullable<AttemptRecord['upgrade']>, rol
     // start is unknown. That interval remains a separate phase with its reason.
     if (unpositionedDiscovery && (!initial || restart === undefined || unpositionedFromSeq < restart))
       boundaries.push(Math.max(seq, unpositionedFromSeq));
-    return (boundaries.length ? [...new Set(boundaries)].sort((a, b) => a - b) : [seq])
+    // Without a restart, only a discovery or an unplaced interval starts a refresh.
+    // A later Resource read must not insert an empty phase over earlier visible rules.
+    return (boundaries.length ? [...new Set(boundaries)].sort((a, b) => a - b) : initial || restart !== undefined ? [seq] : [])
       .filter(n => !initial || restart === undefined || n < restart).map(n => phase(contract, n, initial));
   };
   const result: GivenRules[] = [];
@@ -143,10 +145,11 @@ export function upgradeRules(upgrade: NonNullable<AttemptRecord['upgrade']>, rol
     // The normalizer derives each Resource Event immediately from its own call.
     const call = nativeEvents.find(e => e.seq === read.seq - 1 && e.kind === 'tool-call' && !e.failed
       && e.server === 'wayfinder' && ['read_mcp_resource', 'read_resource', 'resources/read'].includes(e.tool));
-    const native = call?.kind === 'tool-call' && call.result.known
-      && resourceText(JSON.stringify({ jsonrpc: '2.0', id: 0, result: call.result.value }), 0) === currentResource;
-    return { read, call, native };
-  }).filter(r => restart !== undefined || r.native);
+    const contents = call?.kind === 'tool-call' && call.result.known
+      ? resourceText(JSON.stringify({ jsonrpc: '2.0', id: 0, result: call.result.value }), 0) : null;
+    return { read, call, native: contents === currentResource, contents };
+    // Known old contents cannot expose current rules; lost contents leave that exposure unknown.
+  }).filter(r => restart !== undefined || r.contents === null || r.native);
   // Native sources still exist when the restart record is lost. Keep their own
   // exposure positions as refreshes; checks must not infer a service restart.
   const discoveredCurrent = discoveries.some(d => shown(d.instructions, after.instructions)
