@@ -80,6 +80,15 @@ test('upgrade selection is separate and cannot silently switch harness or mix ca
 });
 
 describe.skipIf(spawnSync('which', ['sandbox-exec']).status !== 0)('owned upgrade through the real shared sandbox, fake native driver only', () => {
+  test.each(['U-codex-process', 'U-codex-resume'])('code-mode discovery and snapshot commits pass in %s', async mode => {
+    const { record: a } = await run(`code-mode-${mode}`, mode, 'fake-upgrade-code-mode');
+    expect(a.run.completeness).toBe('complete');
+    expect(a.missing).toEqual([]);
+    expect(a.events.filter(e => e.kind === 'tool-call' && e.result.known && classifyResult(e.result.value) === 'committed'))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ result: { known: true, value: expect.objectContaining({ revision: expect.objectContaining({ mapId: 'Upgrade.Probe', revision: 2 }) }) } })]));
+    expect(scripts(a)).toMatchObject({ 'exact-history': 'holds', 'upgrade-evidence': 'holds' });
+    expect(reviewedVerdict(a).outcome).toBe('pass');
+  }, 60_000);
   test.each(['U-codex-process', 'U-codex-resume'])('text-only Resource recovery passes in %s', async mode => {
     const { record: a } = await run(`text-recovery-${mode}`, mode, 'fake-upgrade-text-resource');
     expect(a.run.completeness).toBe('complete');

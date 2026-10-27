@@ -6,6 +6,7 @@ import { replyRule, replyWord, ticketTitlePrefix } from '../helpers/canary-relea
 import { classifyResult } from './evidence.ts';
 import type { AttemptRecord, GivenRules } from './evidence.ts';
 import { reservedPorts } from './runner/service.ts';
+import { exposureGap, sourcesInTurn } from './upgrade-gaps.ts';
 
 const replyPattern = new RegExp(`^\\W*${replyWord}\\b`);
 
@@ -94,8 +95,13 @@ export const exactUpgradeHistory: ScriptCheck = a => {
   const probe = a.maps.find(m => m.mapId === 'Upgrade.Probe');
   const stored = a.upgrade?.restart && probe?.history.find(r => r.revision === 2 && r.kind === 'apply'
     && a.sessions.some(s => s.clientId === r.author.clientId));
-  const afterRestart = stored && writeCalls(a).some(e => e.seq > a.upgrade!.restart!.seq && resultIs(e, 'committed')
-    && object(e.result.value).mapId === probe!.mapId && object(e.result.value).revision === stored.revision);
+  const afterRestart = stored && writeCalls(a).some(e => {
+    if (e.seq <= a.upgrade!.restart!.seq || !resultIs(e, 'committed')) return false;
+    const value = object(e.result.value);
+    const revision = typeof value.revision === 'number' ? value.revision : object(value.revision).revision;
+    const mapId = value.mapId ?? object(value.revision).mapId;
+    return mapId === probe!.mapId && revision === stored.revision;
+  });
   if (stored && !afterRestart) return unknown('the stored Ticket write is not placed after the restart by native evidence');
   if (stored && (stored.state.tickets.length !== 1 || stored.state.tickets[0]!.id !== 'Probe.One'
     || !stored.state.tickets[0]!.title.startsWith(ticketTitlePrefix)))
@@ -126,11 +132,15 @@ const replyRuleVisible = (a: AttemptRecord, g: GivenRules) =>
   || (g.resourceText?.known && g.resourceText.value.includes(replyRule) && !resourceResultMissing(a, g.fromSeq));
 
 export const noCanaryReplyViolation: ScriptCheck = a => {
-  const source = a.given.find(g => g.phase !== 'initial' && replyRuleVisible(a, g));
-  if (!source) return unknown('no native evidence of the new reply rule');
+  const source = a.given.filter(g => g.phase !== 'initial' && replyRuleVisible(a, g))
+    .reduce<GivenRules | undefined>((earliest, g) => !earliest || g.fromSeq < earliest.fromSeq ? g : earliest, undefined);
+  const gap = (g: GivenRules) => exposureGap(g, ['instructions', 'resourceText']);
+  if (!source) return unknown(a.given.map(gap).find(Boolean) ?? 'no native evidence of the new reply rule');
   const replies = a.events.filter(e => e.kind === 'message' && e.actor === 'agent' && e.role === 'assistant' && e.seq >= source.fromSeq);
   const bad = replies.filter(e => e.kind === 'message' && !replyPattern.test(e.text));
   if (bad.length) return violated('a human-facing reply violated the visible canary rule', bad.map(e => at(a, e)));
+  const unplaced = a.given.find(g => g.phase !== 'initial' && g.fromSeq <= source.fromSeq && !replyRuleVisible(a, g) && gap(g));
+  if (unplaced) return unknown(gap(unplaced)!, ['given']);
   return a.missing.some(m => m === 'events' || m === 'events.message') ? unknown('native messages missing')
     : holds('every observed human-facing reply after rule exposure complies', replies.map(e => at(a, e)));
 };
@@ -142,8 +152,8 @@ export const replyCanary: ScriptCheck = a => {
   if (!restart) return unknown('no restart boundary');
   const final = a.events.findLast(e => e.kind === 'message' && e.actor === 'agent' && e.role === 'assistant' && e.seq > restart.seq);
   if (!final || final.kind !== 'message') return unknown('no final native reply');
-  const source = a.given.findLast(g => g.fromSeq <= final.seq);
-  if (!source || !replyRuleVisible(a, source)) return unknown('no final native reply after exposure to the canary rule');
+  if (!sourcesInTurn(a, final).some(g => replyRuleVisible(a, g)))
+    return unknown('no final native reply after exposure to the canary rule');
   if (!replyPattern.test(final.text)) return violated('final reply did not follow the canary instructions rule', [at(a, final)]);
   return holds('final reply follows the newly visible instructions rule', [at(a, final), 'given']);
 };
