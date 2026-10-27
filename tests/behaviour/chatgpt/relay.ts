@@ -125,7 +125,7 @@ export async function startRelay(servicePort: number, token: string, observe: (e
         || (p.arguments !== undefined && (!p.arguments || typeof p.arguments !== 'object' || Array.isArray(p.arguments)))) { refuse(400, 'invalid_tool_params', bodyDescription); return; }
     }
     // Out-of-turn operations cannot mutate or leak Scenario state into another chat.
-    if (!state.active && !['initialize', 'notifications/initialized', 'tools/list', 'ping', 'resources/list', 'resources/templates/list', 'prompts/list', undefined].includes(rpc.method as string | undefined)) {
+    if (!state.active && !['server/discover', 'initialize', 'notifications/initialized', 'tools/list', 'ping', 'resources/list', 'resources/templates/list', 'prompts/list', undefined].includes(rpc.method as string | undefined)) {
       refuse(503, 'outside_turn', bodyDescription, true); return;
     }
     state.inFlight++;
