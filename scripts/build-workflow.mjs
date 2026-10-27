@@ -43,7 +43,7 @@ export function parseWorkflow(markdown, version, previous) {
     priorEnd = end + endMarker.length;
   }
   const discoveredTools = [...markdown.matchAll(/<!-- wayfinder:tool:([^:]+):start -->/g)].map(match => match[1]);
-  if (JSON.stringify(discoveredTools) !== JSON.stringify(toolNames)) fail('business tool blocks must be exactly the accepted four in order');
+  if (JSON.stringify(discoveredTools) !== JSON.stringify(toolNames)) fail('governed workflow tool blocks must remain the accepted four until the desk workflow release');
   const safetyCore = blocks['safety-core'];
   if ([...safetyCore].length > 512) fail('safety core exceeds 512 characters');
   for (const required of ['alone owns Map state', 'fully page `map_list`', 'create once', 'resume or uncertainty',
@@ -59,6 +59,7 @@ export function parseWorkflow(markdown, version, previous) {
   }
   const instructions = `${safetyCore}\n\nversion: ${version}\n\n${blocks['instructions-summary']}`;
   return { version, markdown, safetyCore, instructions,
+    businessTools: { disabled: toolNames, enabled: [...toolNames, 'map_wait'] },
     toolDescriptions: Object.fromEntries(toolNames.map(name => [name, blocks[`tool:${name}`]])), prompt: blocks.prompt };
 }
 
