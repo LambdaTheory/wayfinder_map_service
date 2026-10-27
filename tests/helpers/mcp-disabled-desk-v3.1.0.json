@@ -1,0 +1,574 @@
+{
+  "release": "3.1.0",
+  "commit": "033b6f910c9102af8ea3d934b7e6bcbabe260bd4",
+  "cases": [
+    {
+      "label": "deskQuestion.post",
+      "name": "map_apply",
+      "arguments": {
+        "version": "3.1.0",
+        "mapId": "Acceptance.Alpha",
+        "expectedRevision": 1,
+        "commands": [
+          {
+            "kind": "deskQuestion.post"
+          }
+        ]
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "commands",
+                0,
+                "kind"
+              ],
+              "constraint": "Unsupported command kind"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "deskQuestion.post after an ordinary command",
+      "name": "map_apply",
+      "arguments": {
+        "version": "3.1.0",
+        "mapId": "Acceptance.Alpha",
+        "expectedRevision": 1,
+        "commands": [
+          {
+            "kind": "map.update",
+            "patch": {
+              "notes": "unchanged on rejection"
+            }
+          },
+          {
+            "kind": "deskQuestion.post"
+          }
+        ]
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "commands",
+                1,
+                "kind"
+              ],
+              "constraint": "Unsupported command kind"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "deskQuestion.withdraw",
+      "name": "map_apply",
+      "arguments": {
+        "version": "3.1.0",
+        "mapId": "Acceptance.Alpha",
+        "expectedRevision": 1,
+        "commands": [
+          {
+            "kind": "deskQuestion.withdraw"
+          }
+        ]
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "commands",
+                0,
+                "kind"
+              ],
+              "constraint": "Unsupported command kind"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "deskQuestion.withdraw after an ordinary command",
+      "name": "map_apply",
+      "arguments": {
+        "version": "3.1.0",
+        "mapId": "Acceptance.Alpha",
+        "expectedRevision": 1,
+        "commands": [
+          {
+            "kind": "map.update",
+            "patch": {
+              "notes": "unchanged on rejection"
+            }
+          },
+          {
+            "kind": "deskQuestion.withdraw"
+          }
+        ]
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "commands",
+                1,
+                "kind"
+              ],
+              "constraint": "Unsupported command kind"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "reopenRequest.close",
+      "name": "map_apply",
+      "arguments": {
+        "version": "3.1.0",
+        "mapId": "Acceptance.Alpha",
+        "expectedRevision": 1,
+        "commands": [
+          {
+            "kind": "reopenRequest.close"
+          }
+        ]
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "commands",
+                0,
+                "kind"
+              ],
+              "constraint": "Unsupported command kind"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "reopenRequest.close after an ordinary command",
+      "name": "map_apply",
+      "arguments": {
+        "version": "3.1.0",
+        "mapId": "Acceptance.Alpha",
+        "expectedRevision": 1,
+        "commands": [
+          {
+            "kind": "map.update",
+            "patch": {
+              "notes": "unchanged on rejection"
+            }
+          },
+          {
+            "kind": "reopenRequest.close"
+          }
+        ]
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "commands",
+                1,
+                "kind"
+              ],
+              "constraint": "Unsupported command kind"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "ticket.settle deskAnswer {}",
+      "name": "map_apply",
+      "arguments": {
+        "version": "3.1.0",
+        "mapId": "Acceptance.Alpha",
+        "expectedRevision": 1,
+        "commands": [
+          {
+            "kind": "ticket.settle",
+            "deskAnswer": {}
+          }
+        ]
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "commands",
+                0,
+                "deskAnswer"
+              ],
+              "constraint": "Unsupported field"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "ticket.settle deskAnswer {\"answerId\":\"Answer\",\"questionVersion\":1}",
+      "name": "map_apply",
+      "arguments": {
+        "version": "3.1.0",
+        "mapId": "Acceptance.Alpha",
+        "expectedRevision": 1,
+        "commands": [
+          {
+            "kind": "ticket.settle",
+            "deskAnswer": {
+              "answerId": "Answer",
+              "questionVersion": 1
+            }
+          }
+        ]
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "commands",
+                0,
+                "deskAnswer"
+              ],
+              "constraint": "Unsupported field"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "reopenRequestId \"Request\"",
+      "name": "map_apply",
+      "arguments": {
+        "version": "3.1.0",
+        "mapId": "Acceptance.Alpha",
+        "expectedRevision": 1,
+        "commands": [
+          {
+            "kind": "map.update",
+            "patch": {
+              "notes": "unchanged on rejection"
+            }
+          }
+        ],
+        "reopenRequestId": "Request"
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "reopenRequestId"
+              ],
+              "constraint": "Unsupported field"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "reopenRequestId null",
+      "name": "map_apply",
+      "arguments": {
+        "version": "3.1.0",
+        "mapId": "Acceptance.Alpha",
+        "expectedRevision": 1,
+        "commands": [
+          {
+            "kind": "map.update",
+            "patch": {
+              "notes": "unchanged on rejection"
+            }
+          }
+        ],
+        "reopenRequestId": null
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "reopenRequestId"
+              ],
+              "constraint": "Unsupported field"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "map_read claimantId",
+      "name": "map_read",
+      "arguments": {
+        "mapId": "Acceptance.Alpha",
+        "claimantId": "work"
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "claimantId"
+              ],
+              "constraint": "Unsupported field"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "map_read version",
+      "name": "map_read",
+      "arguments": {
+        "mapId": "Acceptance.Alpha",
+        "version": "3.1.0"
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "version"
+              ],
+              "constraint": "Unsupported field"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "map_read claimantId,version",
+      "name": "map_read",
+      "arguments": {
+        "mapId": "Acceptance.Alpha",
+        "claimantId": "work",
+        "version": "3.1.0"
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "claimantId"
+              ],
+              "constraint": "Unsupported field"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "map_read version,claimantId",
+      "name": "map_read",
+      "arguments": {
+        "mapId": "Acceptance.Alpha",
+        "version": "3.1.0",
+        "claimantId": "work"
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "version"
+              ],
+              "constraint": "Unsupported field"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "map_read revision,claimantId,version",
+      "name": "map_read",
+      "arguments": {
+        "mapId": "Acceptance.Alpha",
+        "revision": 1,
+        "claimantId": "work",
+        "version": "3.1.0"
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "claimantId"
+              ],
+              "constraint": "Unsupported field"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "invalid map identity precedes command syntax",
+      "name": "map_apply",
+      "arguments": {
+        "version": "3.1.0",
+        "mapId": "",
+        "expectedRevision": 1,
+        "commands": [
+          {
+            "kind": "deskQuestion.post"
+          }
+        ]
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "mapId"
+              ],
+              "constraint": "1–128 ASCII ID characters required"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "earlier invalid command precedes desk command",
+      "name": "map_apply",
+      "arguments": {
+        "version": "3.1.0",
+        "mapId": "Acceptance.Alpha",
+        "expectedRevision": 1,
+        "commands": [
+          {
+            "kind": "map.update",
+            "patch": {}
+          },
+          {
+            "kind": "deskQuestion.post"
+          }
+        ]
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "commands",
+                0,
+                "patch"
+              ],
+              "constraint": "Nonempty patch required"
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "snapshot shape precedes desk command",
+      "name": "map_apply",
+      "arguments": {
+        "version": "3.1.0",
+        "mapId": "Acceptance.Alpha",
+        "expectedRevision": 1,
+        "commands": [
+          {
+            "kind": "deskQuestion.post"
+          }
+        ],
+        "includeSnapshot": "invalid"
+      },
+      "result": {
+        "content": [],
+        "structuredContent": {
+          "kind": "rejected",
+          "rejection": {
+            "stage": "input",
+            "error": {
+              "code": "invalid_input",
+              "path": [
+                "includeSnapshot"
+              ],
+              "constraint": "Boolean required"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

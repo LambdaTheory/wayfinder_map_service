@@ -23,6 +23,7 @@ import type { SQLiteStorage } from '../src/sqlite-storage.js';
 import { mapTools, toolsOnlyMapTools, answerDeskMapTools, workflowContract } from '../src/mcp-tools.js';
 import type { Revision } from '../src/index.js';
 import { rejectionSeed, rejectionCases } from './helpers/mcp-rejection-cases.js';
+import { disabledDeskCases } from './helpers/disabled-desk-cases.js';
 
 const cleanups: (() => void | Promise<void>)[] = [];
 beforeAll(() => { execFileSync('npm', ['run', 'build'], { stdio: 'pipe' }); });
@@ -760,6 +761,7 @@ test.each(protocols.flatMap(protocol => [undefined, false, true].map(answerDeskE
   const f = storageFixture(); const port = await freePort();
   const service = await serveLocalMcp(f.storage, { ...configuration(f.path, port), ...(answerDeskEnabled === undefined ? {} : { answerDeskEnabled }) });
   cleanups.push(() => service.stop()); const c = await connect(port, token, protocol); await c.create();
+  const tools = (await c.client.listTools()).tools;
   const post = { kind: 'deskQuestion.post', ticketId: 'A', claimantId: 'work', question: {
     questionId: 'Q', options: [{ label: 'One', description: 'First' }, { label: 'Two', description: 'Second' }], recommendedOption: 1,
     recommendedAnswer: 'First', whyKun: 'Choose', triage: 'needsKun', triageReason: 'Choice', gatesResearch: false,
@@ -769,8 +771,7 @@ test.each(protocols.flatMap(protocol => [undefined, false, true].map(answerDeskE
     { kind: 'claim.acquire', ticketId: 'A', claimantId: 'work' }, post,
   ] } })).structuredContent;
   expect(result).toMatchObject(answerDeskEnabled === true ? { kind: 'committed', revision: 2 }
-    : { kind: 'rejected', code: 'answer_desk_disabled' });
-  const tools = (await c.client.listTools()).tools;
+    : { kind: 'rejected', rejection: { stage: 'input', error: { code: 'invalid_input', path: ['commands', 2, 'kind'], constraint: 'Unsupported command kind' } } });
   expect(tools).toEqual(answerDeskEnabled ? answerDeskMapTools : mapTools);
   expect(tools.map(t => t.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply']);
   const read = (await c.client.callTool({ name: 'map_read', arguments: { mapId: 'Acceptance.Alpha' } })).structuredContent;
@@ -781,6 +782,21 @@ test.each(protocols.flatMap(protocol => [undefined, false, true].map(answerDeskE
     expect(JSON.stringify(tools)).not.toMatch(/desk|reopenRequest|reopenContext|reopenedAtRevision/i);
   }
   expect(() => captureConfiguration({ ...configuration(f.path, port), answerDeskEnabled: 'true' as unknown as boolean })).toThrow('invalid_configuration');
+});
+
+test.each(protocols.flatMap(protocol => [undefined, false].flatMap(answerDeskEnabled => [false, true].map(toolsOnly => ({ protocol, answerDeskEnabled, toolsOnly })))))(
+  'disabled desk errors match v3.1.0 after SDK discovery: $protocol / $answerDeskEnabled / toolsOnly=$toolsOnly', async ({ protocol, answerDeskEnabled, toolsOnly }) => {
+  const f = storageFixture(); const port = await freePort();
+  const service = await serveLocalMcp(f.storage, { ...configuration(f.path, port), toolsOnly, ...(answerDeskEnabled === undefined ? {} : { answerDeskEnabled }) });
+  cleanups.push(() => service.stop()); const c = await connect(port, token, protocol);
+  await c.client.listTools(); await c.create(); const before = await c.read();
+  for (const entry of disabledDeskCases(version)) {
+    const result = await c.client.callTool({ name: entry.name, arguments: entry.arguments });
+    expect(result, entry.label).toEqual({ ...entry.result, ...(protocol === '2026-07-28'
+      ? { _meta: { 'io.modelcontextprotocol/serverInfo': { name: 'wayfinder-map', version } } } : {}) });
+    expect(outputs.get(entry.name)!(result.structuredContent), entry.label).toBe(true);
+  }
+  expect(await c.read()).toEqual(before);
 });
 
 

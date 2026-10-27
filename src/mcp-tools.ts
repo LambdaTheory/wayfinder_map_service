@@ -88,14 +88,6 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
           version: typeof claimed === 'string' && claimed.length <= 32 ? claimed : null, rules: stableResourceUri });
       }
     }
-    // #111–#113 are staged capabilities until the coordinated #114 workflow release.
-    // Enforce this before observing storage, including taking-read syntax reserved for #112.
-    if (!answerDeskEnabled && isPlainObject(raw) && (
-      (tool.name === 'map_read' && (Object.hasOwn(raw, 'claimantId') || Object.hasOwn(raw, 'version')))
-      || (tool.name === 'map_apply' && (Object.hasOwn(raw, 'reopenRequestId') || (Array.isArray(raw.commands)
-        && raw.commands.some(command => isPlainObject(command) && (Object.hasOwn(command, 'deskAnswer')
-          || ['deskQuestion.post', 'deskQuestion.withdraw', 'reopenRequest.close'].includes(command.kind as string))))))
-    )) return envelope({ kind: 'rejected', code: 'answer_desk_disabled' });
     const properties = tool.inputSchema.properties ?? {};
     const shape = validateObject(raw, [], Object.keys(properties));
     if (shape) return inputFailure(shape);
@@ -112,7 +104,9 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
       if (create.kind === 'error') return inputFailure({ ...create.error, path: create.error.path.map((part, i) => i === 0 && part === 'id' ? 'mapId' : part) });
     } else if (tool.name === 'map_apply') {
       const { includeSnapshot: _snapshot, version: _version, ...fields } = raw;
-      apply = decodeApplyRequest({ ...fields, author: author() });
+      // Select the admitted syntax, retaining the ordinary validation order and
+      // typed invalid_input results when the staged desk capability is disabled.
+      apply = decodeApplyRequest({ ...fields, author: author() }, { answerDeskEnabled });
       if (apply.kind === 'error') return inputFailure(apply.error);
       if (apply.value.commands.length > 100) return inputFailure(invalid(['commands'], 'At most 100 commands required'));
     } else if (tool.name === 'map_read') {

@@ -17,6 +17,7 @@ import { calculateFrontier, parseId, prepareApply } from '../src/index.js';
 import type { ClaimantId, Command, NonEmpty, Revision, TicketId, TicketType } from '../src/index.js';
 import { rejectionSeed, rejectionCases } from './helpers/mcp-rejection-cases.js';
 import { versioned } from './helpers/write-version.js';
+import { disabledDeskCases } from './helpers/disabled-desk-cases.js';
 
 const version: string = JSON.parse(readFileSync('package.json', 'utf8')).version;
 
@@ -605,17 +606,13 @@ test('Answer Desk commands and current/history inspection round-trip through dec
 
 test.each([undefined, false])('Answer Desk setting %s disables all desk writes and taking reads before storage; ordinary tools remain available', async answerDeskEnabled => {
   const f = await fixture({}, answerDeskEnabled); await f.create(); const before = await observe(f.storage, 1);
-  for (const args of [
-    { commands: [{ kind: 'deskQuestion.post' }] }, { commands: [{ kind: 'deskQuestion.withdraw' }] },
-    { commands: [{ kind: 'reopenRequest.close' }] }, { commands: [{ kind: 'ticket.settle', deskAnswer: {} }] },
-    { reopenRequestId: 'request', commands: [{ kind: 'ticket.reopen', ticketId: 'A', reason: 'change' }] },
-  ]) expect((await f.client.callTool({ name: 'map_apply', arguments: { version, mapId: 'Acceptance.Alpha', expectedRevision: 1, ...args } })).structuredContent)
-    .toEqual({ kind: 'rejected', code: 'answer_desk_disabled' });
-  for (const fields of [{ claimantId: 'work' }, { version }, { claimantId: 'work', version }]) {
-    const r = await f.client.callTool({ name: 'map_read', arguments: { mapId: 'Acceptance.Alpha', ...fields } });
-    expect(r.structuredContent).toEqual({ kind: 'rejected', code: 'answer_desk_disabled' });
-  }
+  // Discovery installs the SDK output validator, as it does for ordinary clients.
   expect((await f.client.listTools()).tools.map(t => t.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply']);
+  for (const entry of disabledDeskCases(version)) {
+    const result = await f.client.callTool({ name: entry.name, arguments: entry.arguments });
+    expect(result, entry.label).toEqual(entry.result);
+    expect(defaultSchemas.get(entry.name)!.output(result.structuredContent)).toBe(true);
+  }
   const stored = await f.storage.adapter.readRevision(id('Acceptance.Alpha'), 1);
   if (stored.kind !== 'found') throw Error('missing fixture');
   const expected = { kind: 'found', revision: stored.value, frontier: [] };

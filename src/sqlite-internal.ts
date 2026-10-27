@@ -212,7 +212,7 @@ function open(path: string, temporary = false, faults: TestFaults = {}, migrate 
     if (format === 1 && migrate) {
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       const destination = faults.migrationBackupPath ?? `${path}.pre-format-2.${stamp}.${randomUUID()}.sqlite`;
-      backupDatabase(db, path, destination, temporary, faults);
+      backup(path, destination, temporary, faults);
       try {
         db.exec('BEGIN IMMEDIATE');
         // Another starter cannot silently migrate after this process observed format 1.
@@ -357,7 +357,7 @@ function open(path: string, temporary = false, faults: TestFaults = {}, migrate 
       OR EXISTS(SELECT 1 FROM desk_maps) AS used`).get()?.used === 1;
   }, backup(destination) {
     requireUsable();
-    backupDatabase(db, path, destination, temporary, faults);
+    backup(path, destination, temporary, faults);
   }, close() { if (usable) { usable = false; db.close(); } }, listMaps(args = {}) {
     requireUsable();
     const limit = args.limit === undefined ? 20 : args.limit;

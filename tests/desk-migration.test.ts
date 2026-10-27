@@ -119,3 +119,32 @@ test('read-only maintenance backup also preserves format 2 without startup migra
   expect(inspect(dbPath)).toEqual(before); expect(inspect(destination)).toEqual(before);
   expect(readdirSync(dirname(dbPath)).filter(name => name.includes('pre-format'))).toEqual([]);
 });
+
+test('ChatGPT attach initial, scheduled and final backups preserve the live legacy format and old-code readability', async () => {
+  const root = join(homedir(), 'Library', 'Caches', 'wayfinder-behaviour-tests');
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const { dbPath, db, revision } = legacy(root); cleanups.push(() => db.close());
+  const before = inspect(dbPath);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const output = execFileSync(process.execPath, ['--experimental-test-module-mocks', 'tests/helpers/chatgpt-attach-backup.mjs'], {
+      encoding: 'utf8', stdio: 'pipe',
+      env: { ...process.env, WAYFINDER_DATABASE_PATH: dbPath, WAYFINDER_ATTACH_TOKEN: 'synthetic-attach-token-12345678901234567890' },
+    });
+    expect(output.match(/Consistent SQLite backup completed\./g)).toHaveLength(3);
+    expect(output).toContain('Attached to the running local service');
+    expect(output).toContain('Local ChatGPT test session stopped.');
+    expect(output).not.toContain(dbPath);
+  } finally { db.exec('ROLLBACK'); }
+  const backups = readdirSync(join(dirname(dbPath), 'backups')).filter(name => name.endsWith('.sqlite'));
+  expect(backups).toHaveLength(3);
+  expect(readdirSync(dirname(dbPath)).filter(name => name.includes('pre-format'))).toEqual([]);
+  for (const file of [dbPath, ...backups.map(name => join(dirname(dbPath), 'backups', name))]) {
+    expect(inspect(file)).toEqual(before);
+    const storage = legacyLifecycle().open(file);
+    try {
+      expect(await storage.adapter.readRevision(id('Map', 'Legacy'), 1)).toEqual({ kind: 'found', value: revision });
+      expect(await storage.adapter.readCurrent(id('Map', 'Legacy'))).toEqual({ kind: 'found', value: revision.state });
+    } finally { storage.close(); }
+  }
+});

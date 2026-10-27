@@ -5,13 +5,13 @@ import { immutableClone } from './immutable.js';
 import { validateMapContent } from './content-input.js';
 import { validateSettlement } from './settlement-input.js';
 
-export function decodeApplyRequest(raw: unknown): Result<ApplyRequest, InvalidInput> {
-  const error = validateRequest(raw);
+export function decodeApplyRequest(raw: unknown, { answerDeskEnabled = true } = {}): Result<ApplyRequest, InvalidInput> {
+  const error = validateRequest(raw, answerDeskEnabled);
   return error ? { kind: 'error', error } : { kind: 'ok', value: immutableClone(raw as ApplyRequest) };
 }
 
-function validateRequest(raw: unknown): InvalidInput | undefined {
-  const shape = validateObject(raw, [], ['mapId', 'expectedRevision', 'author', 'commands', 'reopenRequestId']);
+function validateRequest(raw: unknown, answerDeskEnabled: boolean): InvalidInput | undefined {
+  const shape = validateObject(raw, [], ['mapId', 'expectedRevision', 'author', 'commands', ...(answerDeskEnabled ? ['reopenRequestId'] : [])]);
   if (shape) return shape;
   if (!isPlainObject(raw)) return invalid([], 'Plain request required');
   const identity = validateId(raw.mapId, ['mapId']);
@@ -37,7 +37,7 @@ function validateRequest(raw: unknown): InvalidInput | undefined {
     const shape = validateObject(command, path);
     if (shape) return shape;
     if (!isPlainObject(command)) return invalid(path, 'Plain command required');
-    if (command.kind === 'deskQuestion.post' || command.kind === 'deskQuestion.withdraw' || command.kind === 'reopenRequest.close') {
+    if (answerDeskEnabled && (command.kind === 'deskQuestion.post' || command.kind === 'deskQuestion.withdraw' || command.kind === 'reopenRequest.close')) {
       const error = validateDeskCommand(command, path); if (error) return error;
       continue;
     }
@@ -50,7 +50,7 @@ function validateRequest(raw: unknown): InvalidInput | undefined {
       continue;
     }
     if (command.kind === 'ticket.settle') {
-      const shape = validateObject(command, path, ['kind', 'ticketId', 'ticketType', 'claimantId', 'settlement', 'deskAnswer']);
+      const shape = validateObject(command, path, ['kind', 'ticketId', 'ticketType', 'claimantId', 'settlement', ...(answerDeskEnabled ? ['deskAnswer'] : [])]);
       if (shape) return shape;
       for (const key of ['ticketId', 'claimantId']) {
         const identity = validateId(command[key], [...path, key]);
