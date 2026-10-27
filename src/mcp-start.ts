@@ -29,5 +29,6 @@ async function main() {
 }
 void main().catch(error => {
   console.error(`Wayfinder local MCP startup failed: ${error instanceof LocalServiceFailure ? error.code : 'service_failure'}`);
+  if (error instanceof LocalServiceFailure && error.code === 'answer_desk_required') console.error(error.message);
   process.exitCode = 1;
 });

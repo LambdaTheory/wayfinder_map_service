@@ -8,7 +8,7 @@ export type { LocalServiceConfiguration, LocalMcpService } from './mcp-http-inte
 export async function startLocalMcpService(input: LocalServiceConfiguration): Promise<LocalMcpService> {
   const configuration = captureConfiguration(input);
   let storage;
-  try { storage = openSQLite(configuration.databasePath); }
+  try { storage = openSQLite(configuration.databasePath, { migrate: true }); }
   catch { throw new LocalServiceFailure('storage_not_ready'); }
   try { return await serveLocalMcp(storage, configuration); }
   catch (error) { storage.close(); throw error; }

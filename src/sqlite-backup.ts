@@ -1,4 +1,4 @@
-import { openSQLite } from './sqlite-storage.js';
+import { backupSQLite } from './sqlite-storage.js';
 
 // Explicit operator maintenance, not a business/MCP tool. Arguments and causes
 // can contain private paths, so diagnostics deliberately never print them.
@@ -8,9 +8,7 @@ if (!source || !destination || extra.length) {
   process.exitCode = 1;
 } else {
   try {
-    const storage = openSQLite(source);
-    try { storage.backup(destination); }
-    finally { storage.close(); }
+    backupSQLite(source, destination);
     console.log('SQLite backup completed');
   } catch {
     console.error('SQLite backup failed; no confirmed backup. Inspect any fresh output before use.');

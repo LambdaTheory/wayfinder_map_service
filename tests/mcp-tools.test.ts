@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,7 +10,7 @@ import type { CallToolResult as SdkCallToolResult } from '@modelcontextprotocol/
 type CallToolResult = SdkCallToolResult & { structuredContent?: Record<string, unknown> };
 import { Ajv, type AnySchema } from 'ajv';
 import { afterEach, expect, test } from 'vitest';
-import { createMapMcpServer, mapTools, toolsOnlyMapTools, workflowContract } from '../src/mcp-tools.js';
+import { createMapMcpServer, mapTools, toolsOnlyMapTools, answerDeskMapTools, toolsOnlyAnswerDeskMapTools, workflowContract } from '../src/mcp-tools.js';
 import { sqliteLifecycleForTests } from '../src/sqlite-internal.js';
 import type { SQLiteStorage } from '../src/sqlite-storage.js';
 import { calculateFrontier, parseId, prepareApply } from '../src/index.js';
@@ -28,10 +29,14 @@ function id(value: string) {
 }
 const configuration = { actorId: 'operator', clientId: 'codex-test' };
 const ajv = new Ajv({ strict: false });
-const schemas = new Map(mapTools.map(tool => [tool.name, {
+const defaultSchemas = new Map(mapTools.map(tool => [tool.name, {
   input: ajv.compile(tool.inputSchema), output: ajv.compile(tool.outputSchema! as AnySchema),
 }]));
-async function fixture(faults: Parameters<typeof sqliteLifecycleForTests>[0] = {}, answerDeskEnabled?: boolean) {
+const schemas = defaultSchemas;
+const deskSchemas = new Map(answerDeskMapTools.map(tool => [tool.name, {
+  input: ajv.compile(tool.inputSchema), output: ajv.compile(tool.outputSchema! as AnySchema),
+}]));
+async function fixture(faults: Parameters<typeof sqliteLifecycleForTests>[0] = {}, answerDeskEnabled?: boolean, toolsOnly = false) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'wayfinder-mcp-tools-acceptance-')));
   cleanups.push(() => rmSync(directory, { recursive: true }));
   const path = join(directory, 'private', 'maps.sqlite');
@@ -39,7 +44,8 @@ async function fixture(faults: Parameters<typeof sqliteLifecycleForTests>[0] = {
   lifecycle.initialize(path);
   const storage = lifecycle.open(path);
   cleanups.push(() => storage.close());
-  const server = createMapMcpServer(storage, { ...configuration, ...(answerDeskEnabled === undefined ? {} : { answerDeskEnabled }) });
+  const server = createMapMcpServer(storage, { ...configuration, toolsOnly, ...(answerDeskEnabled === undefined ? {} : { answerDeskEnabled }) });
+  const schemas = answerDeskEnabled ? deskSchemas : defaultSchemas;
   const client = new Client({ name: 'wayfinder-protocol-test', version: '0.1.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   let negotiatedProtocol: unknown;
@@ -109,21 +115,30 @@ test('P01/P02: SDK discovers exactly four complete schemas, once-only compact/de
   }
 });
 
-test('W02: existing commands retain standalone descriptions; staged desk commands have schema metadata until #114', () => {
-  // Some clients do not pass nested oneOf schemas to the model, so the description must stand alone.
+test('W02: every advertised default command and field has standalone tool-description guidance', () => {
   const tool = mapTools.find(candidate => candidate.name === 'map_apply')!;
-  const commands = (tool.inputSchema.properties as { commands: { items: { oneOf: { description?: string; properties: Record<string, { const?: string; description?: string }> }[] } } })
-    .commands.items.oneOf;
+  const commands = (tool.inputSchema.properties as { commands: { items: { oneOf: { properties: Record<string, { const?: string }> }[] } } }).commands.items.oneOf;
   const description = workflowContract.toolDescriptions.map_apply;
   for (const command of commands) {
     const { kind, ...fields } = command.properties;
-    // Coordinator-approved #111 staging: #114 owns the mandatory workflow and
-    // corresponding tool descriptions. Keep all original coverage; validate each
-    // additive field/command's schema guidance until that release lands.
-    const deskCommand = ['deskQuestion.post', 'deskQuestion.withdraw', 'reopenRequest.close'].includes(kind!.const!);
-    const guidance = deskCommand ? command.description! : description;
-    expect(guidance).toContain(kind!.const!.replace('ticket.settle', '"kind":"ticket.settle"'));
-    for (const [field, schema] of Object.entries(fields)) expect(field === 'deskAnswer' ? schema.description : guidance).toContain(field);
+    expect(description).toContain(kind!.const!.replace('ticket.settle', '"kind":"ticket.settle"'));
+    for (const field of Object.keys(fields)) expect(description).toContain(field);
+  }
+});
+
+test.each([false, true])('disabled tools/list exactly matches 3.1.0, including output schemas and descriptions (toolsOnly=%s)', async toolsOnly => {
+  const baseline = JSON.parse(readFileSync('tests/helpers/mcp-tools-v3.1.0.json', 'utf8'));
+  const f = await fixture({}, false, toolsOnly);
+  const { tools } = await f.client.listTools();
+  const hashes = Object.fromEntries(tools.map(tool => [tool.name, createHash('sha256')
+    .update(JSON.stringify(tool).replaceAll(workflowContract.version, '<release-version>')).digest('hex')]));
+  expect(hashes).toEqual(toolsOnly ? baseline.toolsOnlyMapTools : baseline.mapTools);
+  expect(JSON.stringify(tools)).not.toMatch(/desk|reopenRequest|reopenContext|reopenedAtRevision/i);
+  const enabled = await fixture({}, true, toolsOnly);
+  const enabledTools = (await enabled.client.listTools()).tools;
+  expect(enabledTools).toEqual(toolsOnly ? toolsOnlyAnswerDeskMapTools : answerDeskMapTools);
+  for (const word of ['deskQuestion.post', 'deskQuestion.withdraw', 'reopenRequest.close', 'deskAnswer', 'reopenRequestId', 'deskQuestions', 'reopenRequests', 'reopenContexts']) {
+    expect(JSON.stringify(enabledTools)).toContain(word);
   }
 });
 
@@ -223,7 +238,7 @@ test.each(['grilling', 'prototype', 'research', 'task'] as const)('P01/P02/P03: 
   expect(settled.structuredContent!.frontier).toEqual(['B']);
   expect(snapshot(settled).state.tickets[0]).toMatchObject({ claim: null, status: 'settled', settlement: { ...settlement(type), introducedAtRevision: 4 } });
   const read4 = await f.read(4);
-  expect(read4.structuredContent).toEqual({ ...settled.structuredContent, kind: 'found', deskQuestions: [] });
+  expect(read4.structuredContent).toEqual({ ...settled.structuredContent, kind: 'found' });
   const reopened = await f.apply([{ kind: 'ticket.reopen', ticketId: 'A', reason: ' Reconsider\n' }], 4);
   expect(reopened.structuredContent!.frontier).toEqual(['A']);
   expect(snapshot(reopened).changes[0]).toEqual({ commandIndex: 0, command: 'ticket.reopen', subjectId: 'A', reason: ' Reconsider\n' });
@@ -566,7 +581,7 @@ test('Answer Desk commands and current/history inspection round-trip through dec
   const question = { questionId: 'Q.A', options: [{ label: 'One', description: 'First' }, { label: 'Two', description: 'Second' }],
     recommendedOption: 1, recommendedAnswer: 'First route', whyKun: 'Choose the tradeoff', triage: 'needsKun', triageReason: 'A decision', gatesResearch: false };
   const post = { kind: 'deskQuestion.post', ticketId: 'A', claimantId: 'work', question };
-  const applySchema = schemas.get('map_apply')!.input;
+  const applySchema = deskSchemas.get('map_apply')!.input;
   expect(applySchema(versioned('map_apply', { mapId: 'Acceptance.Alpha', expectedRevision: 1, commands: [post] }))).toBe(true);
   await f.apply([ticket('A', 'grilling'), { kind: 'claim.acquire', ticketId: 'A', claimantId: 'work' }, post], 1);
   const mapId = id('Acceptance.Alpha');
@@ -594,14 +609,18 @@ test.each([undefined, false])('Answer Desk setting %s disables all desk writes a
     { commands: [{ kind: 'deskQuestion.post' }] }, { commands: [{ kind: 'deskQuestion.withdraw' }] },
     { commands: [{ kind: 'reopenRequest.close' }] }, { commands: [{ kind: 'ticket.settle', deskAnswer: {} }] },
     { reopenRequestId: 'request', commands: [{ kind: 'ticket.reopen', ticketId: 'A', reason: 'change' }] },
-  ]) expect((await f.call('map_apply', { mapId: 'Acceptance.Alpha', expectedRevision: 1, ...args })).structuredContent)
+  ]) expect((await f.client.callTool({ name: 'map_apply', arguments: { version, mapId: 'Acceptance.Alpha', expectedRevision: 1, ...args } })).structuredContent)
     .toEqual({ kind: 'rejected', code: 'answer_desk_disabled' });
   for (const fields of [{ claimantId: 'work' }, { version }, { claimantId: 'work', version }]) {
     const r = await f.client.callTool({ name: 'map_read', arguments: { mapId: 'Acceptance.Alpha', ...fields } });
     expect(r.structuredContent).toEqual({ kind: 'rejected', code: 'answer_desk_disabled' });
   }
   expect((await f.client.listTools()).tools.map(t => t.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply']);
-  expect((await f.read()).structuredContent).toMatchObject({ kind: 'found' });
-  expect((await f.read(1)).structuredContent).toMatchObject({ kind: 'found' });
+  const stored = await f.storage.adapter.readRevision(id('Acceptance.Alpha'), 1);
+  if (stored.kind !== 'found') throw Error('missing fixture');
+  const expected = { kind: 'found', revision: stored.value, frontier: [] };
+  expect((await f.read()).structuredContent).toEqual(expected);
+  expect((await f.read(1)).structuredContent).toEqual(expected);
+  expect(JSON.stringify(expected)).not.toMatch(/desk|reopenRequest|reopenContext|reopenedAtRevision/i);
   expect(await observe(f.storage, 1)).toEqual(before);
 });

@@ -30,7 +30,7 @@ if (attachToken !== undefined && !/^[A-Za-z0-9._~-]{32,256}$/.test(attachToken))
 const token = attachToken ?? randomBytes(48).toString('hex');
 
 function backup() {
-  const source = openSQLite(databasePath);
+  const source = openSQLite(databasePath, { migrate: true });
   try {
     const timestamp = new Date().toISOString().replaceAll(':', '-');
     const destination = join(dirname(databasePath), 'backups',

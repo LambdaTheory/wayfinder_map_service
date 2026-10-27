@@ -7,11 +7,11 @@ import type { CreateMapInput, InvalidInput, MapId, MutationAuthor } from './type
 import type { SQLiteStorage } from './sqlite-storage.js';
 import { SQLiteFailure } from './sqlite-storage.js';
 import { invalid, isPlainObject, validateAuthor, validateId, validateObject } from './values.js';
-import { mapTools, toolsOnlyMapTools } from './mcp-schemas.js';
+import { mapTools, toolsOnlyMapTools, answerDeskMapTools, toolsOnlyAnswerDeskMapTools } from './mcp-schemas.js';
 import { workflowContract } from './workflow.generated.js';
 import { viewerUrl } from './viewer-http.js';
 
-export { mapTools, toolsOnlyMapTools } from './mcp-schemas.js';
+export { mapTools, toolsOnlyMapTools, answerDeskMapTools, toolsOnlyAnswerDeskMapTools } from './mcp-schemas.js';
 export { workflowContract } from './workflow.generated.js';
 // viewerOrigin is set by the local HTTP host, which also serves the read-only viewer. toolsOnly marks a client that shows its
 // model no server instructions; its write tools state the release instead.
@@ -31,8 +31,11 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
     throw new Error('Invalid MCP author configuration');
   }
   const identity = { actorId: configuration.actorId, clientId: configuration.clientId };
-  const tools = configuration.toolsOnly ? toolsOnlyMapTools : mapTools;
   const { viewerOrigin, answerDeskEnabled = false } = configuration;
+  if (!answerDeskEnabled && storage.hasDeskHistory()) throw new Error('The configured private SQLite database has used Answer Desk; enable answerDeskEnabled.');
+  const tools = answerDeskEnabled
+    ? (configuration.toolsOnly ? toolsOnlyAnswerDeskMapTools : answerDeskMapTools)
+    : (configuration.toolsOnly ? toolsOnlyMapTools : mapTools);
   const viewerLink = (mapId: string) => viewerOrigin === undefined ? {} : { viewerUrl: viewerUrl(viewerOrigin, mapId) };
   const author = (): MutationAuthor => ({ ...identity, occurredAt: new Date().toISOString() } as MutationAuthor);
   const server = new Server({ name: 'wayfinder-map', version: workflowContract.version }, {
@@ -135,11 +138,11 @@ export function createMapMcpServer(storage: SQLiteStorage, configuration: ToolAu
         if (revision === undefined) {
           const current = storage.desk.inspect(mapId);
           if (current.kind !== 'found') return envelope(current);
-          return envelope({ kind: 'found', revision: current.revision, frontier: calculateFrontier(current.revision.state), ...current.desk, ...viewerLink(mapId) });
+          return envelope({ kind: 'found', revision: current.revision, frontier: calculateFrontier(current.revision.state), ...(answerDeskEnabled ? current.desk : {}), ...viewerLink(mapId) });
         }
         const read = await storage.adapter.readRevision(mapId, revision);
         return read.kind === 'found' ? envelope({ kind: 'found', revision: read.value, frontier: calculateFrontier(read.value.state),
-          ...projectDesk(read.value.state, emptyDesk, true), ...viewerLink(mapId) }) : envelope(read);
+          ...(answerDeskEnabled ? projectDesk(read.value.state, emptyDesk, true) : {}), ...viewerLink(mapId) }) : envelope(read);
       }
       let prepared;
       if (create?.kind === 'ok') prepared = create.value;

@@ -18,8 +18,9 @@ import { MAX_REQUEST_BYTES, captureConfiguration, serveLocalMcp } from '../src/m
 import type { LocalServiceConfiguration } from '../src/mcp-service.js';
 import { startLocalMcpService } from '../src/mcp-service.js';
 import { sqliteLifecycleForTests } from '../src/sqlite-internal.js';
+import { sqliteLifecycleForTests as legacyLifecycle } from './helpers/sqlite-v3.1.0.js';
 import type { SQLiteStorage } from '../src/sqlite-storage.js';
-import { mapTools, toolsOnlyMapTools, workflowContract } from '../src/mcp-tools.js';
+import { mapTools, toolsOnlyMapTools, answerDeskMapTools, workflowContract } from '../src/mcp-tools.js';
 import type { Revision } from '../src/index.js';
 import { rejectionSeed, rejectionCases } from './helpers/mcp-rejection-cases.js';
 
@@ -49,12 +50,13 @@ async function freePort() {
   await new Promise<void>(resolve => server.close(() => resolve()));
   return port;
 }
-function storageFixture(faults: Parameters<typeof sqliteLifecycleForTests>[0] = {}) {
+function storageFixture(faults: Parameters<typeof sqliteLifecycleForTests>[0] = {}, format: 1 | 2 = 2) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'wayfinder-http-acceptance-')));
   cleanups.push(() => rmSync(directory, { recursive: true }));
   const path = join(directory, 'private', 'maps.sqlite');
-  const lifecycle = sqliteLifecycleForTests(faults); lifecycle.initialize(path);
-  const storage = lifecycle.open(path); cleanups.push(() => storage.close());
+  const lifecycle = sqliteLifecycleForTests(faults);
+  (format === 1 ? legacyLifecycle() : lifecycle).initialize(path);
+  const storage = lifecycle.open(path, { migrate: format === 1 }); cleanups.push(() => storage.close());
   return { path, storage };
 }
 function configuration(databasePath: string, port: number): LocalServiceConfiguration {
@@ -753,18 +755,75 @@ test('P08/P09: actual operator command startup failures return nonzero with fixe
   expect(logs).not.toContain(token); expect(logs).not.toContain('/private-path-fixture');
 });
 
-test.each([undefined, false, true])('Answer Desk service setting %s reaches the MCP handler and leaves discovery at four tools', async answerDeskEnabled => {
+test.each(protocols.flatMap(protocol => [undefined, false, true].map(answerDeskEnabled => ({ protocol, answerDeskEnabled }))))(
+  'Answer Desk setting $answerDeskEnabled reaches $protocol with four matching tool definitions', async ({ protocol, answerDeskEnabled }) => {
   const f = storageFixture(); const port = await freePort();
   const service = await serveLocalMcp(f.storage, { ...configuration(f.path, port), ...(answerDeskEnabled === undefined ? {} : { answerDeskEnabled }) });
-  cleanups.push(() => service.stop()); const c = await connect(port); await c.create();
-  const commands = [{ kind: 'deskQuestion.post', ticketId: 'Missing', claimantId: 'work', question: {
+  cleanups.push(() => service.stop()); const c = await connect(port, token, protocol); await c.create();
+  const post = { kind: 'deskQuestion.post', ticketId: 'A', claimantId: 'work', question: {
     questionId: 'Q', options: [{ label: 'One', description: 'First' }, { label: 'Two', description: 'Second' }], recommendedOption: 1,
     recommendedAnswer: 'First', whyKun: 'Choose', triage: 'needsKun', triageReason: 'Choice', gatesResearch: false,
-  } }];
-  const result = (await c.apply(commands, 1)).structuredContent;
-  expect(result).toMatchObject(answerDeskEnabled === true ? { kind: 'rejected', rejection: { code: 'ticket_not_found' } }
+  } };
+  const result = (await c.client.callTool({ name: 'map_apply', arguments: { version, mapId: 'Acceptance.Alpha', expectedRevision: 1, commands: [
+    { kind: 'ticket.create', ticket: { id: 'A', title: 'Choice', question: 'Which?', type: 'grilling' } },
+    { kind: 'claim.acquire', ticketId: 'A', claimantId: 'work' }, post,
+  ] } })).structuredContent;
+  expect(result).toMatchObject(answerDeskEnabled === true ? { kind: 'committed', revision: 2 }
     : { kind: 'rejected', code: 'answer_desk_disabled' });
-  expect((await c.client.listTools()).tools.map(t => t.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply']);
-  expect((await c.read()).structuredContent).toMatchObject({ kind: 'found', revision: { revision: 1 } });
+  const tools = (await c.client.listTools()).tools;
+  expect(tools).toEqual(answerDeskEnabled ? answerDeskMapTools : mapTools);
+  expect(tools.map(t => t.name)).toEqual(['map_create', 'map_list', 'map_read', 'map_apply']);
+  const read = (await c.client.callTool({ name: 'map_read', arguments: { mapId: 'Acceptance.Alpha' } })).structuredContent;
+  expect(read).toMatchObject({ kind: 'found', revision: { revision: answerDeskEnabled ? 2 : 1 } });
+  if (answerDeskEnabled) expect(read).toMatchObject({ deskQuestions: [{ state: 'pending' }], reopenRequests: [], reopenContexts: [] });
+  else {
+    expect(JSON.stringify(read)).not.toMatch(/desk|reopenRequest|reopenContext|reopenedAtRevision/i);
+    expect(JSON.stringify(tools)).not.toMatch(/desk|reopenRequest|reopenContext|reopenedAtRevision/i);
+  }
   expect(() => captureConfiguration({ ...configuration(f.path, port), answerDeskEnabled: 'true' as unknown as boolean })).toThrow('invalid_configuration');
+});
+
+
+test('disabled service accepts a migrated format-2 database whose desk tables are empty', async () => {
+  const f = storageFixture({}, 1); const port = await freePort();
+  const db = new DatabaseSync(f.path, { readOnly: true });
+  try { expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(2); } finally { db.close(); }
+  expect(f.storage.hasDeskHistory()).toBe(false);
+  const service = await serveLocalMcp(f.storage, { ...configuration(f.path, port), answerDeskEnabled: false });
+  cleanups.push(() => service.stop()); const c = await connect(port); await c.create();
+  expect((await c.client.listTools()).tools).toEqual(mapTools);
+  expect((await c.read()).structuredContent).toMatchObject({ kind: 'found' });
+  expect(f.storage.hasDeskHistory()).toBe(false);
+});
+
+test.each([false, true])('a used Answer Desk database refuses disabled startup even after withdrawal=%s', async withdraw => {
+  const f = storageFixture(); const port = await freePort();
+  const config = configuration(f.path, port);
+  const enabled = await serveLocalMcp(f.storage, { ...config, answerDeskEnabled: true });
+  cleanups.push(() => enabled.stop()); const c = await connect(port); await c.create();
+  const result = await c.client.callTool({ name: 'map_apply', arguments: { version, mapId: 'Acceptance.Alpha', expectedRevision: 1, commands: [
+    { kind: 'ticket.create', ticket: { id: 'A', title: 'Choice', question: 'Which?', type: 'grilling' } },
+    { kind: 'claim.acquire', ticketId: 'A', claimantId: 'work' },
+    { kind: 'deskQuestion.post', ticketId: 'A', claimantId: 'work', question: {
+      questionId: 'Q', options: [{ label: 'One', description: 'First' }, { label: 'Two', description: 'Second' }], recommendedOption: 1,
+      recommendedAnswer: 'First', whyKun: 'Choose', triage: 'needsKun', triageReason: 'Choice', gatesResearch: false,
+    } }, ...(withdraw ? [{ kind: 'deskQuestion.withdraw', ticketId: 'A', claimantId: 'work', questionId: 'Q', questionVersion: 1, reason: 'Changed' }] : []),
+  ] } });
+  expect(result.structuredContent).toMatchObject({ kind: 'committed', revision: 2 });
+  await c.client.close(); await enabled.stop();
+  const storage = sqliteLifecycleForTests().open(f.path); cleanups.push(() => storage.close());
+  const before = await storage.adapter.readRevision('Acceptance.Alpha' as Revision['mapId'], 2);
+  expect(storage.hasDeskHistory()).toBe(true);
+  for (const answerDeskEnabled of [undefined, false]) {
+    await expect(serveLocalMcp(storage, { ...config, ...(answerDeskEnabled === undefined ? {} : { answerDeskEnabled }) }))
+      .rejects.toMatchObject({ code: 'answer_desk_required',
+        message: 'The configured private SQLite database has used Answer Desk; enable answerDeskEnabled (WAYFINDER_ANSWER_DESK_ENABLED=true).' });
+  }
+  expect(await storage.adapter.readRevision('Acceptance.Alpha' as Revision['mapId'], 2)).toEqual(before);
+  // Refusal never admits a partial service or occupies the port; enabling again
+  // serves the exact retained publication/history without rewriting it.
+  const restarted = await serveLocalMcp(storage, { ...config, answerDeskEnabled: true }); cleanups.push(() => restarted.stop());
+  const resumed = await connect(port);
+  expect((await resumed.client.callTool({ name: 'map_read', arguments: { mapId: 'Acceptance.Alpha' } })).structuredContent)
+    .toMatchObject({ kind: 'found', revision: { revision: 2 }, deskQuestions: [{ state: withdraw ? 'withdrawn' : 'pending' }] });
 });

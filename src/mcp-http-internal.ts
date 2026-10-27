@@ -33,8 +33,10 @@ export interface LocalMcpService {
   metadataStatus(): { observations: number; missingObservations: number };
 }
 export class LocalServiceFailure extends Error {
-  constructor(readonly code: 'invalid_configuration' | 'storage_not_ready' | 'port_unavailable' | 'service_failure') {
-    super(`Local MCP ${code}`);
+  constructor(readonly code: 'invalid_configuration' | 'storage_not_ready' | 'port_unavailable' | 'service_failure' | 'answer_desk_required') {
+    super(code === 'answer_desk_required'
+      ? 'The configured private SQLite database has used Answer Desk; enable answerDeskEnabled (WAYFINDER_ANSWER_DESK_ENABLED=true).'
+      : `Local MCP ${code}`);
     this.name = 'LocalServiceFailure';
   }
 }
@@ -115,6 +117,7 @@ interface Session {
 // Production enters through mcp-service.ts, which opens only existing private DBs.
 export async function serveLocalMcp(storage: SQLiteStorage, input: LocalServiceConfiguration): Promise<LocalMcpService> {
   const config = captureConfiguration(input);
+  if (config.answerDeskEnabled !== true && storage.hasDeskHistory()) throw new LocalServiceFailure('answer_desk_required');
   const metadata = new CallMetadata(config.databasePath, config.token);
   const tokenHash = digest(`Bearer ${config.token}`);
   function authenticate(authorization: string | undefined): Credential | undefined {

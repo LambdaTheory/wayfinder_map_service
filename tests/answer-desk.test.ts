@@ -247,6 +247,21 @@ test('text reopen context retained verbatim with no preselection; all reopened p
   expect(f.inspect().desk.deskQuestions.find(q => q.questionVersion === 2)).not.toHaveProperty('requestedOption');
 });
 
+test('lost taking receipt survives restart as readable Taken without a second delivery', async () => {
+  let loseReceipt = false;
+  const f = await fixture({ afterPublication() { if (loseReceipt) throw Error('lost taking receipt'); } });
+  await published(f); const answer = f.answer(); f.tick(); const before = await f.state();
+  loseReceipt = true;
+  expect(() => f.take()).toThrow(expect.objectContaining({ outcome: 'unknown', requiresRestart: true }));
+  expect(() => f.inspect()).toThrow('reopen required');
+  loseReceipt = false; f.restart();
+  expect(await f.state()).toEqual(before);
+  expect(f.inspect().desk.deskQuestions[0]).toMatchObject({ state: 'taken', currentAnswer: answer });
+  expect(f.take().items).toEqual([]); expect(f.take(other).items).toEqual([]);
+  expect(await f.state()).toEqual(before);
+  await f.commit([settle(answer)]);
+});
+
 test('question publication, request handling and Claim return roll back with failed Revision publication', async () => {
   let fail = false; const f = await fixture(() => { if (fail) throw Error('injected'); });
   await settled(f); const r = await f.file(); f.tick(); f.take(); const before = f.inspect(); fail = true;
@@ -313,4 +328,18 @@ test('failed human submission and failed standalone publication preserve desk st
   expect(f.inspect()).toEqual(before); await f.commit([post()]); const publishedState = f.inspect(); fail = true;
   expect(() => f.answer()).toThrow(); fail = false;
   expect(f.inspect()).toEqual(publishedState); expect(f.storage.desk.read(mapId).quietUntil).toBeUndefined();
+});
+
+
+test('request-only history keeps the desk startup requirement after cancellation and closure', async () => {
+  const f = await fixture(); await f.commit([create(), claim(), settle()]);
+  expect(f.storage.hasDeskHistory()).toBe(false);
+  const first = await f.file();
+  expect(f.storage.hasDeskHistory()).toBe(true);
+  updated(f.storage.desk.cancelReopenRequest(mapId, first.requestId));
+  const second = await f.file();
+  await f.commit([reopen(), { kind: 'reopenRequest.close', requestId: second.requestId, reason: 'Reopened in conversation' }]);
+  expect(f.inspect().desk.reopenRequests).toEqual([]);
+  expect((await f.state()).deskQuestions).toBeUndefined();
+  f.restart(); expect(f.storage.hasDeskHistory()).toBe(true);
 });

@@ -26,6 +26,7 @@ const DESK_SCHEMA = `
 export interface SQLiteStorage {
   readonly adapter: StateAdapter;
   readonly desk: DeskStorage;
+  hasDeskHistory(): boolean;
   listMaps(args?: { readonly limit?: number; readonly afterMapId?: MapId }): ListedMaps | { readonly kind: 'rejected'; readonly error: InvalidInput };
   backup(destination: string): void;
   close(): void;
@@ -189,14 +190,26 @@ function backupDatabase(db: DatabaseSync, path: string, destination: string, tem
 
 }
 
-function open(path: string, temporary = false, faults: TestFaults = {}): SQLiteStorage {
+function backup(path: string, destination: string, temporary = false, faults: TestFaults = {}) {
+  requireRuntime();
+  checkPath(path, temporary, false);
+  const db = new DatabaseSync(pathToFileURL(path), { readOnly: true, timeout: 100 });
+  try {
+    recognizeFormat(db);
+    // Connection-local settings only: never change the source journal or format.
+    db.exec('PRAGMA synchronous=FULL; PRAGMA busy_timeout=100');
+    backupDatabase(db, path, destination, temporary, faults);
+  } finally { db.close(); }
+}
+
+function open(path: string, temporary = false, faults: TestFaults = {}, migrate = false): SQLiteStorage {
   requireRuntime();
   checkPath(path, temporary, false);
   const db = connect(path);
   try {
-    const format = recognizeFormat(db);
+    const format = recognizeFormat(db, migrate ? undefined : 2);
     configure(db);
-    if (format === 1) {
+    if (format === 1 && migrate) {
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       const destination = faults.migrationBackupPath ?? `${path}.pre-format-2.${stamp}.${randomUUID()}.sqlite`;
       backupDatabase(db, path, destination, temporary, faults);
@@ -334,7 +347,15 @@ function open(path: string, temporary = false, faults: TestFaults = {}): SQLiteS
       }
     },
   };
-  return { adapter, desk, backup(destination) {
+  return { adapter, desk, hasDeskHistory() {
+    requireUsable();
+    // These records are retained on withdrawal, supersession and Settlement.
+    // Every desk-bearing Revision atomically retains a publication or request;
+    // format 1 has neither. No Revision JSON/history scan is needed at startup.
+    return db.prepare(`SELECT EXISTS(SELECT 1 FROM desk_questions)
+      OR EXISTS(SELECT 1 FROM desk_answers) OR EXISTS(SELECT 1 FROM reopen_requests)
+      OR EXISTS(SELECT 1 FROM desk_maps) AS used`).get()?.used === 1;
+  }, backup(destination) {
     requireUsable();
     backupDatabase(db, path, destination, temporary, faults);
   }, close() { if (usable) { usable = false; db.close(); } }, listMaps(args = {}) {
@@ -358,8 +379,11 @@ function requireRuntime() {
 
 // Internal disposable-storage seam; never exported by the operator entry point.
 export function sqliteLifecycleForTests(faults: TestFaults | (() => void) = {}) {
+  const configuredFaults = typeof faults === 'function' ? { beforePublication: faults } : faults;
   return { initialize: (path: string) => initialize(path, true),
-    open: (path: string) => open(path, true, typeof faults === 'function' ? { beforePublication: faults } : faults) };
+    open: (path: string, options: { migrate?: boolean } = {}) => open(path, true, configuredFaults, options.migrate),
+    backup: (path: string, destination: string) => backup(path, destination, true, configuredFaults) };
 }
 export function initializeSQLite(path: string): void { initialize(path); }
-export function openSQLite(path: string): SQLiteStorage { return open(path); }
+export function openSQLite(path: string, options: { migrate?: boolean } = {}): SQLiteStorage { return open(path, false, {}, options.migrate); }
+export function backupSQLite(source: string, destination: string): void { backup(source, destination); }

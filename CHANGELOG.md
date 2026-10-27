@@ -5,10 +5,12 @@ All notable project changes are recorded here. Historical implementation evidenc
 Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Release Version, covers the service and the workflow it carries; `docs/spec/mcp-sqlite.md` §14.3 says which part to raise, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion` (`1.0.0` to `3.0.0` below), and the server reported a fixed `0.1.0`.
 
 ## 3.2.0 (2026-10-27)
-- Add format-2 Desk Question, Desk Answer and Reopen Request storage; opening format 1 first retains a consistent private backup, then migrates atomically.
+
+- Add format-2 Desk Question, Desk Answer and Reopen Request storage; service startup explicitly opts into migration, first retains a consistent private backup, then migrates format 1 atomically. Manual backup opens its source read-only, preserving format 1 or 2 in both source and output.
 - Add versioned question publication/withdrawal, typed Taken-answer Settlement citations and guarded Reopen Request handling/closure. Commit rechecks desk state to prevent stale answers or superseded requests winning a race.
 - Expose current/history desk inspection, affected settled dependents and handled-request context through `map_read`; preserve requested options until the target settles again.
-- Stage Answer Desk writes behind the default-off `answerDeskEnabled` service setting (`WAYFINDER_ANSWER_DESK_ENABLED=true` for isolated runs). Four tools and the existing workflow remain; #112–#114 supply delivery, browser UI and the coordinated workflow release.
+- Stage Answer Desk commands, schemas and inspection projections behind the default-off `answerDeskEnabled` service setting (`WAYFINDER_ANSWER_DESK_ENABLED=true` for isolated runs), shared by both protocol eras. Disabled tool definitions match 3.1.0 apart from the Release Version; ordinary reads have no added desk projections. Four tools and the existing workflow remain; #112/#113 supply delivery and browser UI, and #114 publishes the coordinated workflow and enables the desk by default.
+- Refuse disabled startup with `answer_desk_required` if retained desk records show the database has used Answer Desk; the operator message names the enable setting without exposing paths. Migrated but unused databases continue to start normally. Preserve original Revision history in both cases.
 
 ## 3.1.0 (2026-10-27)
 
