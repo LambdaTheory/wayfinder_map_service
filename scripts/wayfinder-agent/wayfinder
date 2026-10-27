@@ -164,6 +164,18 @@ def local_time(iso):
 
 # ---------------------------------------------------------------- service
 
+class LocalServiceRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # A local-service credential must never be forwarded to a redirect target.
+        return None
+
+
+# Private opener: ignore environment/platform proxies and any installed default opener.
+# Do not change the harness's proxy environment or urllib's global networking state.
+LOCAL_SERVICE_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}), LocalServiceRedirectHandler())
+
+
 def primary_token():
     SVC.mkdir(parents=True, exist_ok=True)
     os.chmod(str(SVC), 0o700)
@@ -184,9 +196,10 @@ def post(token, body, session=None, method="POST"):
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request("http://127.0.0.1:{}/mcp".format(PORT), data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=3) as response:
+        with LOCAL_SERVICE_OPENER.open(request, timeout=3) as response:
             return response.status, response.read().decode(), response.headers.get("mcp-session-id")
     except urllib.error.HTTPError as error:
+        error.close()
         return error.code, "", None
     except (urllib.error.URLError, OSError):
         return 0, "", None

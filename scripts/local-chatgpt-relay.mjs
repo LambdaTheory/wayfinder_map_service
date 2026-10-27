@@ -1,4 +1,4 @@
-import { createServer, request as httpRequest } from 'node:http';
+import { Agent, createServer, request as httpRequest } from 'node:http';
 
 // Both ChatGPT relays preserve MCP routing headers; credentials stay operator-owned.
 export const mcpRequestHeaders = [
@@ -10,6 +10,7 @@ export const mcpResponseHeaders = [
 
 /** Create the everyday relay without opening a database, listener or tunnel. */
 export function createLocalChatGptRelay(servicePort, token) {
+  const agent = new Agent({ proxyEnv: {}, keepAlive: false });
   const relay = createServer((incoming, outgoing) => {
     if (incoming.url !== '/mcp') {
       outgoing.writeHead(404).end();
@@ -32,7 +33,7 @@ export function createLocalChatGptRelay(servicePort, token) {
     }
     const upstream = httpRequest({
       hostname: '127.0.0.1', port: servicePort, path: '/mcp',
-      method: incoming.method, headers,
+      method: incoming.method, headers, agent,
     }, response => {
       const forwarded = {};
       for (const name of mcpResponseHeaders) {
@@ -48,5 +49,7 @@ export function createLocalChatGptRelay(servicePort, token) {
     incoming.pipe(upstream);
   });
   relay.requestTimeout = 30_000;
+  relay.once('close', () => agent.destroy());
+  relay.once('error', () => agent.destroy());
   return relay;
 }
