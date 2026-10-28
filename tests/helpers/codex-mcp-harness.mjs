@@ -49,7 +49,7 @@ export function createCodexMcpHarness(options) {
     });
     host = { child, exit, logs: () => logs };
     await Promise.race([ready, exit.then(() => { throw new Error('Service startup failed'); })]);
-    assert.match(logs, new RegExp(`ready version=${workflowContract.version.replaceAll('.', '\\.')}`));
+    assert.ok(logs.includes(`ready version=${workflowContract.version}`));
   }
 
   async function stop() {

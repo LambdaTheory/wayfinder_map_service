@@ -8,9 +8,10 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { initializeSQLite } from '../../dist/sqlite-storage.js';
+import { workflowContract } from '../../dist/workflow.generated.js';
 
 assert.equal(process.versions.node, '26.3.0');
-const version = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url))).version;
+const version = workflowContract.version;
 const parent = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests');
 mkdirSync(parent, { recursive: true, mode: 0o700 });
 const dir = mkdtempSync(join(parent, 'b07-smoke-'));

@@ -24,7 +24,7 @@ The existing backup can be checked by reopening it with `openSQLite` and listing
 
 ## Isolated self-contained-workflow acceptance
 
-The current workflow acceptance is separate from ordinary testing above. Initialize a fresh private database at a new absolute path, then start this foreground runner against that database. The terminal must report the expected version, the one in `package.json`; retain that fixed readiness line without recording the database path or token.
+The current workflow acceptance is separate from ordinary testing above. Initialize a fresh private database at a new absolute path, then start this foreground runner against that database. The terminal must report the version the service actually reports: the release version on an exact release tag, or `<version>+dev.<sha>` on any other build; retain that fixed readiness line without recording the database path or token.
 
 An agent may run this on the user's Mac by driving the ChatGPT app through computer use, after the user agrees to that run (2026-10-25); it takes over the ChatGPT window and stops the dedicated agents' service for the duration. In the app: Plugins, Wayfinder-Save, Manage, **Refresh tools**; then a new chat in Chat mode, outside any project, with the plugin mentioned in each message. ChatGPT shows its model the tool definitions but not the server instructions, so the service serves it in compatibility mode (`toolsOnly`).
 

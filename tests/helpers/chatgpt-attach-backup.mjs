@@ -28,9 +28,9 @@ mock.module('node:child_process', { exports: {
 } });
 const requests = [];
 mock.module('../../scripts/local-chatgpt-attach.mjs', { exports: {
-  async acceptsLocalChatGptToken(port, token) {
+  async probeLocalChatGptService(port, token) {
     requests.push({ port, token });
-    return true;
+    return { accepted: true, version: '3.1.0' };
   },
 } });
 let scheduledBackup;

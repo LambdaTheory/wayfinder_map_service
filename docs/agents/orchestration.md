@@ -4,7 +4,7 @@ How a coordinator runs implementation Issues in parallel with Orca workers, foll
 
 ## Roles
 
-- **Coordinator**: claims Issues, dispatches workers, merges the two reviews into one fix list, verifies, merges, tags, runs approved Batches and notifies Kun. It writes no product or test code.
+- **Coordinator**: claims Issues, dispatches workers, merges the two reviews into one fix list, verifies, merges, publishes the release train, runs approved Batches and notifies Kun. It writes no product or test code.
 - **Developer**: Codex in a new top-level Orca worktree per Issue, branched from the latest `main`. Dependent work starts from `main` after its prerequisite merges; branches are never stacked.
 - **Reviewers**: Claude `/code-review` (Standards and Spec axes) as a background sub-agent of the coordinator, and Grok in the developer's worktree. Orca 1.4.237 offers no Grok worker agent, so the coordinator runs `grok --cwd <worktree> --prompt-file <review brief> --output-format json` in the background, treats the process exit as completion and posts the review as the PR comment. PR code reviews need no approval from Kun.
 
@@ -12,7 +12,7 @@ How a coordinator runs implementation Issues in parallel with Orca workers, foll
 
 - At most three developers at once. When more Issues are ready, Kun's stated priority order decides; the run state records it as a rule.
 - Two reviews for `src/`, `web/`, `scripts/`, `package.json`, `package-lock.json`, `docs/agents/exploration-mcp.md`, and the behaviour code where a false green is the main risk: `tests/behaviour/runner/`, `tests/behaviour/chatgpt/`, `verdict.ts`, `report.ts`, `checks.ts`, `common.ts`, `evidence.ts`. One `/code-review` for other documentation, scenario data and test-only tightening; a must-fix finding there adds the second review.
-- Kun authorized the coordinator to merge on 2026-10-25, with a merge commit as this repository does. Before merging: the full `npm test` and `npm run typecheck` on the branch merged with the latest `main`; each must-fix item reproduced as fixed; the Release Version, `CHANGELOG.md` section and tag per `AGENTS.md`; and, for a change to a mandatory rule or to how clients use the tools, the ChatGPT run with Kun (gate 2).
+- Kun authorized the coordinator to merge on 2026-10-25, with a merge commit as this repository does. Before merging: the full `npm test` and `npm run typecheck` on the branch merged with the latest `main`; each must-fix item reproduced as fixed; the Unreleased entry or release closeout per `AGENTS.md` (ordinary PRs neither bump versions nor tag); and, for a change to a mandatory rule or to how clients use the tools, the ChatGPT run with Kun (gate 2).
 - An Issue that still waits on a gate is referenced with `Refs #n`, not closed by the PR; it closes once its verification is linked on it.
 
 ## Kun's gates
@@ -23,6 +23,13 @@ A gate is the moment work needs Kun's decision. The coordinator labels the Issue
 2. Any ChatGPT app or tunnel operation, and any stop of the everyday service that the current ChatGPT runbook needs.
 3. Wording of a mandatory rule, and any change to a settled decision, scope, gate or human-verdict boundary.
 4. Human verdicts inside a journey (B09c) and final acceptance (B10).
+5. Every everyday service upgrade: Kun must directly approve that specific release and restart. Prior merge, release, Batch or earlier upgrade approval does not authorize it.
+
+## Releases and everyday service upgrades
+
+The coordinator owns the [release procedure](../implementation/releases.md): at most one release per Asia/Singapore calendar day unless Kun requests another. Ordinary PRs add Unreleased entries and do not publish tags. Release publication and everyday service upgrade are separate actions.
+
+Upgrade the everyday service only to a published release and only after Kun's direct approval each time. The coordinator verifies the exact approved tag and a clean main checkout, switches that checkout to the tag (`git switch --detach v<version>`), builds there with Node 26.3.0, checks the built Release Version equals the tag, then runs `wayfinder restart` and verifies `wayfinder status` reports that version. Preserve the existing database and credentials; migration/backup requirements for that release still apply. Leave the checkout at the approved tag, so the launcher's next build remains that release. Outside this approved release-upgrade procedure, do not restart port 18766; development and behavior tests use isolated owned services.
 
 ## Boundaries for workers and reviewers
 

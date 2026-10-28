@@ -7,3 +7,6 @@ src/workflow.generated.ts
 
 # Local orchestration state
 .orchestration/
+
+# Local scratch notes kept beside the checkout
+.scratch/

@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createLocalChatGptRelay } from './local-chatgpt-relay.mjs';
-import { acceptsLocalChatGptToken } from './local-chatgpt-attach.mjs';
+import { probeLocalChatGptService } from './local-chatgpt-attach.mjs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { startLocalMcpService } from '../dist/mcp-service.js';
@@ -39,8 +39,9 @@ function backup() {
   console.log('Consistent SQLite backup completed.');
 }
 
-if (attachToken !== undefined && !await acceptsLocalChatGptToken(servicePort, token)) {
-  console.error('No running local service accepted the attach token; start it with `wayfinder serve`.');
+const attached = attachToken !== undefined ? await probeLocalChatGptService(servicePort, token) : undefined;
+if (attached && (!attached.accepted || !attached.version)) {
+  console.error('No running local service accepted the attach token and reported a Release Version; check `wayfinder status`.');
   process.exit(1);
 }
 const service = attachToken !== undefined ? undefined : await startLocalMcpService({
@@ -128,6 +129,6 @@ process.once('SIGINT', () => { void stop(); });
 process.once('SIGTERM', () => { void stop(); });
 process.once('SIGHUP', () => { void stop(); });
 startTunnel();
-console.log(`Local ChatGPT test session running; version=${workflowContract.version}; press Ctrl-C to stop.`);
+console.log(`Local ChatGPT test session running; version=${attached?.version ?? workflowContract.version}; press Ctrl-C to stop.`);
 if (service === undefined) console.log('Attached to the running local service; stopping this session leaves that service running.');
 console.log('This on-demand Cloudflare endpoint has no user authentication; close it when not testing.');

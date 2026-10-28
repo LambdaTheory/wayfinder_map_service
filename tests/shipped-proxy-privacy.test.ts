@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, expect, test } from 'vitest';
 import { freePort } from './behaviour/runner/service.ts';
-import { acceptsLocalChatGptToken } from '../scripts/local-chatgpt-attach.mjs';
+import { acceptsLocalChatGptToken, probeLocalChatGptService } from '../scripts/local-chatgpt-attach.mjs';
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); });
@@ -94,6 +94,19 @@ test.each(nodeModes)('shipped Node attach and relay keep credentials direct: %s'
   expect(f.received.filter(r => r.method === 'DELETE').every(r => r.session === 'synthetic-session')).toBe(true);
   expect(JSON.parse(f.received[0]!.body).method).toBe('initialize');
 }, 15_000);
+
+test.each(['json', 'sse'])('attach readiness reports the running service version via %s', async format => {
+  const f = await fixture();
+  const version = `5.0.0+dev.d${'a'.repeat(21)}`;
+  f.service.removeAllListeners('request');
+  f.service.on('request', (req, res) => {
+    if (req.method === 'DELETE') { res.writeHead(204).end(); return; }
+    const body = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { serverInfo: { name: 'wayfinder-map', version } } });
+    res.writeHead(200, { 'mcp-session-id': 'synthetic-session' });
+    res.end(format === 'sse' ? `event: message\ndata: ${body}\n\n` : body);
+  });
+  expect(await probeLocalChatGptService(f.servicePort, token)).toEqual({ accepted: true, version });
+});
 
 test.each([301, 302, 303, 307, 308])('authenticated probes refuse HTTP %i redirects', async status => {
   const f = await fixture();
