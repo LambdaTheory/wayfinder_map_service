@@ -227,6 +227,11 @@ def service_version(body):
     return "?"
 
 
+def supports_tools_only(version):
+    base = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:\+dev\.[a-zA-Z0-9.]+)?", version)
+    return bool(base) and tuple(map(int, base.groups())) >= (2, 0, 1)
+
+
 def node_bin():
     for path in (SVC / "node-path", HOME / ".codex-wayfinder/node-path"):
         try:
@@ -860,7 +865,7 @@ def cmd_chatgpt(_args):
     ensure_service()
     # A service before 2.0.1 refuses the whole credentials file when it sees the toolsOnly field.
     version = probe(primary_token())[1]
-    tools_only = bool(re.match(r"\d+\.\d+\.\d+$", version)) and tuple(map(int, version.split("."))) >= (2, 0, 1)
+    tools_only = supports_tools_only(version)
     identity = client_id("ChatGPT", "", "")
     token, sha = register_credential(identity, os.getpid(), tools_only)
     try:

@@ -25,7 +25,7 @@ export const canary = { version: canaryVersion, ticketTitlePrefix };
 type Call = Extract<EventRecord, { kind: 'tool-call' }>;
 const argsOf = (e: Call) => (e.arguments ?? {}) as { version?: unknown; commands?: { kind: string; ticket?: { title?: string } }[]; title?: unknown };
 const versionOf = (g: GivenRules) => g.rulesSource.kind === 'instructions' || g.rulesSource.kind === 'resource' ? g.rulesSource.versionLine.replace(/^version:\s*/, '')
-  : g.rulesSource.kind === 'tool-parameter' ? /\b\d+\.\d+\.\d+\b/.exec(g.rulesSource.description)?.[0] ?? '' : '';
+  : g.rulesSource.kind === 'tool-parameter' ? /\b\d+\.\d+\.\d+(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\b/.exec(g.rulesSource.description)?.[0] ?? '' : '';
 const phaseOf = (a: AttemptRecord, e: Call) => a.given.findLast(g => g.fromSeq <= e.seq);
 const sourceGap = (a: AttemptRecord, calls: Call[]) => calls.map(e => phaseOf(a, e)).flatMap(g => g ? [exposureGap(g)] : []).find(Boolean);
 const strictRecovery = (a: AttemptRecord) => codexLifecycle(a.subject.id) !== undefined && a.subject.version >= 3;

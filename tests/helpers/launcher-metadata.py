@@ -11,6 +11,14 @@ import sys
 
 loaded = runpy.run_path("scripts/wayfinder-agent/wayfinder")
 launcher = loaded["launch"].__globals__
+# Status preserves the entire build identity, including SSE initialize replies.
+for version in ("5.0.0", "5.0.0+dev." + "a" * 22, "5.0.0+dev.d" + "b" * 21):
+    body = json.dumps({"result": {"instructions": "Safety core\n\nversion: " + version + "\n"}})
+    assert launcher["service_version"](body) == version
+    assert launcher["service_version"]("data:" + body + "\n") == version
+    assert launcher["supports_tools_only"](version)
+assert not launcher["supports_tools_only"]("2.0.0+dev." + "a" * 22)
+assert not launcher["supports_tools_only"]("?")
 original_check_harness = launcher["check_harness"]
 original_claude_env = launcher["claude_env"]
 launcher["check_harness"] = lambda *_: None

@@ -133,6 +133,7 @@ test('ChatGPT attach initial, scheduled and final backups preserve the live lega
     });
     expect(output.match(/Consistent SQLite backup completed\./g)).toHaveLength(3);
     expect(output).toContain('Attached to the running local service');
+    expect(output).toContain('session running; version=3.1.0;');
     expect(output).toContain('Local ChatGPT test session stopped.');
     expect(output).not.toContain(dbPath);
   } finally { db.exec('ROLLBACK'); }

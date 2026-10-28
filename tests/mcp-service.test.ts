@@ -29,7 +29,7 @@ const cleanups: (() => void | Promise<void>)[] = [];
 beforeAll(() => { execFileSync('npm', ['run', 'build'], { stdio: 'pipe' }); });
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const token = 'isolated-test-token-not-a-live-credential';
-const version: string = JSON.parse(readFileSync('package.json', 'utf8')).version;
+const version: string = workflowContract.version;
 const protocols = ['2025-11-25', '2026-07-28'] as const;
 type ProtocolVersion = typeof protocols[number];
 const author = { actorId: 'operator', clientId: 'http-acceptance' };

@@ -17,7 +17,7 @@ import type { ClaimantId, Command, NonEmpty, Revision, TicketId, TicketType } fr
 import { rejectionSeed, rejectionCases } from './helpers/mcp-rejection-cases.js';
 import { versioned } from './helpers/write-version.js';
 
-const version: string = JSON.parse(readFileSync('package.json', 'utf8')).version;
+const version: string = workflowContract.version;
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -182,9 +182,28 @@ test('U00: writes name the release whose rules they follow; a missing or other v
   expect(() => createMapMcpServer(f.storage, { ...configuration, toolsOnly: 'yes' } as never)).toThrow('Invalid MCP author configuration');
 });
 
+test.skipIf(!version.includes('+dev.'))('R06: a published version cannot authorize writes to a development build', async () => {
+  const f = await fixture();
+  const published = version.split('+')[0]!;
+  const refusal = { kind: 'rejected', code: 'version_mismatch', version: published, rules: 'wayfinder://workflow/exploration' };
+  for (const name of ['map_create', 'map_apply', 'map_wait', 'map_read']) {
+    const result = await f.client.callTool({ name, arguments: { version: published, claimantId: 'dev-check', mapId: 'Acceptance.Alpha' } });
+    expect(result.structuredContent).toEqual(refusal);
+  }
+  expect((await f.call('map_list')).structuredContent).toMatchObject({ maps: [] });
+  // The actual version from initialization still authorizes ordinary seed writes.
+  const actual = f.client.getServerVersion()!.version;
+  expect(actual).toBe(version);
+  const result = await f.client.callTool({ name: 'map_create', arguments: {
+    version: actual, mapId: 'Acceptance.Alpha', title: 'Development', destination: 'Verify build attestation',
+  } });
+  expect(result.structuredContent).toMatchObject({ kind: 'committed', revision: 1 });
+});
+
 test('W01/W02: initialization, generated tool guidance, Resources and side-effect-free Prompt expose the current release', async () => {
   const f = await fixture();
   expect(f.client.getInstructions()).toBe(workflowContract.instructions);
+  expect(f.client.getServerVersion()!.version).toBe(version);
   expect(f.client.getInstructions()!.startsWith(workflowContract.safetyCore)).toBe(true);
   expect([...workflowContract.safetyCore].length).toBeLessThanOrEqual(512);
   expect(workflowContract.safetyCore).toContain('old request is void until a human sees the new Revision and issues a new request');

@@ -2,7 +2,11 @@
 
 All notable project changes are recorded here. Historical implementation evidence remains in `docs/implementation/` and is not rewritten into this log.
 
-Each section is one release. Since `1.0.1` one SemVer in `package.json`, the Release Version, covers the service and the workflow it carries; `docs/spec/mcp-sqlite.md` §14.3 says which part to raise, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion` (`1.0.0` to `3.0.0` below), and the server reported a fixed `0.1.0`.
+Unreleased collects pending changes; each numbered section is one release. Since `1.0.1` one SemVer in `package.json`, the Release Version, covers the service and the workflow it carries; `docs/spec/mcp-sqlite.md` §14.3 says which part to raise, and each release is tagged `v<version>` on `main` ([ADR 0004](docs/adr/0004-one-release-version.md)). Before that only the workflow had a version, `workflowVersion` (`1.0.0` to `3.0.0` below), and the server reported a fixed `0.1.0`.
+
+## Unreleased
+
+- Minor: batch shipped changes into a daily release train (or release when Kun requests), keeping ordinary PRs on the last package version; rule changes including mandatory rules are minor, incompatible interfaces/storage formats major, and behavior-preserving fixes patch. Unreleased/release checks replace per-PR bumps; development builds report a distinct Release Version across all surfaces and test seeds, and each everyday service upgrade requires Kun's direct approval.
 
 ## 5.0.0 (2026-10-27)
 

@@ -65,7 +65,7 @@ wayfinder help
 
 - 端口 18766，代码取自启动器所在仓库检出的 `dist/`，真实库路径取自同一个检出的 `.env.local`；检出默认是脚本所在的仓库（跟着符号链接找到真实位置），`WAYFINDER_AGENT_CHECKOUT` 可覆盖。服务独占数据库，同一时间只跑一个；端口被别的服务（多半是单独跑的 `npm run serv`）占着，就停下提示。
 - 服务的状态在 `~/.wayfinder-service/`（0700）：主令牌 `wayfinder-token`、`service.pid`、`service.log`、Node 路径 `node-path`、写入来源的令牌 `credentials.json` 和 `credential-owners.json`。2026-10-25 前在 `~/.codex-wayfinder/`；第一次运行时沿用那里的主令牌，`stop` 也认那里的 pid 文件，所以旧启动器拉起的服务照样能查、能停。
-- 退出 agent 后服务继续跑，查看页仍可用；`stop` 才停，连同 ChatGPT 测试一起停。服务一直用它启动时那份代码，检出更新后用 `restart` 换上。停或重启前先退出开着的 MCP 版会话，否则它们的连接会断。
+- 退出 agent 后服务继续跑，查看页仍可用；`stop` 才停，连同 ChatGPT 测试一起停。服务一直用它启动时那份代码。日常服务只在发布时、每次经 Kun 直接同意后升级：主检出切到发布 tag、构建，再 `restart`；除此之外不重启 18766。见[发布与升级步骤](../../docs/agents/orchestration.md#releases-and-everyday-service-upgrades)。停或重启前先退出开着的 MCP 版会话，否则它们的连接会断。
 - `status` 显示的数据库是服务进程实际开着的那个 SQLite 文件（用 `lsof` 看）；和 `.env.local` 现在配的不一样时一并提示。服务没在跑时显示下次启动会用的那个。
 
 ## 写入来源
@@ -108,7 +108,7 @@ wayfinder help
 
 ## 测试
 
-改启动器后，在隔离环境里跑（脚本改动算已发布代码，要按产品规格 §14.3 升版本），别碰真实服务、状态和产出：
+改启动器后，在隔离环境里跑（脚本改动属于 shipped 范围，在 CHANGELOG 的 Unreleased 记一条，随产品规格 §14.3 的发版车发布），别碰真实服务、状态和产出：
 
 ```
 export WAYFINDER_AGENT_CHECKOUT=<装了新代码的产品检出>  WAYFINDER_AGENT_DATABASE=<一次性库>

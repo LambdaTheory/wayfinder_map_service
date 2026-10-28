@@ -1,3 +1,4 @@
+import { workflowContract } from '../../../src/workflow.generated.js';
 // Merge-gate checks: fake cloudflared only, no model and no real tunnel.
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -30,7 +31,7 @@ function fixture(root: string, tunnelId: string = randomUUID()) {
   return { id: tunnelId, root, dir: root, configPath, fake: true, hostname: 'test.example.com' };
 }
 const attemptOptions = (root: string, id: string) => ({ dir: join(root, 'attempt'), batchId: 'verification', attemptId: id, scenario: selectScenarios([id])[0]!,
-  surface: 'app', model: 'fake', commit: 'verification', version: JSON.parse(readFileSync('package.json', 'utf8')).version as string });
+  surface: 'app', model: 'fake', commit: 'verification', version: workflowContract.version });
 // A synthetic human verdict isolates the upgrade script checks; unbacked model readings cannot do so.
 const fixedUpgradeDecision = [{ itemId: 'mismatch-as-outage', status: 'holds' as const, by: 'fixture-human', role: 'human' as const,
   reason: 'Synthetic human decision for the model-only item; rule-source checks must still decide from captured evidence.' }];
@@ -794,7 +795,7 @@ test('ChatGPT recorded discovery, tools/list and writes work sessionlessly with 
       assert.deepEqual(tools.map(t => t.name), ['map_create', 'map_list', 'map_read', 'map_apply', 'map_wait']);
       for (const name of ['map_create', 'map_apply']) {
         const versionField = tools.find(t => t.name === name)!.inputSchema.properties!.version as { description: string };
-        assert.match(versionField.description, new RegExp(`set it to "${a.record.service.version}"`));
+        assert.ok(versionField.description.includes(`set it to "${a.record.service.version}"`));
       }
       const source = listedSource(a);
       await a.begin();

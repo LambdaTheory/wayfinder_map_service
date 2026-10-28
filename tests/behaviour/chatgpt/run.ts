@@ -17,6 +17,8 @@ import { checklist, initialFive, selectScenarios } from './plan.ts';
 import { acquireTunnel } from './tunnel.ts';
 import type { TunnelLease } from './tunnel.ts';
 import { everydayListener, unchangedListener } from './isolation.ts';
+// @ts-expect-error plain ESM build helper, outside the TypeScript source graph
+import { buildReleaseVersion } from '../../../scripts/release-version.mjs';
 
 export const runRoot = join(homedir(), 'Library/Caches/wayfinder-behaviour-tests');
 type ChatGPTSurface = 'app' | 'web' | 'mobile';
@@ -37,7 +39,8 @@ export async function runBatch(options: Options, input: AsyncIterable<string>, l
   if (existsSync(dir)) throw new Error('Batch directory already exists; use a fresh Batch ID (records are never overwritten)');
   mkdirSync(runRoot, { recursive: true, mode: 0o700 });
   mkdirSync(dir, { mode: 0o700 });
-  const version = (JSON.parse(readFileSync(join(checkoutRoot, 'package.json'), 'utf8')) as { version: string }).version;
+  const baseVersion = (JSON.parse(readFileSync(join(checkoutRoot, 'package.json'), 'utf8')) as { version: string }).version;
+  const version: string = buildReleaseVersion(checkoutRoot, baseVersion);
   const { workflowContract } = await import(pathToFileURL(join(checkoutRoot, 'dist/workflow.generated.js')).href) as { workflowContract: { version: string } };
   if (workflowContract.version !== version) throw new Error('dist is stale: run npm run build before this Batch');
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkoutRoot, encoding: 'utf8' }).trim();

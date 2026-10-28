@@ -54,7 +54,7 @@ try {
   }
   assert.equal(existsSync(absent), false);
   const host = command(path, port); await Promise.race([host.ready, host.exit.then(() => { throw new Error('Service exited before ready'); })]);
-  assert.match(host.logs(), new RegExp(`ready version=${workflowContract.version.replaceAll('.', '\\.')}`)); safe(host.logs());
+  assert.ok(host.logs().includes(`ready version=${workflowContract.version}`)); safe(host.logs());
   const a = await createHttpTestClient(port, privateToken);
   assert.equal(a.negotiatedProtocol, '2025-11-25');
   assert.deepEqual((await a.client.listTools()).tools.map(tool => tool.name), ['map_create', 'map_list', 'map_read', 'map_apply', 'map_wait']);
