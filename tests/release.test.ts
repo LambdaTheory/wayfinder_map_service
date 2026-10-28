@@ -27,6 +27,16 @@ function releaseErrors(current: string, released: string, changelog: string, cha
   return errors;
 }
 
+// A branch that changes shipped code adds its own Unreleased entry; reusing an older entry does not count.
+function entries(changelog: string): string[] {
+  const body = (section(changelog, 'Unreleased')[0]?.[2] ?? '').replace(/<!--[\s\S]*?-->/g, '');
+  return body.split('\n').filter(line => /^-\s+\S/.test(line)).map(line => line.trim());
+}
+function branchErrors(baseChangelog: string, headChangelog: string, changed: boolean): string[] {
+  const before = new Set(entries(baseChangelog));
+  return changed && !entries(headChangelog).some(entry => !before.has(entry)) ? ['this branch changes shipped code without adding an Unreleased entry'] : [];
+}
+
 test('R00: package-lock.json and CHANGELOG follow the package.json version', () => {
   expect(version).toMatch(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
   const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
@@ -43,6 +53,17 @@ test('R01: shipped changes accumulate entries; release commits move them into a 
   const tagged = !git('status', '--porcelain', '--untracked-files=all') && git('tag', '--points-at', 'HEAD').split('\n').includes(`v${version}`);
   expect(releaseErrors(version, lastRelease!.slice(1), readFileSync('CHANGELOG.md', 'utf8'), !!changed, tagged),
     `release gate against ${lastRelease}; shipped changes:\n${changed}`).toEqual([]);
+});
+
+test('R03: a branch that changes shipped code adds its own Unreleased entry', () => {
+  let base: string;
+  try { base = git('merge-base', 'HEAD', 'origin/main'); } catch { console.warn('R03 skipped: origin/main is unavailable; R01 still requires a nonempty Unreleased entry.'); return; }
+  const released = git('tag', '--list', 'v*', '--merged', 'HEAD', '--sort=-v:refname').split('\n')
+    .find(tag => /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag));
+  if (released && compare(version, released.slice(1)) > 0) return; // A release commit empties Unreleased instead.
+  const changed = git('diff', '--name-only', base, '--', ...shipped) || git('ls-files', '--others', '--exclude-standard', '--', ...shipped);
+  expect(branchErrors(git('show', `${base}:CHANGELOG.md`), readFileSync('CHANGELOG.md', 'utf8'), !!changed),
+    `branch gate against merge-base ${base.slice(0, 7)}; shipped changes:\n${changed}`).toEqual([]);
 });
 
 const history = '\n## 5.0.0 (2026-10-27)\n\n- Previous release.\n';
@@ -63,4 +84,13 @@ test.each([
   ['missing Unreleased', '5.0.0', history, false, false, ['exactly one Unreleased section is required']],
 ] as const)('R02: %s', (_name, current, changelog, changed, tagged, errors) => {
   expect(releaseErrors(current, '5.0.0', changelog, changed, tagged)).toEqual(errors);
+});
+
+test.each([
+  ['first shipped change adds an entry', `## Unreleased\n${history}`, pending, true, []],
+  ['second shipped change reuses the old entry', pending, pending, true, ['this branch changes shipped code without adding an Unreleased entry']],
+  ['second shipped change adds its own entry', pending, pending.replace('- Minor: next rule change.', '- Minor: next rule change.\n- Patch: a fix.'), true, []],
+  ['docs-only branch', pending, pending, false, []],
+] as const)('R04: %s', (_name, base, head, changed, errors) => {
+  expect(branchErrors(base, head, changed)).toEqual(errors);
 });
