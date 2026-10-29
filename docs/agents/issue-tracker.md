@@ -1,6 +1,6 @@
 # Issue tracker: GitHub Issues
 
-Implementation uses [GitHub Issues](https://github.com/kun-g/wayfinder_map_service/issues) in the private repository `kun-g/wayfinder_map_service`. The 2026-09-18 migration moved completed M1 planning to `docs/archive/m1-planning/` and the two deferred planning Maps to native GitHub parent/child Issues. The deletion Map remains on GitHub; the rollback Map was closed on 2026-10-25 when the user dropped rollback. New exploration Map state uses the product MCP workflow in [exploration-mcp.md](exploration-mcp.md). Local `.scratch/` paths are compatibility redirects, not live trackers.
+Implementation uses [GitHub Issues](https://github.com/LambdaTheory/wayfinder_map_service/issues) in the public repository `LambdaTheory/wayfinder_map_service` (moved from `kun-g` on 2026-10-29; old URLs redirect). The 2026-09-18 migration moved completed M1 planning to `docs/archive/m1-planning/` and the two deferred planning Maps to native GitHub parent/child Issues. The deletion Map remains on GitHub; the rollback Map was closed on 2026-10-25 when the user dropped rollback. New exploration Map state uses the product MCP workflow in [exploration-mcp.md](exploration-mcp.md). Local `.scratch/` paths are compatibility redirects, not live trackers.
 
 ## Authority
 
@@ -8,7 +8,7 @@ Implementation uses [GitHub Issues](https://github.com/kun-g/wayfinder_map_servi
 - Implementation progress, assignees, blockers and delivery resolutions: GitHub Issues.
 - New exploration Destination, Tickets, Dependencies, Claims, Settlements, Fog and Scope: the product MCP Map described in [exploration-mcp.md](exploration-mcp.md).
 - Completed planning provenance, human confirmations, withdrawn proposals and prototypes: `docs/archive/`. Earlier statements yield to later accepted scope corrections and the current specification.
-- Active planning entry points: `docs/planning/README.md` and [Ticket and Map deletion Map](https://github.com/kun-g/wayfinder_map_service/issues/17). No deletion specification is accepted yet. Ticket 07 preserves unconfirmed deletion recommendations.
+- Active planning entry points: `docs/planning/README.md` and [Ticket and Map deletion Map](https://github.com/LambdaTheory/wayfinder_map_service/issues/17). No deletion specification is accepted yet. Ticket 07 preserves unconfirmed deletion recommendations.
 
 PRs as a request surface: **off**. PRs are implementation evidence rather than independent triage requests. These development trackers are separate from product Map state, Claims and StateAdapter operations.
 
@@ -40,7 +40,7 @@ Native relationships use the documented [sub-issue API](https://docs.github.com/
 
 ## M1 Project
 
-The private [Wayfinder Map Service — M1 project](https://github.com/users/kun-g/projects/5) has default repository `kun-g/wayfinder_map_service`. Its enabled auto-add workflow selects repository Issues with `is:issue -label:planning`, keeping post-M1 planning outside this delivery board. Native planning parent/child relationships remain visible in Issues without a second project.
+The private [Wayfinder Map Service — M1 project](https://github.com/users/kun-g/projects/5) has default repository `LambdaTheory/wayfinder_map_service`. Its enabled auto-add workflow selects repository Issues with `is:issue -label:planning`, keeping post-M1 planning outside this delivery board. The project stayed under `kun-g` when the repository moved to LambdaTheory on 2026-10-29; its default repository and auto-add workflow were not re-checked after the move. Native planning parent/child relationships remain visible in Issues without a second project.
 
 Closing an Issue moves its card to Done. Auto-close from card status is disabled: verify acceptance and close explicitly. Native Issue state, assignees and blockers remain authoritative.
 

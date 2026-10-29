@@ -4,7 +4,7 @@ Status: requirements accepted by the live user on 2026-10-23 after reviewing a r
 
 Use [GLOSSARY.md](../../GLOSSARY.md) for domain language and the [v1 contract](v1.md) for the wider product. This slice delivers part of M4 (visual projection) locally; it does not complete M4.
 
-Sections 1–4 record the delivered read-only slice. [Section 5](#5-answer-desk-amendment) records the answer-only amendment accepted by Kun on 2026-10-26 under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109); it does not claim that the running viewer accepts answers.
+Sections 1–4 record the delivered read-only slice. [Section 5](#5-answer-desk-amendment) records the answer-only amendment accepted by Kun on 2026-10-26 under [#109](https://github.com/LambdaTheory/wayfinder_map_service/issues/109); it does not claim that the running viewer accepts answers.
 
 ## 1. Decisions
 

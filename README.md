@@ -19,7 +19,7 @@ Wayfinder Map Service 是一套与客户端无关的决策地图系统，供 Cha
 
 4.0.0 默认开启答题台，并移除关闭模式；旧的显式关闭配置会拒绝启动。`wayfinder desk <地图 ID>` 打开只写答复的带钥匙入口；查看、地图编辑和 agent 结算的边界见[实现记录](docs/implementation/answer-desk-viewer.md)。
 
-删除仍在规划，规格尚未接受；回滚 2026-10-25 起不做了。实现跟踪见 [GitHub Issues](https://github.com/kun-g/wayfinder_map_service/issues)，规划入口见 [GitHub 规划地图](docs/planning/README.md)。v1 契约中网页渲染的缩放和过滤、MCP Apps UI、OAuth 和 PostgreSQL 尚未进入这个本地切片。
+删除仍在规划，规格尚未接受；回滚 2026-10-25 起不做了。实现跟踪见 [GitHub Issues](https://github.com/LambdaTheory/wayfinder_map_service/issues)，规划入口见 [GitHub 规划地图](docs/planning/README.md)。v1 契约中网页渲染的缩放和过滤、MCP Apps UI、OAuth 和 PostgreSQL 尚未进入这个本地切片。
 
 ## 启动
 

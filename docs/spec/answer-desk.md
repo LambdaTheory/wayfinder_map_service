@@ -1,6 +1,6 @@
 # Answer Desk
 
-Status: accepted by Kun on 2026-10-26 for [#109](https://github.com/kun-g/wayfinder_map_service/issues/109), part of [#108](https://github.com/kun-g/wayfinder_map_service/issues/108). Issue closeout follows the [gate in section 10](#10-accepted-by-kun-on-2026-10-26). This describes the implementation contract, not a delivered capability.
+Status: accepted by Kun on 2026-10-26 for [#109](https://github.com/LambdaTheory/wayfinder_map_service/issues/109), part of [#108](https://github.com/LambdaTheory/wayfinder_map_service/issues/108). Issue closeout follows the [gate in section 10](#10-accepted-by-kun-on-2026-10-26). This describes the implementation contract, not a delivered capability.
 
 The design session's defaults, including the review and re-review clarifications on storage, citations, reopening and public schemas, were accepted by Kun on 2026-10-26 and relayed through the implementation coordinator. This document is their single normative source; the viewer/MCP amendments and ADRs link here. Use [GLOSSARY.md](../../GLOSSARY.md), [M1](m1.md), [the local MCP contract](mcp-sqlite.md) and [the viewer contract](map-viewer.md) for unchanged behavior.
 
