@@ -18,7 +18,7 @@ Decide the ChatGPT run by behavior impact, not by which version part rises. A ch
 
 ### Issue tracker
 
-Implementation uses GitHub Issues in `kun-g/wayfinder_map_service`; the existing deletion planning Map also remains there. Read `docs/agents/issue-tracker.md` before querying or mutating GitHub. New exploration Map state uses Wayfinder MCP. Repository maintainers read `docs/agents/exploration-mcp.md` before changing its workflow; ordinary compatible clients follow the connected server contract when creating, finding, resuming or advancing a Map. The private M1 Project board and synchronization rules are documented in `docs/agents/issue-tracker.md`.
+Implementation uses GitHub Issues in `LambdaTheory/wayfinder_map_service`; the existing deletion planning Map also remains there. Read `docs/agents/issue-tracker.md` before querying or mutating GitHub. New exploration Map state uses Wayfinder MCP. Repository maintainers read `docs/agents/exploration-mcp.md` before changing its workflow; ordinary compatible clients follow the connected server contract when creating, finding, resuming or advancing a Map. The private M1 Project board and synchronization rules are documented in `docs/agents/issue-tracker.md`.
 
 Coordinating Issues in parallel with Orca workers follows `docs/agents/orchestration.md`: roles, review depth, merge checks, Kun's gates and worker boundaries.
 

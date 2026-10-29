@@ -4,7 +4,7 @@ status: accepted
 
 # A task-capable fifth tool delivers Desk Answers
 
-Kun chose `map_wait` as a fifth business tool on 2026-10-26 ([#108](https://github.com/kun-g/wayfinder_map_service/issues/108)). It releases answers for the caller's claimed Tickets after the Map's Quiet Window: a client opting into MCP Tasks receives a task, while other clients can hold an ordinary blocking call. The choice keeps delivery in the service that owns the answers and makes the wait independent of an agent's terminal. Kun accepted the detailed decisions on 2026-10-26; the [Answer Desk specification](../spec/answer-desk.md) records them for the design session's transcription check under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109).
+Kun chose `map_wait` as a fifth business tool on 2026-10-26 ([#108](https://github.com/LambdaTheory/wayfinder_map_service/issues/108)). It releases answers for the caller's claimed Tickets after the Map's Quiet Window: a client opting into MCP Tasks receives a task, while other clients can hold an ordinary blocking call. The choice keeps delivery in the service that owns the answers and makes the wait independent of an agent's terminal. Kun accepted the detailed decisions on 2026-10-26; the [Answer Desk specification](../spec/answer-desk.md) records them for the design session's transcription check under [#109](https://github.com/LambdaTheory/wayfinder_map_service/issues/109).
 
 ## Considered options
 

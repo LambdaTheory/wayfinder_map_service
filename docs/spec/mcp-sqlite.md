@@ -8,16 +8,16 @@ Date: 2026-09-18. Planning Destination: a minimal client-neutral SQLite-backed M
 
 Use [GLOSSARY.md](../../GLOSSARY.md) for domain language, [M1](m1.md) for unchanged domain behavior and the [v1 contract](v1.md) for the wider product. This document consolidates the human-confirmed local slice, not completion of v1 or M2–M6.
 
-Sections 1–14 record their original slice and acceptance boundaries. The [Answer Desk follow-on in section 15](#15-answer-desk-follow-on-slice), accepted by Kun on 2026-10-26 under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109), amends the tool/protocol/viewer-write boundaries, §6's net-no-op classification and §8/§9 storage and migration rules. Those amendments take effect after #109 closeout and the respective implementation is delivered; they are not claims about the current service.
+Sections 1–14 record their original slice and acceptance boundaries. The [Answer Desk follow-on in section 15](#15-answer-desk-follow-on-slice), accepted by Kun on 2026-10-26 under [#109](https://github.com/LambdaTheory/wayfinder_map_service/issues/109), amends the tool/protocol/viewer-write boundaries, §6's net-no-op classification and §8/§9 storage and migration rules. Those amendments take effect after #109 closeout and the respective implementation is delivered; they are not claims about the current service.
 
 | Source | Role |
 | --- | --- |
-| [Codex MCP and SQLite acceptance planning Map](https://github.com/kun-g/wayfinder_map_service/issues/27) | Destination and human-approved slice boundaries |
-| [Research Codex connection and SQLite runtime constraints](https://github.com/kun-g/wayfinder_map_service/issues/28#issuecomment-5725823549) | Sourced facts; [immutable research artifact](https://github.com/kun-g/wayfinder_map_service/blob/ae7d1451494d36e0938b5ce103eecc44ddccaafa/docs/research/mcp-sqlite-runtime.md) |
-| [Define the headless MCP and service contract](https://github.com/kun-g/wayfinder_map_service/issues/29#issuecomment-5727101846) | Tools, results, access, authorship, lifecycle and failure boundaries |
-| [Define the durable SQLite Adapter contract](https://github.com/kun-g/wayfinder_map_service/issues/30#issuecomment-5727392356) | Runtime, storage ownership, initialization, publication, durability and backup; Q10 withdrawn |
-| [Define real-MCP acceptance and exploration adoption](https://github.com/kun-g/wayfinder_map_service/issues/31#issuecomment-5728664978) | Automated/live evidence, isolated tests and explicit adoption gate |
-| [Synthesize the MCP and SQLite implementation specification](https://github.com/kun-g/wayfinder_map_service/issues/32) | This handoff and its live human confirmation |
+| [Codex MCP and SQLite acceptance planning Map](https://github.com/LambdaTheory/wayfinder_map_service/issues/27) | Destination and human-approved slice boundaries |
+| [Research Codex connection and SQLite runtime constraints](https://github.com/LambdaTheory/wayfinder_map_service/issues/28#issuecomment-5725823549) | Sourced facts; [immutable research artifact](https://github.com/LambdaTheory/wayfinder_map_service/blob/ae7d1451494d36e0938b5ce103eecc44ddccaafa/docs/research/mcp-sqlite-runtime.md) |
+| [Define the headless MCP and service contract](https://github.com/LambdaTheory/wayfinder_map_service/issues/29#issuecomment-5727101846) | Tools, results, access, authorship, lifecycle and failure boundaries |
+| [Define the durable SQLite Adapter contract](https://github.com/LambdaTheory/wayfinder_map_service/issues/30#issuecomment-5727392356) | Runtime, storage ownership, initialization, publication, durability and backup; Q10 withdrawn |
+| [Define real-MCP acceptance and exploration adoption](https://github.com/LambdaTheory/wayfinder_map_service/issues/31#issuecomment-5728664978) | Automated/live evidence, isolated tests and explicit adoption gate |
+| [Synthesize the MCP and SQLite implementation specification](https://github.com/LambdaTheory/wayfinder_map_service/issues/32) | This handoff and its live human confirmation |
 
 Later accepted decisions supersede earlier proposals in research/discussion. In particular, do not restore full write snapshots by default, duplicate JSON text for compatibility, or proactive/per-read integrity audits. Research recommendations are not independently normative choices.
 
@@ -362,7 +362,7 @@ Publish a new implementation report and machine-readable evidence without rewrit
 
 ## 15. Answer Desk follow-on slice
 
-Status: accepted by Kun on 2026-10-26 under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109); the design session checks the transcription before Issue closeout. This amends the tool, protocol and viewer-write boundaries, §6's net-no-op classification and §8/§9 storage/migration rules, after #109 closes and the respective implementation is delivered. Original acceptance evidence remains historical evidence.
+Status: accepted by Kun on 2026-10-26 under [#109](https://github.com/LambdaTheory/wayfinder_map_service/issues/109); the design session checks the transcription before Issue closeout. This amends the tool, protocol and viewer-write boundaries, §6's net-no-op classification and §8/§9 storage/migration rules, after #109 closes and the respective implementation is delivered. Original acceptance evidence remains historical evidence.
 
 The [Answer Desk specification](answer-desk.md) is the single normative source for desk behavior. [ADR 0006](../adr/0006-answer-desk-in-the-map-viewer.md) and [ADR 0007](../adr/0007-map-wait-for-answer-delivery.md) record the architectural alternatives.
 

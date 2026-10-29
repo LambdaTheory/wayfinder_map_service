@@ -4,7 +4,7 @@ status: accepted
 
 # The Map viewer accepts keyed answers
 
-Kun chose an Answer Desk inside the local Wayfinder service on 2026-10-26 ([#108](https://github.com/kun-g/wayfinder_map_service/issues/108)). Wide Maps have many independent questions ready together; answering in the agent's conversation serializes human attention and can block research. The existing Map viewer gains a second write entry for Desk Answers and Reopen Requests, protected by a key. Agents still post and withdraw Desk Questions, edit Maps, manage Claims and settle Tickets through MCP. Kun accepted the detailed decisions on 2026-10-26; [the Answer Desk specification](../spec/answer-desk.md) records them for the design session's transcription check under [#109](https://github.com/kun-g/wayfinder_map_service/issues/109).
+Kun chose an Answer Desk inside the local Wayfinder service on 2026-10-26 ([#108](https://github.com/LambdaTheory/wayfinder_map_service/issues/108)). Wide Maps have many independent questions ready together; answering in the agent's conversation serializes human attention and can block research. The existing Map viewer gains a second write entry for Desk Answers and Reopen Requests, protected by a key. Agents still post and withdraw Desk Questions, edit Maps, manage Claims and settle Tickets through MCP. Kun accepted the detailed decisions on 2026-10-26; [the Answer Desk specification](../spec/answer-desk.md) records them for the design session's transcription check under [#109](https://github.com/LambdaTheory/wayfinder_map_service/issues/109).
 
 ## Considered options
 
