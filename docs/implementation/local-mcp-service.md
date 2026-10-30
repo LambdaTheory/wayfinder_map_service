@@ -22,7 +22,9 @@ The command reads operator environment configuration, never caller-selected path
 | `WAYFINDER_ALLOWED_ORIGINS` | Optional JSON array, default `[]`; each entry must be an exact canonical HTTP/HTTPS origin with hostname `127.0.0.1` or `localhost`, no path/credentials/wildcard |
 | `WAYFINDER_CREDENTIALS_FILE` | Optional absolute path to an operator-written credentials file; see below |
 
-Explicit first-use initialization remains the separate `initializeSQLite(path)` API from `src/sqlite-storage.ts` (built `dist/sqlite-storage.js`), at a nonexistent fresh private target only. The service never initializes, repairs, migrates, resets or substitutes storage. Missing/wrong/unsupported storage and ordinary open failures produce safe `storage_not_ready` startup failure before listening. Invalid configuration produces `invalid_configuration`; bind/occupied-port failures produce `port_unavailable`. Exit is nonzero, with no private path, raw cause or token. An occupied port is never replaced with a random one.
+Explicit first-use initialization remains the separate `initializeSQLite(path)` API from `src/sqlite-storage.ts` (built `dist/sqlite-storage.js`), at a nonexistent fresh private target only. The service never initializes, repairs, resets or substitutes storage. Current startup opens with `migrate: true`: a recognized format-1 database receives a consistent private pre-migration backup before the transactional format-2 upgrade, as accepted in [Answer Desk §8.2](../spec/answer-desk.md#82-format-2-and-startup-migration). Missing/wrong/unsupported storage and ordinary open failures produce safe `storage_not_ready` startup failure before listening. Invalid configuration produces `invalid_configuration`; bind/occupied-port failures produce `port_unavailable`. Exit is nonzero, with no private path, raw cause or token. An occupied port is never replaced with a random one.
+
+Windows operators can use the independent [Windows local entry point](../windows.md); its storage policy uses private NTFS ACLs instead of POSIX mode bits, retaining the same SQLite format, MCP tools and domain implementation.
 
 ### Further credentials
 

@@ -2,6 +2,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { assertPrivate, assertPrivateFileParent } from './private-paths.js';
 
 export function createViewerKey(path?: string) {
   const key = randomBytes(32).toString('base64url');
@@ -14,16 +15,22 @@ export function createViewerKey(path?: string) {
       if (path === undefined) return;
       // The launcher creates its private directory. Never follow a key-file symlink
       // or write a credential into a shared directory, even on first startup.
-      const parent = lstatSync(dirname(path));
-      if (!parent.isDirectory() || parent.uid !== process.getuid?.() || (parent.mode & 0o077)) throw Error('Private key directory required');
-      try {
-        const existing = lstatSync(path);
-        if (!existing.isFile() || existing.uid !== parent.uid || (existing.mode & 0o077)) throw Error('Private key file required');
-      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (process.platform === 'win32') assertPrivateFileParent(path);
+      else {
+        // Preserve the existing POSIX launcher contract; NTFS ACL checks are
+        // additive and must not impose Windows path/mode rules on macOS.
+        const parent = lstatSync(dirname(path));
+        if (!parent.isDirectory() || parent.uid !== process.getuid?.() || (parent.mode & 0o077)) throw Error('Private key directory required');
+        try {
+          const existing = lstatSync(path);
+          if (!existing.isFile() || existing.uid !== parent.uid || (existing.mode & 0o077)) throw Error('Private key file required');
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      }
       const temporary = `${path}.${randomBytes(12).toString('hex')}`;
       const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       try {
         try { writeFileSync(fd, key); } finally { closeSync(fd); }
+        if (process.platform === 'win32') assertPrivate(temporary, false);
         renameSync(temporary, path); published = true;
       }
       finally { try { unlinkSync(temporary); } catch { /* Renamed or failed before publication. */ } }

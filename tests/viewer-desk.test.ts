@@ -11,6 +11,20 @@ import type { Command, MapId, NonEmpty, Revision, MutationAuthor } from '../src/
 import { createViewerKey } from '../src/viewer-key.js';
 const cleanups: (() => unknown)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+
+test.skipIf(process.platform === 'win32')('POSIX key publication still replaces an existing owner-read-only key', () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'viewer-key-posix-')));
+  cleanups.push(() => rmSync(directory, { recursive: true }));
+  chmodSync(directory, 0o700);
+  const path = join(directory, 'key');
+  writeFileSync(path, 'old-process-key', { mode: 0o400 });
+  const key = createViewerKey(path);
+  key.publish();
+  expect(key.accepts(readFileSync(path, 'utf8'))).toBe(true);
+  expect(statSync(path).mode & 0o777).toBe(0o600);
+  key.remove();
+  expect(existsSync(path)).toBe(false);
+});
 const token = 'synthetic-mcp-token-not-a-browser-key';
 const mapId = 'Desk.Test' as MapId;
 const author = { actorId: 'test', clientId: 'test', occurredAt: '2026-10-27T00:00:00.000Z' } as MutationAuthor;

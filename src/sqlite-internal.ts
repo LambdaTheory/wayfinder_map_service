@@ -3,8 +3,9 @@ import { prepareApply } from './create.js';
 import { createDeskStorage } from './desk-storage.js';
 import type { DeskStorage } from './desk-storage.js';
 import type { DeskState } from './desk-types.js';
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, realpathSync, statfsSync } from 'node:fs';
-import { dirname, isAbsolute, join, parse, resolve, sep } from 'node:path';
+import { closeSync, existsSync, lstatSync, openSync, realpathSync, statfsSync } from 'node:fs';
+import { dirname, join, parse, sep } from 'node:path';
+import { assertCanonicalPrivatePath, assertPrivate, checkWindowsSQLitePath, makePrivateDirectory } from './private-paths.js';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -59,14 +60,14 @@ function connect(path: string) {
 }
 
 function checkPath(path: string, temporary: boolean, initializing: boolean) {
-  if (!isAbsolute(path) || path !== resolve(path) || path.includes('\0')) throw new Error('Canonical absolute SQLite path required');
+  assertCanonicalPrivatePath(path);
   let component = parse(path).root;
   for (const segment of path.slice(component.length).split(sep)) {
     component = join(component, segment);
     try {
       const stat = lstatSync(component);
       if (stat.isSymbolicLink()) throw new Error('SQLite path must not contain symlinks');
-      if (component !== path && (!stat.isDirectory() || (stat.uid !== 0 && stat.uid !== process.getuid?.())
+      if (process.platform !== 'win32' && component !== path && (!stat.isDirectory() || (stat.uid !== 0 && stat.uid !== process.getuid?.())
         || ((stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0))) {
         throw new Error('Unsafe SQLite ancestor ownership or writable permissions');
       }
@@ -74,13 +75,18 @@ function checkPath(path: string, temporary: boolean, initializing: boolean) {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
   if (!temporary) {
-    const roots = [...new Set([tmpdir(), '/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp', '/private/var/folders'].filter(existsSync).map(root => realpathSync(root)))];
-    if (roots.some(root => path === root || path.startsWith(root + sep))) throw new Error('Temporary canonical SQLite storage is forbidden');
+    const roots = [...new Set((process.platform === 'win32' ? [tmpdir(),
+      join(process.env.LOCALAPPDATA ?? join(process.env.USERPROFILE ?? 'C:\\Users\\Default', 'AppData', 'Local'), 'Temp'),
+      join(process.env.SystemRoot ?? 'C:\\Windows', 'Temp'),
+    ] : [tmpdir(), '/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp', '/private/var/folders']).filter(existsSync).map(root => realpathSync(root)))];
+    const comparable = (value: string) => process.platform === 'win32' ? value.toLowerCase() : value;
+    if (roots.some(root => comparable(path) === comparable(root) || comparable(path).startsWith(comparable(root + sep)))) throw new Error('Temporary canonical SQLite storage is forbidden');
     for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
       if (existsSync(join(ancestor, '.git'))) throw new Error('SQLite storage must be outside repositories/worktrees');
       if (ancestor === dirname(ancestor)) break;
     }
   }
+  if (process.platform === 'win32') { checkWindowsSQLitePath(path, initializing); return; }
   const parent = dirname(path);
   if (existsSync(parent)) checkPrivate(parent, true);
   else if (!initializing) throw new Error('SQLite directory is missing');
@@ -99,6 +105,7 @@ function checkPath(path: string, temporary: boolean, initializing: boolean) {
 }
 
 function checkPrivate(path: string, directory: boolean) {
+  if (process.platform === 'win32') { assertPrivate(path, directory); return; }
   const stat = lstatSync(path);
   if ((directory ? !stat.isDirectory() : !stat.isFile()) || stat.uid !== process.getuid?.()
     || (stat.mode & 0o777) !== (directory ? 0o700 : 0o600)) throw new Error('Unsafe SQLite ownership or permissions');
@@ -107,7 +114,7 @@ function checkPrivate(path: string, directory: boolean) {
 function initialize(path: string, temporary = false) {
   requireRuntime();
   checkPath(path, temporary, true);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  makePrivateDirectory(dirname(path));
   // Recheck newly created ancestry before reserving/opening the DB.
   checkPath(path, temporary, true);
   closeSync(openSync(path, 'wx', 0o600));
@@ -169,7 +176,7 @@ function backupDatabase(db: DatabaseSync, path: string, destination: string, tem
     try { lstatSync(destination + suffix); throw new Error('Backup target or sidecar already exists'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
-  mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
+  makePrivateDirectory(dirname(destination));
   checkPath(destination, temporary, true);
   closeSync(openSync(destination, 'wx', 0o600));
   try {
@@ -375,6 +382,7 @@ function open(path: string, temporary = false, faults: TestFaults = {}, migrate 
 
 function requireRuntime() {
   if (process.versions.node !== '26.3.0') throw new Error('Wayfinder SQLite requires Node.js 26.3.0');
+  if (!['darwin', 'linux', 'win32'].includes(process.platform)) throw new Error('Supported local platform required');
 }
 
 // Internal disposable-storage seam; never exported by the operator entry point.

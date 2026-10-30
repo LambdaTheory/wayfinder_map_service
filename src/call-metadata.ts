@@ -7,6 +7,7 @@ import type { CallToolResult } from '@modelcontextprotocol/server';
 import { isPlainObject, validateId } from './values.js';
 import { answerDeskMapTools } from './mcp-schemas.js';
 import { workflowContract } from './workflow.generated.js';
+import { assertPrivate, assertPrivateFileParent } from './private-paths.js';
 
 export const metadataSchema = 'wayfinder-service-call/1';
 export type CallResult = 'committed' | 'read' | 'input-error' | 'command-rejected' | 'version-mismatch'
@@ -58,12 +59,14 @@ const secretDigest = (value: string): SecretDigest => ({ length: value.length, h
 /** Append only to a private, single-link regular file. Do not follow links or block on a substituted FIFO. */
 export function appendPrivateMetadata(path: string, record: unknown): void {
   if (!isAbsolute(path)) throw new Error('Invalid metadata target');
+  if (process.platform === 'win32') assertPrivateFileParent(path);
   const fd = openSync(path, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600 || stat.uid !== process.getuid?.()) {
+    if (!stat.isFile() || stat.nlink !== 1 || (process.platform !== 'win32' && ((stat.mode & 0o777) !== 0o600 || stat.uid !== process.getuid?.()))) {
       throw new Error('Invalid metadata target');
     }
+    if (process.platform === 'win32') assertPrivate(path, false);
     writeFileSync(fd, `${JSON.stringify(record)}\n`);
   } finally { closeSync(fd); }
 }

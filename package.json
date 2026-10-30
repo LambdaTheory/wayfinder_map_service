@@ -13,11 +13,12 @@
     "serv": "npm run --silent chatgpt:test",
     "chatgpt:test": "npm run --silent build && node --env-file-if-exists=.env.local scripts/local-chatgpt-test.mjs",
     "start": "npm run --silent build && node dist/mcp-start.js",
+    "windows": "node dist/windows-local.js",
+    "test:windows": "npm run --silent build && node scripts/test-windows.mjs",
     "typecheck": "npm run --silent workflow:build && tsc --noEmit",
     "test": "npm run --silent workflow:build && vitest run"
   },
   "devDependencies": {
-    "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/ext-tasks": "0.2.2",
     "@types/node": "26.6.1",
     "ajv": "8.20.0",
@@ -25,6 +26,7 @@
     "vitest": "5.0.1"
   },
   "dependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/node": "2.1.2",
     "@modelcontextprotocol/server": "2.4.0"
   }
