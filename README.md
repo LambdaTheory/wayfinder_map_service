@@ -23,6 +23,8 @@ Wayfinder Map Service 是一套与客户端无关的决策地图系统，供 Cha
 
 ## 启动
 
+Windows 本地版本见 [Windows 使用说明](docs/windows.md)：独立的私有 NTFS 实例、初始化/启动/停止、通用 MCP 接入和安全答题入口。该入口使用当前客户端自己的模型设置。
+
 按需的 ChatGPT 测试会话在仓库根目录使用已被忽略的 `.env.local`。其中 `WAYFINDER_DATABASE_PATH` 指向已有私有 SQLite 的绝对路径。启动：
 
 ```sh

@@ -1,0 +1,2 @@
+# Skills carry byte hashes; preserve the same text bytes on Windows checkouts.
+* text=auto eol=lf

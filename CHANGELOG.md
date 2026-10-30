@@ -6,6 +6,9 @@ Unreleased collects pending changes; each numbered section is one release. Since
 
 ## Unreleased
 
+- Minor: add an independent Windows local instance with private NTFS ACL storage, consistent backups, generic MCP client configuration and an Answer Desk browser handoff over anonymous pipes, preserving the existing POSIX permission checks and macOS launcher.
+- Minor: add a Windows stdio-to-loopback MCP adapter for project-local Codex connections affected by system proxies; document persistent service startup and waiting for a live tool connection before the first turn.
+
 - Minor: batch shipped changes into a daily release train (or release when Kun requests), keeping ordinary PRs on the last package version; rule changes including mandatory rules are minor, incompatible interfaces/storage formats major, and behavior-preserving fixes patch. Unreleased/release checks replace per-PR bumps; development builds report a distinct Release Version across all surfaces and test seeds, and each everyday service upgrade requires Kun's direct approval.
 
 ## 5.0.0 (2026-10-27)

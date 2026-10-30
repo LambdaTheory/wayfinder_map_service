@@ -37,6 +37,7 @@ test.each(['.agents/skills/wayfinder/SKILL.md', 'docs/agents/exploration-mcp.md'
 
 test('W00: deterministic workflow extraction validates version, order, tool set and safety bound', () => {
   expect(parseWorkflow(source, '1.0.1')).toEqual(parseWorkflow(source, '1.0.1'));
+  expect(parseWorkflow(source.replace(/\r?\n/g, '\r\n'), '1.0.1')).toEqual(parseWorkflow(source.replace(/\r\n/g, '\n'), '1.0.1'));
   expect(parseWorkflow(source, '1.0.1')).toMatchObject({ version: '1.0.1' });
   expect(parseWorkflow(source, '1.0.1').instructions).toContain('\n\nversion: 1.0.1\n\n');
   expect([...parseWorkflow(source, '1.0.1').safetyCore].length).toBeLessThanOrEqual(512);

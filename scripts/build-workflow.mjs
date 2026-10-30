@@ -14,6 +14,8 @@ function fail(message) { throw new Error(`Workflow build refused: ${message}`); 
 
 // The service and its workflow share one version, package.json's; the workflow source carries none.
 export function parseWorkflow(markdown, version) {
+  // A Windows checkout must carry the same instruction paragraphs and bytes.
+  markdown = markdown.replace(/\r\n/g, '\n');
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\+dev\.[a-f0-9]{17,})?$/.test(version ?? '') || version.length > 32) fail('build needs a valid Release Version within 32 characters');
   if (/^(workflowVersion|version): /m.test(markdown)) fail('the workflow source must not carry a version; package.json holds it');
   const blocks = {};

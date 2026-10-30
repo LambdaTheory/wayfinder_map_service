@@ -7,6 +7,7 @@ import { createMemoryAdapter, parseId, prepareApply, prepareCreate } from '../sr
 import type { ApplyRequest, Command, MapId, PreparedCommit, StateAdapter, StoredMapState } from '../src/index.js';
 import { sqliteLifecycleForTests } from '../src/sqlite-internal.js';
 import { initializeSQLite, openSQLite } from '../src/sqlite-storage.js';
+import { assertPrivate } from '../src/private-paths.js';
 
 const directories: string[] = [];
 function fixture() {
@@ -103,8 +104,8 @@ test('D02: new directory/database are private and production paths reject tempor
   const path = fixture();
   const lifecycle = sqliteLifecycleForTests();
   lifecycle.initialize(path);
-  expect(lstatSync(dirname(path)).mode & 0o777).toBe(0o700);
-  expect(lstatSync(path).mode & 0o777).toBe(0o600);
+  assertPrivate(dirname(path), true);
+  assertPrivate(path, false);
   expect(() => initializeSQLite('relative.sqlite')).toThrow();
   expect(() => initializeSQLite(join(process.cwd(), 'must-not-create.sqlite'))).toThrow();
   expect(existsSync(join(process.cwd(), 'must-not-create.sqlite'))).toBe(false);
@@ -114,7 +115,8 @@ test('D02: new directory/database are private and production paths reject tempor
   expect(existsSync(missing)).toBe(false);
 });
 
-test.each(['directory', 'database', 'symlink-file', 'symlink-directory'] as const)('D02: reject unsafe %s without fixing it', (kind) => {
+// Windows ACL/junction/hardlink refusals live in windows-security.test.ts.
+test.skipIf(process.platform === 'win32').each(['directory', 'database', 'symlink-file', 'symlink-directory'] as const)('D02: reject unsafe %s without fixing it', (kind) => {
   const path = fixture();
   const lifecycle = sqliteLifecycleForTests();
   lifecycle.initialize(path);
@@ -138,7 +140,7 @@ test('D02: WAL sidecars are private managed state while the connection is open',
   try {
     expect(observer.prepare('PRAGMA journal_mode').get()?.journal_mode).toBe('wal');
     for (const suffix of ['-wal', '-shm']) {
-      expect(lstatSync(path + suffix).mode & 0o777).toBe(0o600);
+      assertPrivate(path + suffix, false);
     }
   } finally { observer.close(); storage.close(); }
 });
@@ -160,7 +162,7 @@ test('D02: real Adapter connections verify WAL, FULL and 100 ms settings on init
   } finally { observer.mockRestore(); }
 });
 
-test('D02: mismatched operator identity refuses owned fixtures without changing state or history', async () => {
+test.skipIf(process.platform === 'win32')('D02: mismatched operator identity refuses owned fixtures without changing state or history', async () => {
   const path = fixture(); const lifecycle = sqliteLifecycleForTests(); lifecycle.initialize(path);
   const storage = lifecycle.open(path);
   await storage.adapter.commit(creation()); await storage.adapter.commit(creation('Other'));
@@ -432,7 +434,7 @@ test.each([0, 101, 1.5, NaN, null])('D09: invalid catalog limit %s is rejected w
   } finally { storage.close(); }
 });
 
-test.each(['unsafe', 'dangling-symlink'] as const)('D02: reject %s managed sidecar before opening or modifying the database', kind => {
+test.skipIf(process.platform === 'win32').each(['unsafe', 'dangling-symlink'] as const)('D02: reject %s managed sidecar before opening or modifying the database', kind => {
   const path = fixture(); const lifecycle = sqliteLifecycleForTests(); lifecycle.initialize(path);
   if (kind === 'unsafe') writeFileSync(path + '-wal', '', { mode: 0o644 });
   else symlinkSync(join(dirname(path), 'absent'), path + '-wal');
@@ -475,7 +477,7 @@ test('D03/D09: reopening preserves logical Claims and full Settlement history; m
   } finally { noAudit.close(); }
 });
 
-test.each(['initialize', 'open'] as const)('D02: %s rejects unsafe writable ancestors even when the immediate private directory is safe or missing', action => {
+test.skipIf(process.platform === 'win32').each(['initialize', 'open'] as const)('D02: %s rejects unsafe writable ancestors even when the immediate private directory is safe or missing', action => {
   const original = fixture(); const unsafe = join(dirname(dirname(original)), 'unsafe');
   mkdirSync(unsafe, { mode: 0o700 }); const path = join(unsafe, 'private', 'maps.sqlite');
   const lifecycle = sqliteLifecycleForTests();

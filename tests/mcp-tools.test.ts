@@ -219,7 +219,7 @@ test('W01/W02: initialization, generated tool guidance, Resources and side-effec
   for (const resource of listed.resources) {
     expect(resource).toMatchObject({ mimeType: 'text/markdown', _meta: { 'wayfinder/version': version } });
     expect(await f.client.readResource({ uri: resource.uri })).toEqual({ contents: [{ uri: resource.uri,
-      mimeType: 'text/markdown', text: `version: ${version}\n\n${readFileSync('docs/agents/exploration-mcp.md', 'utf8')}`,
+      mimeType: 'text/markdown', text: `version: ${version}\n\n${readFileSync('docs/agents/exploration-mcp.md', 'utf8').replace(/\r\n/g, '\n')}`,
       _meta: { 'wayfinder/version': version } }] });
   }
 
