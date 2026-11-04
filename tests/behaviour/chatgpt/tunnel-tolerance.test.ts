@@ -24,6 +24,26 @@ async function fixture() {
   } };
 }
 
+test('3500 ms tunnel info responses let start and check succeed without tolerance', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'tunnel-normal-latency-'));
+  const configPath = join(root, 'config.yml');
+  const delayPath = join(root, 'fake-info-delay-ms');
+  writeFileSync(configPath, `tunnel: ${randomUUID()}\ncredentials-file: ${join(root, 'unused.json')}\n`);
+  writeFileSync(delayPath, '3500'); // Every inspection is slow, including acquisition and startup.
+  const events: unknown[] = [];
+  const lease = await acquireTunnel({ root, dir: root, configPath, hostname: 'test.example.com', fake: true,
+    onUnavailable: event => events.push(event) });
+  try {
+    await lease.start(23456);
+    assert.equal(events.length, 0, 'normal startup latency must not consume tolerance');
+    await lease.check();
+    assert.equal(events.length, 0, 'a normal check must not consume tolerance');
+  } finally {
+    rmSync(delayPath, { force: true });
+    await lease.stop(); rmSync(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
 for (const action of ['error', 'invalid', 'timeout']) test(`single tunnel info ${action} is tolerated until a successful check`, async () => {
   const f = await fixture();
   try {
@@ -53,12 +73,50 @@ test('repeated timed-out inspections fail within the ten-second tolerance budget
     f.plan('timeout', 'timeout', 'timeout', 'timeout');
     const started = Date.now();
     await assert.rejects(f.lease.check(), /tolerance exhausted/);
-    assert.ok(Date.now() - started < 10_000, 'bounded retries must not stack fifteen-second subprocess timeouts');
-    assert.deepEqual(f.events.map(e => e.consecutive), [1, 2, 3]);
+    const elapsed = Date.now() - started;
+    // Allow timer/process-reaping jitter; an uncapped second five-second timeout
+    // plus the retry delay would exceed this bound. Only the first failure is tolerated.
+    assert.ok(elapsed >= 9500 && elapsed < 10_200, `shared ten-second deadline took ${elapsed} ms`);
+    assert.deepEqual(f.events.map(e => e.consecutive), [1]);
   } finally { await f.cleanup(); }
 }, 15_000);
 
-for (const state of ['foreign', 'missing', 'exit', 'local']) test(`${state} during tunnel info tolerance fails immediately`, async () => {
+test('a timed-out inspection can recover with a normal 3500 ms response inside the shared deadline', async () => {
+  const f = await fixture();
+  const delayPath = join(f.root, 'fake-info-delay-ms');
+  try {
+    writeFileSync(delayPath, '3500');
+    f.plan('timeout');
+    const started = Date.now();
+    await f.lease.check();
+    assert.ok(Date.now() - started < 10_000);
+    assert.equal(f.events.length, 1);
+    assert.match(f.events[0]!.summary, /timed out/);
+  } finally { rmSync(delayPath, { force: true }); await f.cleanup(); }
+}, 20_000);
+
+test('child exit interrupts an in-flight hung inspection without waiting for its timeout', async () => {
+  const f = await fixture();
+  try {
+    f.plan('timeout');
+    const count = () => readFileSync(join(f.root, 'fake-info-calls'), 'utf8').trim().split('\n').length;
+    const before = count();
+    const checking = assert.rejects(f.lease.check(), /not running|exited/);
+    const deadline = Date.now() + 2000;
+    while (count() === before) {
+      assert.ok(Date.now() < deadline, 'inspection did not start');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    const { pid } = JSON.parse(readFileSync(join(f.root, 'fake-run.json'), 'utf8'));
+    const killedAt = Date.now();
+    process.kill(pid, 'SIGTERM');
+    await checking;
+    assert.ok(Date.now() - killedAt < 1000);
+    assert.equal(f.events.length, 0);
+  } finally { await f.cleanup(); }
+});
+
+for (const state of ['foreign', 'missing', 'identity', 'exit', 'local']) test(`${state} during tunnel info tolerance fails immediately`, async () => {
   const f = await fixture();
   try {
     f.options.onUnavailable = event => {
@@ -66,7 +124,8 @@ for (const state of ['foreign', 'missing', 'exit', 'local']) test(`${state} duri
       if (state === 'exit') {
         const { pid } = JSON.parse(readFileSync(join(f.root, 'fake-run.json'), 'utf8'));
         process.kill(pid, 'SIGTERM');
-      } else if (state === 'local') f.options.fakeProcesses = '42 cloudflared tunnel run opencode';
+      } else if (state === 'identity') f.plan('identity');
+      else if (state === 'local') f.options.fakeProcesses = '42 cloudflared tunnel run opencode';
       else {
         const path = join(f.root, 'fake-connector.json');
         const own = JSON.parse(readFileSync(path, 'utf8'));

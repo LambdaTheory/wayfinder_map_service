@@ -6,7 +6,7 @@ Unreleased collects pending changes; each numbered section is one release. Since
 
 ## Unreleased
 
-- Test tooling (#128): tolerate up to three consecutive unavailable ChatGPT tunnel inspections within ten seconds after confirmed exclusive ownership, holding begin/relay forwarding until confirmation; preserve immediate ownership-loss failures and record sanitized retry diagnostics. Require operator confirmation and Batch evidence of disabled ChatGPT memory/history reference or verified chat isolation after F11-1 cross-chat contamination. Real ChatGPT verification remains pending; no release version change.
+- Test tooling (#128): tolerate up to three consecutive unavailable ChatGPT tunnel inspections within ten seconds after confirmed exclusive ownership, using a five-second inspection cap clipped to the remaining shared deadline (successful 3.5-second inspections consume no tolerance), holding begin/relay forwarding until confirmation; preserve immediate ownership-loss failures and record sanitized retry diagnostics. Require operator confirmation and Batch evidence of disabled ChatGPT memory/history reference or verified chat isolation after F11-1 cross-chat contamination. Real ChatGPT verification remains pending; no release version change.
 
 - Minor: batch shipped changes into a daily release train (or release when Kun requests), keeping ordinary PRs on the last package version; rule changes including mandatory rules are minor, incompatible interfaces/storage formats major, and behavior-preserving fixes patch. Unreleased/release checks replace per-PR bumps; development builds report a distinct Release Version across all surfaces and test seeds, and each everyday service upgrade requires Kun's direct approval.
 

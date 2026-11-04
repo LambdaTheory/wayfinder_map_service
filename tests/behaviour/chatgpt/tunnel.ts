@@ -111,6 +111,9 @@ export interface TunnelInfoFailure {
 // Fixed diagnostic categories prevent subprocess stderr, argv or credentials entering evidence.
 class TunnelInfoUnavailable extends Error {}
 const toleranceMs = 10_000;
+// Kun measured 1.99–3.22 s for successful real inspections; leave headroom without
+// letting a retry outlive the shared ten-second check deadline.
+const inspectionTimeoutMs = 5000;
 const toleratedFailures = 3;
 
 export interface TunnelLease {
@@ -240,7 +243,7 @@ export async function acquireTunnel(options: { root: string; dir: string; config
       await checkLocal();
       let ids: string[];
       try {
-        ids = await remote(Math.min(2000, remaining()), true);
+        ids = await remote(Math.min(inspectionTimeoutMs, remaining()), true);
       } catch (error) {
         alive();
         await checkLocal();
