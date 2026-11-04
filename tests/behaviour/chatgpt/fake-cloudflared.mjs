@@ -14,6 +14,20 @@ const info = () => ({ id: config.tunnel, name: 'opencode', conns: existsSync(sta
 if (argv.includes('info')) {
   // Count inspections without retaining arguments or configuration contents.
   appendFileSync(join(dirname(statePath), 'fake-info-calls'), 'info\n');
+  const delayPath = join(dirname(statePath), 'fake-info-delay-ms');
+  if (existsSync(delayPath)) {
+    const delay = Number(readFileSync(delayPath, 'utf8'));
+    if (!Number.isInteger(delay) || delay < 0 || delay > 20_000) process.exit(4);
+    await new Promise(resolve => setTimeout(resolve, delay));
+  }
+  const planPath = join(dirname(statePath), 'fake-info-plan.json');
+  const plan = existsSync(planPath) ? JSON.parse(readFileSync(planPath, 'utf8')) : [];
+  const action = plan.shift();
+  if (action) writeFileSync(planPath, JSON.stringify(plan));
+  if (action === 'error') { console.error('synthetic-secret credential diagnostic'); process.exit(2); }
+  if (action === 'invalid') { console.log('synthetic-secret invalid JSON'); process.exit(0); }
+  if (action === 'identity') { console.log(JSON.stringify({ ...info(), id: '33333333-3333-4333-8333-333333333333' })); process.exit(0); }
+  if (action === 'timeout') await new Promise(resolve => setTimeout(resolve, 20_000));
   console.log(JSON.stringify(info()));
 } else if (argv.includes('run')) {
   if (existsSync(join(dirname(statePath), 'fail-start'))) process.exit(2);

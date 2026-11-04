@@ -17,6 +17,7 @@ import { upgradeChecks } from '../upgrade-checks.ts';
 import { observeIsolation } from './isolation.ts';
 import type { Scenario } from '../scenario.ts';
 import { startRelay } from './relay.ts';
+import type { TunnelInfoFailure } from './tunnel.ts';
 import type { Exchange, RefusalReason, Relay, RelayRefusalEvent } from './relay.ts';
 import { writeCanaryCheckout } from '../../helpers/canary-release.mjs';
 
@@ -57,7 +58,7 @@ export interface RelayRefusalSummary {
 }
 /** Driver diagnostics do not add events or affect the shared Scenario verdicts. */
 export interface ChatGPTAttemptRecord extends AttemptRecord {
-  diagnostics: { relayRefusals: RelayRefusalSummary };
+  diagnostics: { relayRefusals: RelayRefusalSummary; tunnelInfo: { path: 'raw/tunnel-info-failures.jsonl'; tolerated: number } };
 }
 const emptyRefusalSummary = (): RelayRefusalSummary => ({ path: 'raw/relay-refusals.jsonl', total: 0,
   byReason: {}, byStatus: {}, withinTurn: 0, outsideTurn: 0 });
@@ -101,7 +102,7 @@ export class ChatGPTAttempt {
       sessions: [...new Set(options.scenario.turns.map(t => t.session))].map(label => ({ label, nativeId: unknown('not captured'), clientId: `${options.attemptId}.${label}`,
         mcpSessionIds: { known: true, value: [] }, turns: [] })), events: [], maps: [], receipts: [], usage: unknown('ChatGPT does not expose usage here'),
       raw: { path: `${options.attemptId}/raw`, files: [] }, missing: ['events.message', 'chatgpt.otherToolCalls', 'combination.visibleModel', 'client.version'],
-      diagnostics: { relayRefusals: emptyRefusalSummary() } };
+      diagnostics: { relayRefusals: emptyRefusalSummary(), tunnelInfo: { path: 'raw/tunnel-info-failures.jsonl', tolerated: 0 } } };
   }
 
   static async start(options: {
@@ -112,6 +113,8 @@ export class ChatGPTAttempt {
     try {
       writeFileSync(join(a.dir, a.record.diagnostics.relayRefusals.path), '', { mode: 0o600, flag: 'wx', flush: true });
       a.record.raw.files.push('relay-refusals.jsonl');
+      writeFileSync(join(a.dir, a.record.diagnostics.tunnelInfo.path), '', { mode: 0o600, flag: 'wx', flush: true });
+      a.record.raw.files.push('tunnel-info-failures.jsonl');
       const { initializeSQLite } = await import(pathToFileURL(join(checkoutRoot, 'dist/sqlite-storage.js')).href) as { initializeSQLite(path: string): void };
       const existedBefore = existsSync(a.databasePath);
       initializeSQLite(a.databasePath);
@@ -180,6 +183,12 @@ export class ChatGPTAttempt {
       kind: 'tool-call', callId: e.id, server: 'wayfinder', tool: params.name, arguments: params.arguments ?? {},
       result: reply?.result?.structuredContent === undefined ? unknown(`no structured result (HTTP ${e.status})`) : { known: true, value: reply.result.structuredContent },
       failed: e.status >= 400 || reply?.result?.isError === true, requestId: { known: true, value: String(e.request.id) } });
+    this.persist();
+  }
+
+  tunnelInfoUnavailable(event: TunnelInfoFailure) {
+    appendFileSync(join(this.dir, this.record.diagnostics.tunnelInfo.path), JSON.stringify(event) + '\n', { mode: 0o600, flush: true });
+    this.record.diagnostics.tunnelInfo.tolerated++;
     this.persist();
   }
 
@@ -343,7 +352,7 @@ export class ChatGPTAttempt {
   }
 
   operator(action: string) {
-    if (!['refresh-tools', 'new-chat', 'plugin-mentioned'].includes(action)) throw new Error('Unknown operator action');
+    if (!['refresh-tools', 'new-chat', 'plugin-mentioned', 'chat-isolation'].includes(action)) throw new Error('Unknown operator action');
     if (this.activeTurn !== null) throw new Error('Record preparation actions before begin');
     this.record.events.push({ seq: this.record.events.length, at: now(), actor: 'controller', session: null, turn: null, kind: 'controller', action });
     if (action === 'new-chat' && this.upgraded && this.upgradeRecovery === 'new-chat') {

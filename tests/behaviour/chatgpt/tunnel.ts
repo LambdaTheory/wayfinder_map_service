@@ -83,8 +83,8 @@ export function hasLocalConnector(stdout: string, target: LocalTunnelTarget, own
       || /(?:^|\s|\/)node(?:\s+[^\n]*?)?\s+(?:[^\s]*\/)?scripts\/local-chatgpt-test\.mjs(?:\s|$)/.test(command);
   });
 }
-export async function assertNoLocalConnector(target: LocalTunnelTarget, ownPid?: number, fakeProcesses?: string) {
-  const stdout = fakeProcesses ?? (await exec('ps', ['-axo', 'pid=,command='], { timeout: 5000 })).stdout;
+export async function assertNoLocalConnector(target: LocalTunnelTarget, ownPid?: number, fakeProcesses?: string, timeout = 5000) {
+  const stdout = fakeProcesses ?? (await exec('ps', ['-axo', 'pid=,command='], { timeout })).stdout;
   // Never print process command lines: another process can carry a secret in argv.
   if (hasLocalConnector(stdout, target, ownPid)) throw new Error('Another local tunnel connector or daily ChatGPT runner is active; ask its operator to stop it');
 }
@@ -103,6 +103,19 @@ export function connectorsFrom(text: string, id: string): string[] {
   return ids;
 }
 
+export interface TunnelInfoFailure {
+  at: string;
+  consecutive: number;
+  summary: string;
+}
+// Fixed diagnostic categories prevent subprocess stderr, argv or credentials entering evidence.
+class TunnelInfoUnavailable extends Error {}
+const toleranceMs = 10_000;
+// Kun measured 1.99–3.22 s for successful real inspections; leave headroom without
+// letting a retry outlive the shared ten-second check deadline.
+const inspectionTimeoutMs = 5000;
+const toleratedFailures = 3;
+
 export interface TunnelLease {
   config: TunnelConfig;
   start(relayPort: number): Promise<void>;
@@ -112,7 +125,7 @@ export interface TunnelLease {
 }
 
 export const fakeExecutable = fileURLToPath(new URL('./fake-cloudflared.mjs', import.meta.url));
-export async function acquireTunnel(options: { root: string; dir: string; configPath: string; hostname: string; fake?: boolean; fakeProcesses?: string }): Promise<TunnelLease> {
+export async function acquireTunnel(options: { root: string; dir: string; configPath: string; hostname: string; fake?: boolean; fakeProcesses?: string; onUnavailable?: (event: TunnelInfoFailure) => void }): Promise<TunnelLease> {
   if (!/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9-]+$/i.test(options.hostname)) throw new Error('Expected the existing connector hostname, without a scheme or path');
   const config = readTunnelConfig(options.configPath);
   if (options.fake) {
@@ -125,8 +138,8 @@ export async function acquireTunnel(options: { root: string; dir: string; config
   // No arbitrary executable or bypass switch: fake mode always runs the checked-in non-networking double.
   const executable = options.fake ? fakeExecutable : '/opt/homebrew/bin/cloudflared';
   // Synthetic process inventories apply only to the non-networking fake; real runs always query ps.
-  const localCheck = (ownPid?: number) => assertNoLocalConnector({ ...config, configPath: options.configPath }, ownPid,
-    options.fake ? options.fakeProcesses ?? '' : undefined);
+  const localCheck = (ownPid?: number, timeout?: number) => assertNoLocalConnector({ ...config, configPath: options.configPath }, ownPid,
+    options.fake ? options.fakeProcesses ?? '' : undefined, timeout);
   const lock = join(options.root, `opencode-${config.id}.lock`);
   // No stale-lock stealing: a lost owner must be investigated before another connector starts.
   try { mkdirSync(lock, { mode: 0o700 }); }
@@ -138,6 +151,7 @@ export async function acquireTunnel(options: { root: string; dir: string; config
   let child: ChildProcess | undefined;
   let exited: Promise<void> | undefined;
   let connectorId: string | undefined;
+  let confirmedOwn = false;
   let stopped = false;
   const cleanupFiles = () => { rmSync(configPath, { force: true }); rmSync(lock, { recursive: true, force: true }); };
   const stopSync = () => {
@@ -155,12 +169,29 @@ export async function acquireTunnel(options: { root: string; dir: string; config
     } finally { cleanupFiles(); }
   };
   process.on('exit', stopSync);
-  const remote = async () => {
+  const remote = async (timeout = 15_000, watchChild = false) => {
+    const controller = new AbortController();
+    const onExit = () => controller.abort();
+    if (watchChild) child!.once('exit', onExit);
+    let stdout: string;
     try {
-      const { stdout } = await exec(executable, ['tunnel', '--config', options.configPath, 'info', '--output', 'json', config.id],
-        { env: childEnv(), timeout: 15_000, maxBuffer: 1024 * 1024 });
-      return connectorsFrom(stdout, config.id);
-    } catch { throw new Error('Cannot confirm exclusive opencode ownership with cloudflared tunnel info'); }
+      ({ stdout } = await exec(executable, ['tunnel', '--config', options.configPath, 'info', '--output', 'json', config.id],
+        { env: childEnv(), timeout, signal: controller.signal, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 }));
+    } catch (error) {
+      throw new TunnelInfoUnavailable((error as { killed?: boolean }).killed
+        ? 'cloudflared tunnel info timed out' : 'cloudflared tunnel info command failed');
+    } finally { if (watchChild) child!.removeListener('exit', onExit); }
+    let info: { id?: unknown; name?: unknown } | null;
+    try { info = JSON.parse(stdout); }
+    catch { throw new TunnelInfoUnavailable('cloudflared tunnel info output is not JSON'); }
+    // A positive response identifying another tunnel is never a transient inspection failure.
+    if (info && (typeof info.id === 'string' && info.id.toLowerCase() !== config.id.toLowerCase()
+      || typeof info.name === 'string' && info.name !== 'opencode')) {
+      confirmedOwn = false;
+      throw new Error('Exclusive tunnel ownership lost or unverifiable');
+    }
+    try { return connectorsFrom(stdout, config.id); }
+    catch { throw new TunnelInfoUnavailable('cloudflared tunnel info output is not a connector inventory'); }
   };
   let stopping: Promise<void> | undefined;
   const stop = async () => stopping ??= (async () => {
@@ -194,11 +225,47 @@ export async function acquireTunnel(options: { root: string; dir: string; config
   // A turn and the monitor can overlap. Share one in-flight inspection and its outcome.
   // Diagnostic subprocesses are excluded by their action, independently of this sharing.
   let checking: Promise<void> | undefined;
+  const alive = () => {
+    if (stopped || !child?.pid || child.exitCode !== null || child.signalCode !== null)
+      throw new Error('Tunnel is not running');
+  };
   const check = () => checking ??= (async () => {
-    if (stopped || !child?.pid || child.exitCode !== null || child.signalCode !== null) throw new Error('Tunnel is not running');
-    await localCheck(child.pid);
-    const ids = await remote();
-    if (ids.length !== 1 || ids[0] !== connectorId) throw new Error('Exclusive tunnel ownership lost or unverifiable');
+    const deadline = Date.now() + toleranceMs;
+    let consecutive = 0;
+    const remaining = () => {
+      const ms = deadline - Date.now();
+      if (ms <= 0) throw new Error('cloudflared tunnel info tolerance exhausted');
+      return ms;
+    };
+    const checkLocal = () => localCheck(child!.pid, Math.min(5000, remaining()));
+    while (true) {
+      alive();
+      await checkLocal();
+      let ids: string[];
+      try {
+        ids = await remote(Math.min(inspectionTimeoutMs, remaining()), true);
+      } catch (error) {
+        alive();
+        await checkLocal();
+        if (!(error instanceof TunnelInfoUnavailable) || !confirmedOwn) throw error;
+        consecutive++;
+        if (consecutive > toleratedFailures || Date.now() >= deadline)
+          throw new Error('Cannot confirm exclusive opencode ownership with cloudflared tunnel info: tolerance exhausted');
+        options.onUnavailable?.({ at: new Date().toISOString(), consecutive, summary: error.message });
+        await new Promise(resolve => setTimeout(resolve, Math.min(250, Math.max(0, deadline - Date.now()))));
+        if (Date.now() >= deadline) throw new Error('cloudflared tunnel info tolerance exhausted');
+        continue;
+      }
+      alive();
+      await checkLocal();
+      if (ids.length !== 1 || ids[0] !== connectorId) {
+        confirmedOwn = false;
+        throw new Error('Exclusive tunnel ownership lost or unverifiable');
+      }
+      remaining();
+      confirmedOwn = true;
+      return;
+    }
   })().finally(() => { checking = undefined; });
   return { config,
     async start(relayPort) {
@@ -228,7 +295,11 @@ export async function acquireTunnel(options: { root: string; dir: string; config
       const deadline = Date.now() + 5000;
       while (true) {
         const ids = await remote();
-        if (ids.length) { await check(); break; }
+        if (ids.length) {
+          if (ids.length !== 1 || ids[0] !== connectorId) throw new Error('Exclusive tunnel ownership lost or unverifiable');
+          confirmedOwn = true;
+          await check(); break;
+        }
         if (Date.now() >= deadline) throw new Error('Registered connector never became visible in the tunnel inventory');
         await new Promise(resolve => setTimeout(resolve, 100));
       }
