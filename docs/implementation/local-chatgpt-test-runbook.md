@@ -2,6 +2,8 @@
 
 For isolated **behaviour Scenarios**, use the [B09a Batch command](../../tests/behaviour/chatgpt/README.md). It creates fresh databases on independent ports and leaves the daily local service running. Its approval still covers app/window takeover and exclusive use of the existing tunnel hostname. The workflow below remains the existing daily/legacy acceptance procedure; it is not evidence of B09a runner isolation. Real B09a ChatGPT acceptance is pending.
 
+For every ChatGPT behaviour Batch, the operator must confirm that **ChatGPT memory and reference chat history are both disabled**, or verify another effective chat-isolation method. Temporary chats require prior verification that developer connectors work there; a fresh ordinary chat alone does not establish isolation. In `B09a-app-20261027e/F11-1`, ChatGPT quoted S1's opening from another chat, contaminating the evidence. Follow the Batch checklist: preserve settings or verified-method evidence in each Attempt's private `raw/chat-isolation.md` and record `did chat-isolation` before `begin`. Keep account details and secrets out of that evidence. Real settings and connector compatibility must be verified by the operator; fake-tunnel engineering checks cannot confirm them.
+
 This is a durable **local test-data** workflow, not the production Dokploy/OAuth/PostgreSQL deployment. The existing private SQLite database remains authoritative. The foreground connection is started by the operator and stays up until Ctrl-C, SIGTERM, or SIGHUP; it does not create, reset, or replace a database and it has no two-hour timeout or login auto-start.
 
 From the repository with pinned Node.js 26.3.0:

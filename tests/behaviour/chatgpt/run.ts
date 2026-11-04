@@ -59,6 +59,7 @@ export async function runBatch(options: Options, input: AsyncIterable<string>, l
       const record = item.record ? JSON.parse(readFileSync(join(dir, item.record), 'utf8')) as ChatGPTAttemptRecord : null;
       return { attemptId: item.attemptId, missing: record ? record.missing : ['Attempt not recorded'],
         phases: clientVisibility(record), surface: options.surface,
+        tunnelInfo: record?.diagnostics?.tunnelInfo ?? { known: false, reason: 'Tunnel diagnostics not recorded' },
         relayRefusals: record?.diagnostics?.relayRefusals ?? { known: false, reason: 'Relay refusal diagnostics not recorded' } };
     });
     writeFileSync(join(dir, 'report.json'), JSON.stringify({ ...report, chatgptAcceptance: { fakeTunnel: options.fake, surfaces: batch.surfaces, visibility, humanVerdict: 'pending' } }, null, 2), { mode: 0o600 });
@@ -69,6 +70,8 @@ export async function runBatch(options: Options, input: AsyncIterable<string>, l
       + visibility.map(v => `- ${v.attemptId}: ${'total' in v.relayRefusals
         ? `${v.relayRefusals.total} refused; reasons: ${Object.entries(v.relayRefusals.byReason).map(([reason, count]) => `${reason}=${count}`).join(', ') || 'none'}; HTTP: ${Object.entries(v.relayRefusals.byStatus).map(([status, count]) => `${status}=${count}`).join(', ') || 'none'}; within turn=${v.relayRefusals.withinTurn}, outside turn=${v.relayRefusals.outsideTurn}; ${v.attemptId}/${v.relayRefusals.path}`
         : 'unknown (no recorded diagnostics)'}`).join('\n') + '\n\n'
+      + '### Tunnel info tolerance diagnostics\n\n'
+      + visibility.map(v => `- ${v.attemptId}: ${'tolerated' in v.tunnelInfo ? `${v.tunnelInfo.tolerated} tolerated failures; ${v.attemptId}/${v.tunnelInfo.path}` : 'unknown (not recorded)'}`).join('\n') + '\n\n'
       + `Fake tunnel: ${options.fake}. Fake runs never count as ChatGPT acceptance.\n\n`
       + 'These are Scenario verdicts, not final B09a acceptance. The initial five, both upgrade checks, onboarding evidence, any missing native records and Kun’s verdict remain explicit acceptance gates. The full human journey belongs to B09c.\n', { mode: 0o600 });
   };
@@ -112,17 +115,19 @@ export async function runBatch(options: Options, input: AsyncIterable<string>, l
     const item = batch.outcomes[index];
     if (!item || cancelled || index >= options.ceiling) { finished = true; return; }
     try {
-      tunnel = await acquireTunnel({ root: runRoot, dir, hostname: options.hostname, configPath: options.configPath, fake: options.fake });
+      tunnel = await acquireTunnel({ root: runRoot, dir, hostname: options.hostname, configPath: options.configPath, fake: options.fake,
+        onUnavailable: event => attempt?.tunnelInfoUnavailable(event) });
       if (cancelled) return;
       attempt = await ChatGPTAttempt.start({ dir: join(dir, item.attemptId), batchId: options.batch, attemptId: item.attemptId,
         scenario: scenarios.find(s => s.id === item.scenario)!, surface: options.surface, model: options.model, commit, version });
-      if (cancelled) return;
-      await tunnel.start(attempt.relay.port);
       if (cancelled) return;
       const current = tunnel;
       const check = () => current.check(); // The lease shares concurrent inspections, including direct begin calls.
       attempt.relay.beforeForward = check;
       attempt.relay.onFailure = error => fail(error, 'relay-or-ownership-failure');
+      // Install admission before publishing the tunnel, including startup inspection retries.
+      await tunnel.start(attempt.relay.port);
+      if (cancelled) return;
       timer = setInterval(() => {
         if (monitoring || tunnel !== current) return;
         monitoring = true;

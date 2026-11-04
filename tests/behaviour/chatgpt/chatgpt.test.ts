@@ -218,11 +218,40 @@ async function cliFixture(fault?: 'throw' | 'reject' | 'exit', scenarios = 'F11'
     port: JSON.parse(readFileSync(join(batchDir, 'F11-1/raw/isolation.json'), 'utf8')).relayPort as number };
 }
 
+test('begin waits for tunnel info recovery and raw diagnostics and isolation confirmation reach reports', async () => {
+  const f = await cliFixture();
+  try {
+    writeFileSync(join(f.root, 'fake-info-plan.json'), JSON.stringify(['timeout']));
+    f.child.stdin.write('did chat-isolation\nbegin\n');
+    await f.waitFor(/Recorded operator action: chat-isolation/);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.doesNotMatch(f.output(), /Send this Scenario message/);
+    await f.waitFor(/Send this Scenario message/);
+    const raw = join(f.batchDir, 'F11-1/raw/tunnel-info-failures.jsonl');
+    const events = readFileSync(raw, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.equal(events.length, 1);
+    assert.equal(events[0].consecutive, 1);
+    assert.match(events[0].summary, /timed out/);
+    assert.equal(statSync(raw).mode & 0o777, 0o600);
+    f.child.stdin.write('stop\n'); await f.exited;
+    assert.equal(f.child.exitCode, 0, f.output());
+    const record = JSON.parse(readFileSync(join(f.batchDir, 'F11-1/attempt.json'), 'utf8'));
+    assert.equal(record.diagnostics.tunnelInfo.tolerated, 1);
+    assert.ok(record.events.some((e: { action?: string }) => e.action === 'chat-isolation'));
+    const report = JSON.parse(readFileSync(join(f.batchDir, 'report.json'), 'utf8'));
+    assert.equal(report.chatgptAcceptance.visibility[0].tunnelInfo.tolerated, 1);
+    assert.match(readFileSync(join(f.batchDir, 'report.md'), 'utf8'), /1 tolerated failures/);
+  } finally { await f.cleanup(); }
+}, 30_000);
+
 test('checklist selects the initial five without injecting version or controller text into messages', () => {
   const scenarios = selectScenarios(initialFive);
   const text = checklist(scenarios, 'app', 1, 'fake');
   for (const s of scenarios) for (const t of s.turns) assert.ok(text.includes(t.say));
   assert.match(text, /daily ChatGPT routing is unavailable/);
+  assert.match(text, /memory and reference chat history are both disabled/);
+  assert.match(text, /did chat-isolation/);
+  assert.match(text, /F11-1/);
   assert.match(text, /before.*proposal|actual proposal/);
   assert.throws(() => selectScenarios(['W5']), /unsupported|does not yet support/);
   assert.throws(() => selectScenarios(['S5', 'S5']), /distinct/);

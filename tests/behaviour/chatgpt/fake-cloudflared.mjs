@@ -14,6 +14,13 @@ const info = () => ({ id: config.tunnel, name: 'opencode', conns: existsSync(sta
 if (argv.includes('info')) {
   // Count inspections without retaining arguments or configuration contents.
   appendFileSync(join(dirname(statePath), 'fake-info-calls'), 'info\n');
+  const planPath = join(dirname(statePath), 'fake-info-plan.json');
+  const plan = existsSync(planPath) ? JSON.parse(readFileSync(planPath, 'utf8')) : [];
+  const action = plan.shift();
+  if (action) writeFileSync(planPath, JSON.stringify(plan));
+  if (action === 'error') { console.error('synthetic-secret credential diagnostic'); process.exit(2); }
+  if (action === 'invalid') { console.log('synthetic-secret invalid JSON'); process.exit(0); }
+  if (action === 'timeout') await new Promise(resolve => setTimeout(resolve, 20_000));
   console.log(JSON.stringify(info()));
 } else if (argv.includes('run')) {
   if (existsSync(join(dirname(statePath), 'fail-start'))) process.exit(2);
